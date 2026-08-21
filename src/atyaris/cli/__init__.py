@@ -1,0 +1,1 @@
+"""Kullanici arayuzu katmani (CLI)."""

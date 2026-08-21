@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/?source={{ source }}&date={{ date }}&city={{ city }}">&larr; Bultene don</a></p>
+
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+{% if prediction %}
+  {% set race = prediction.race %}
+  {% set rows = rows if rows else prediction.ranked %}
+  <h2>{{ race.hippodrome }} - {{ race.race_no }}. Kosu ({{ race.distance_m }}m, {{ race.surface.value }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Sira</th>
+        <th><a href="{{ sort_urls.number }}">No{% if sort_by == 'number' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>At</th>
+        <th>Jokey</th>
+        <th><a href="{{ sort_urls.total }}">Toplam{% if sort_by == 'total' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.form }}">Form{% if sort_by == 'form' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.jockey_trainer }}">Jokey{% if sort_by == 'jockey_trainer' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.distance_surface }}">Pist{% if sort_by == 'distance_surface' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.weight }}">Ağırlık{% if sort_by == 'weight' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.rest }}">Dinlenme{% if sort_by == 'rest' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>Durum</th>
+        <th>Etiket</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ row.entry.number }}</td>
+        <td>{{ row.entry.horse_name }}</td>
+        <td>{{ row.entry.jockey.name }}</td>
+        <td>{% if row.score %}{{ row.score.total_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.score %}{{ row.score.form_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.score %}{{ row.score.jockey_trainer_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.score %}{{ row.score.distance_surface_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.score %}{{ row.score.weight_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.score %}{{ row.score.rest_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.is_scratched %}Koşmaz{% else %}Aktif{% endif %}</td>
+        <td><span class="tag">{{ row.tag }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% for row in rows if not row.is_scratched %}
+    <h3>{{ row.entry.number }}. {{ row.entry.horse_name }} ({{ row.tag }}, skor {{ row.score.total_score }}/100)</h3>
+    <ul class="reasoning">
+      {% for bullet in row.reasoning %}
+        <li>{{ bullet }}</li>
+      {% endfor %}
+    </ul>
+  {% endfor %}
+
+  <p class="disclaimer">{{ prediction.disclaimer }}</p>
+{% endif %}
+{% endblock %}

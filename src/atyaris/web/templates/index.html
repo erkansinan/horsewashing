@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<form id="bulletin-filters" class="filters" method="get" action="/">
+  <label>Kaynak
+    <select id="filter-source" name="source">
+      <option value="sample" {% if source == "sample" %}selected{% endif %}>sample (demo)</option>
+      <option value="tjk" {% if source == "tjk" %}selected{% endif %}>tjk (canli)</option>
+    </select>
+  </label>
+  <label>Tarih
+    <input id="filter-date" type="date" name="date" value="{{ date }}">
+  </label>
+  <label>Hipodrom
+    <select id="filter-city" name="city">
+      <option value="" {% if not city %}selected{% endif %}>Tumu</option>
+      {% for h in hippodromes %}
+      <option value="{{ h }}" {% if city == h %}selected{% endif %}>{{ h }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Bulteni Getir</button>
+</form>
+
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+{% if info and not error %}
+  <p>{{ info }}</p>
+{% endif %}
+
+{% if races %}
+  <h2>Gunun Yarislari</h2>
+  {% if city %}
+  <p>
+    <a class="button" href="/predict-all-pdf?source={{ source }}&date={{ date }}&city={{ city }}">Tum Kosularin PDF Tahmin Raporu</a>
+  </p>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>Hipodrom</th><th>Kosu</th><th>Saat</th><th>Mesafe</th><th>Pist</th>
+        <th>Grup/Ikramiye</th><th>Atlar</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for race in races %}
+      <tr>
+        <td>{{ race.hippodrome }}</td>
+        <td>{{ race.race_no }}</td>
+        <td>{{ race.start_time.strftime("%H:%M") }}</td>
+        <td>{{ race.distance_m }}m</td>
+        <td>{{ race.surface.value }}</td>
+        <td>{{ [race.group_info, race.prize_info] | select | join(" / ") or "-" }}</td>
+        <td class="horse-list">
+          {% for entry in race.entries %}
+            {{ entry.number }}-{{ entry.horse_name }}{% if entry.is_scratched %} (Koşmaz){% endif %}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </td>
+        <td>
+          <a class="button" href="/predict?race_id={{ race.id }}&source={{ source }}&date={{ date }}&city={{ city }}">Tahmin Uret</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% elif not error %}
+  <p>Filtreleri secip "Bulteni Getir" ile o gunku yaris programini listeleyin.</p>
+{% endif %}
+
+<script>
+  (function () {
+    const form = document.getElementById("bulletin-filters");
+    const source = document.getElementById("filter-source");
+    const dateInput = document.getElementById("filter-date");
+    const city = document.getElementById("filter-city");
+    if (!form || !source || !dateInput || !city) {
+      return;
+    }
+
+    const refreshHippodromes = () => {
+      city.value = "";
+      form.submit();
+    };
+
+    source.addEventListener("change", refreshHippodromes);
+    dateInput.addEventListener("change", refreshHippodromes);
+  })();
+</script>
+{% endblock %}

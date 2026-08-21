@@ -1,0 +1,14 @@
+tjk_base_url: "https://www.tjk.org"
+request_timeout_seconds: 15
+min_request_interval_seconds: 1.0
+cache_ttl_seconds: 600
+cache_path: ".cache/atyaris_cache.sqlite3"
+recent_form_window: 8
+ideal_rest_days_min: 14
+ideal_rest_days_max: 45
+weights:
+  form: 0.30
+  jockey_trainer: 0.20
+  distance_surface: 0.20
+  weight: 0.15
+  rest: 0.15

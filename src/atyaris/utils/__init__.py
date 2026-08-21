@@ -1,0 +1,1 @@
+"""Yardimci fonksiyonlar."""
