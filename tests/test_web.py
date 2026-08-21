@@ -6,7 +6,9 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi.testclient import TestClient
+import atyaris.web.app as web_app_module
 
+from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.sample_source import SampleDataSource
 from atyaris.web.app import create_app
 
@@ -47,3 +49,23 @@ def test_predict_with_unknown_race_id_shows_error() -> None:
     response = client.get("/predict", params={"race_id": "bilinmeyen-id", "source": "sample"})
     assert response.status_code == 200
     assert "Yaris bulunamadi" in response.text
+
+
+def test_predict_does_not_mark_active_entries_as_scratched_when_stats_missing(monkeypatch) -> None:
+    class PartialStatsSource(SampleDataSource):
+        def get_horse_statistics(self, entry):  # type: ignore[override,no-untyped-def]
+            if entry.number == 1:
+                raise DataSourceError("istatistik gecici olarak alinmadi")
+            return super().get_horse_statistics(entry)
+
+    source = PartialStatsSource()
+    race = source.get_daily_races(date.today())[0]
+
+    monkeypatch.setattr(web_app_module, "build_data_source", lambda source_name, settings: source)
+
+    client = _client()
+    response = client.get("/predict", params={"race_id": race.id, "source": "sample"})
+
+    assert response.status_code == 200
+    assert "Veri Eksik" in response.text
+    assert "Bu at kosmaz (scratch) olarak isaretli." not in response.text

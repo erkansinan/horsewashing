@@ -112,6 +112,11 @@ def create_app() -> FastAPI:
         display_rows = []
         sort_urls: dict[str, str] = {}
 
+        def _entry_key(entry) -> str:  # type: ignore[no-untyped-def]
+            if entry.source_horse_id is not None:
+                return f"source:{entry.source_horse_id}"
+            return f"horse:{entry.horse_id}"
+
         def _build_predict_url(*, sort_field: str, sort_direction: str) -> str:
             return "/predict?" + urlencode(
                 {
@@ -144,7 +149,7 @@ def create_app() -> FastAPI:
                     "rest": lambda hp: hp.score.rest_score,
                 }
                 reverse = sort_order == "desc"
-                ranked_by_id = {hp.entry.horse_id: hp for hp in prediction.ranked}
+                ranked_by_key = {_entry_key(hp.entry): hp for hp in prediction.ranked}
                 active_rows = [
                     SimpleNamespace(
                         entry=hp.entry,
@@ -155,6 +160,19 @@ def create_app() -> FastAPI:
                     )
                     for hp in prediction.ranked
                 ]
+
+                unscored_active_rows = [
+                    SimpleNamespace(
+                        entry=entry,
+                        score=None,
+                        reasoning=["Bu at aktif durumda; ancak istatistik verisi alinamadigi icin skorlanamadi."],
+                        tag="Veri Eksik",
+                        is_scratched=False,
+                    )
+                    for entry in race.entries
+                    if not entry.is_scratched and _entry_key(entry) not in ranked_by_key
+                ]
+
                 scratched_rows = [
                     SimpleNamespace(
                         entry=entry,
@@ -164,17 +182,19 @@ def create_app() -> FastAPI:
                         is_scratched=True,
                     )
                     for entry in race.entries
-                    if entry.horse_id not in ranked_by_id
+                    if entry.is_scratched
                 ]
 
                 if sort_by == "number":
                     display_rows = sorted(
-                        active_rows + scratched_rows,
+                        active_rows + unscored_active_rows + scratched_rows,
                         key=lambda row: row.entry.number,
                         reverse=reverse,
                     )
                 else:
                     display_rows = sorted(active_rows, key=key_map[sort_by], reverse=reverse) + sorted(
+                        unscored_active_rows, key=lambda row: row.entry.number
+                    ) + sorted(
                         scratched_rows, key=lambda row: row.entry.number
                     )
 
