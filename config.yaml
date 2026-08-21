@@ -7,8 +7,8 @@ recent_form_window: 8
 ideal_rest_days_min: 14
 ideal_rest_days_max: 45
 weights:
-  form: 0.30
-  jockey_trainer: 0.20
-  distance_surface: 0.20
-  weight: 0.15
+  form: 0.35
+  jockey_trainer: 0.15
+  distance_surface: 0.25
+  weight: 0.10
   rest: 0.15
