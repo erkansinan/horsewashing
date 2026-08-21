@@ -58,7 +58,16 @@ def score_distance_surface(
     if not matching:
         return 45.0  # Dogrudan gecmis olmadan notr bir skor.
     points = [_position_points(p.finish_position, p.field_size) for p in matching]
-    return sum(points) / len(points)
+    average_points = sum(points) / len(points)
+    wins = sum(1 for p in matching if p.finish_position == 1)
+    win_rate = wins / len(matching) * 100.0
+
+    # Tek bir iyi/orta kosunun asiri etkisini azaltmak icin:
+    # 1) bitis kalitesi + galibiyet oranini birlestir,
+    # 2) orneklem kucukken sonucu notr (50) etrafinda tut.
+    blended_performance = average_points * 0.6 + win_rate * 0.4
+    confidence = len(matching) / (len(matching) + 2)
+    return 50.0 * (1.0 - confidence) + blended_performance * confidence
 
 
 def score_weight(stats: HorseStatistics, current_weight: float) -> float:

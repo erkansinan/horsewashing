@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from atyaris.config import Settings
 from atyaris.models.entities import HorseStatistics, Jockey, PastPerformance, RaceEntry, Trainer, TrackSurface
-from atyaris.prediction.scoring import compute_score, score_form, score_rest, score_weight
+from atyaris.prediction.scoring import compute_score, score_distance_surface, score_form, score_rest, score_weight
 
 
 def _perf(
@@ -31,6 +31,27 @@ def test_score_form_higher_for_better_recent_finishes() -> None:
 def test_score_form_neutral_without_history() -> None:
     empty = HorseStatistics(horse_id="C", horse_name="C")
     assert score_form(empty, window=5) == 40.0
+
+
+def test_score_distance_surface_rewards_consistent_wins_over_single_non_win() -> None:
+    one_race_no_win = HorseStatistics(
+        horse_id="A",
+        horse_name="A",
+        past_performances=[_perf(10, 2, surface=TrackSurface.CIM, distance=1200)],
+    )
+    three_races_two_wins = HorseStatistics(
+        horse_id="B",
+        horse_name="B",
+        past_performances=[
+            _perf(10, 1, surface=TrackSurface.CIM, distance=1200),
+            _perf(30, 1, surface=TrackSurface.CIM, distance=1200),
+            _perf(60, 8, surface=TrackSurface.CIM, distance=1200),
+        ],
+    )
+
+    score_a = score_distance_surface(one_race_no_win, 1200, TrackSurface.CIM)
+    score_b = score_distance_surface(three_races_two_wins, 1200, TrackSurface.CIM)
+    assert score_b > score_a
 
 
 def test_score_weight_rewards_lighter_than_average() -> None:
