@@ -41,15 +41,28 @@ def test_score_weight_rewards_lighter_than_average() -> None:
     lighter_score = score_weight(stats, current_weight=55.5)
     heavier_score = score_weight(stats, current_weight=60.5)
     assert lighter_score > 50 > heavier_score
+    assert 10.0 <= heavier_score <= 90.0
+    assert 10.0 <= lighter_score <= 90.0
 
 
 def test_score_rest_peaks_in_ideal_window() -> None:
     stats_ideal = HorseStatistics(horse_id="A", horse_name="A", past_performances=[_perf(20, 1)])
     stats_too_soon = HorseStatistics(horse_id="B", horse_name="B", past_performances=[_perf(2, 1)])
     stats_too_long = HorseStatistics(horse_id="C", horse_name="C", past_performances=[_perf(200, 1)])
-    assert score_rest(stats_ideal, 14, 45) == 100.0
-    assert score_rest(stats_too_soon, 14, 45) < 100.0
-    assert score_rest(stats_too_long, 14, 45) < 100.0
+    ideal_score = score_rest(stats_ideal, 14, 45)
+    soon_score = score_rest(stats_too_soon, 14, 45)
+    long_score = score_rest(stats_too_long, 14, 45)
+    assert ideal_score > soon_score
+    assert ideal_score > long_score
+    assert ideal_score < 100.0
+
+
+def test_score_rest_varies_inside_ideal_window() -> None:
+    stats_center = HorseStatistics(horse_id="A", horse_name="A", past_performances=[_perf(30, 1)])
+    stats_edge = HorseStatistics(horse_id="B", horse_name="B", past_performances=[_perf(14, 1)])
+    center_score = score_rest(stats_center, 14, 45)
+    edge_score = score_rest(stats_edge, 14, 45)
+    assert center_score > edge_score
 
 
 def test_compute_score_within_bounds(settings: Settings) -> None:

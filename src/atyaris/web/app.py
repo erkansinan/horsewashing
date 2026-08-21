@@ -297,6 +297,7 @@ def create_app() -> FastAPI:
         body_font_name = "Helvetica"
         header_font_name = "Helvetica-Bold"
         body_font_path, header_font_path = _resolve_pdf_font_paths()
+        fallback_ascii_pdf = body_font_path is None
         if body_font_path is not None:
             body_font_name = "TurkishSans"
             if body_font_name not in pdfmetrics.getRegisteredFontNames():
@@ -307,6 +308,27 @@ def create_app() -> FastAPI:
                     pdfmetrics.registerFont(TTFont(header_font_name, str(header_font_path)))
             else:
                 header_font_name = body_font_name
+
+        _pdf_ascii_map = str.maketrans(
+            {
+                "ç": "c",
+                "Ç": "C",
+                "ğ": "g",
+                "Ğ": "G",
+                "ı": "i",
+                "İ": "I",
+                "ö": "o",
+                "Ö": "O",
+                "ş": "s",
+                "Ş": "S",
+                "ü": "u",
+                "Ü": "U",
+            }
+        )
+
+        def _pdf_text(value: str) -> str:
+            text = value.translate(_pdf_ascii_map) if fallback_ascii_pdf else value
+            return escape(text)
 
         buffer = BytesIO()
         doc = SimpleDocTemplate(
@@ -362,18 +384,32 @@ def create_app() -> FastAPI:
 
         elements = [
             Paragraph(
-                escape(f"Tahmin Raporu - {city} - {parsed_date.strftime('%d.%m.%Y')}"),
+                _pdf_text(f"Tahmin Raporu - {city} - {parsed_date.strftime('%d.%m.%Y')}"),
                 title_style,
             ),
-            Paragraph(escape(f"Kaynak: {source}"), info_style),
+            Paragraph(_pdf_text(f"Kaynak: {source}"), info_style),
             Spacer(1, 6),
         ]
 
+        generated_race_count = 0
+        skipped_races: list[str] = []
         for race in races:
-            prediction = engine.predict(race)
+            try:
+                prediction = engine.predict(race)
+            except (ValueError, RuntimeError, DataSourceError) as exc:
+                skipped_races.append(f"{race.race_no}. kosu: {exc}")
+                logger.warning(
+                    "PDF olusturulurken %s %s. kosu atlandi: %s",
+                    race.hippodrome,
+                    race.race_no,
+                    exc,
+                )
+                continue
+
+            generated_race_count += 1
             elements.append(
                 Paragraph(
-                    escape(
+                    _pdf_text(
                         f"Koşu {race.race_no} ({race.start_time.strftime('%H:%M')}) - "
                         f"{race.distance_m}m {race.surface.value}"
                     ),
@@ -388,7 +424,7 @@ def create_app() -> FastAPI:
                     Paragraph("Form", header_cell_style),
                     Paragraph("Jokey", header_cell_style),
                     Paragraph("Pist", header_cell_style),
-                    Paragraph("Ağırlık", header_cell_style),
+                    Paragraph(_pdf_text("Ağırlık"), header_cell_style),
                     Paragraph("Dinlenme", header_cell_style),
                 ]
             ]
@@ -396,7 +432,7 @@ def create_app() -> FastAPI:
                 rows.append(
                     [
                         Paragraph(str(hp.entry.number), cell_numeric_style),
-                        Paragraph(escape(hp.entry.horse_name), cell_style),
+                        Paragraph(_pdf_text(hp.entry.horse_name), cell_style),
                         Paragraph(f"{hp.score.total_score:.1f}", cell_numeric_style),
                         Paragraph(f"{hp.score.form_score:.1f}", cell_numeric_style),
                         Paragraph(f"{hp.score.jockey_trainer_score:.1f}", cell_numeric_style),
@@ -428,6 +464,12 @@ def create_app() -> FastAPI:
             )
             elements.append(table)
             elements.append(Spacer(1, 8))
+
+        if generated_race_count == 0:
+            detail = "Secili tarih/hipodrom icin PDF uretilemedi; kosular tahminlenemedi."
+            if skipped_races:
+                detail = f"{detail} Ilk hata: {skipped_races[0]}"
+            raise HTTPException(status_code=400, detail=detail)
 
         doc.build(elements)
         pdf_bytes = buffer.getvalue()

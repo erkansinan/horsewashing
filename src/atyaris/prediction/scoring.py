@@ -5,6 +5,7 @@ kirilmis bir guven skoruna cevirdigi agirlikli puanlama modeli. Agirliklar
 from __future__ import annotations
 
 from datetime import date
+import math
 
 from atyaris.config import Settings
 from atyaris.models.entities import HorseStatistics, RaceEntry, ScoreBreakdown, TrackSurface
@@ -67,8 +68,10 @@ def score_weight(stats: HorseStatistics, current_weight: float) -> float:
         return 50.0
     avg_weight = sum(historical_weights) / len(historical_weights)
     diff = avg_weight - current_weight  # Pozitif => ortalamadan daha hafif tasiyor.
-    score = 50 + (diff / 2.5) * 50
-    return max(0.0, min(100.0, score))
+    # Dogrusal model 0/100'e hizli saturasyon yapiyordu; tanh ile yumusak
+    # bir egri kullanip puanlari 10-90 bandinda tutuyoruz.
+    score = 50.0 + 40.0 * math.tanh(diff / 2.0)
+    return max(10.0, min(90.0, score))
 
 
 def score_rest(
@@ -84,11 +87,23 @@ def score_rest(
     days = (reference_date - max(past_dates)).days if past_dates else None
     if days is None:
         return 50.0
+
+    # Ideal aralikta tum atlari 100 yapmak ayirt ediciligi azaltir.
+    # Bu nedenle ideal merkezde daha yuksek, sinirlarda daha dusuk skor verilir.
+    center = (ideal_min + ideal_max) / 2.0
+    half_span = max((ideal_max - ideal_min) / 2.0, 1.0)
+
     if ideal_min <= days <= ideal_max:
-        return 100.0
+        distance_ratio = abs(days - center) / half_span
+        return 92.0 - 12.0 * distance_ratio  # merkez ~92, ideal sinirlari ~80
+
     if days < ideal_min:
-        return max(20.0, 100.0 - (ideal_min - days) * 6)
-    return max(15.0, 100.0 - (days - ideal_max) * 1.5)
+        outside = float(ideal_min - days)
+    else:
+        outside = float(days - ideal_max)
+
+    # Ideal disina cikildikca ussel olarak azalan, tabani 20 olan skor.
+    return 20.0 + 60.0 * math.exp(-outside / 35.0)
 
 
 def compute_score(
