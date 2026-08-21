@@ -80,7 +80,17 @@ def score_rest(
     ideal_max: int,
     reference_date: date | None = None,
 ) -> float:
-    """Son kosudan bu yana gecen sureyi ideal dinlenme araligina gore puanlar."""
+    """Son kosudan bu yana gecen sureyi parcali kondisyon formuluyle puanlar.
+
+    Kullanilan formulu (G = gun):
+    - 0 < G < 14: 40 + (G * 3.5)
+    - 14 <= G <= 28: 100 - (|G - 21| * 1.5)
+    - 28 < G <= 90: 90 - ((G - 28) * 0.9)
+    - G > 90: max(20, 35 - ((G - 90) * 0.1))
+
+    Not: Sonuc her zaman en yakin tam sayiya yuvarlanir.
+    """
+    _ = (ideal_min, ideal_max)  # Geriye donuk API uyumlulugu icin korunuyor.
     if reference_date is None:
         reference_date = date.today()
     past_dates = [p.race_date for p in stats.past_performances if p.race_date < reference_date]
@@ -88,22 +98,19 @@ def score_rest(
     if days is None:
         return 50.0
 
-    # Ideal aralikta tum atlari 100 yapmak ayirt ediciligi azaltir.
-    # Bu nedenle ideal merkezde daha yuksek, sinirlarda daha dusuk skor verilir.
-    center = (ideal_min + ideal_max) / 2.0
-    half_span = max((ideal_max - ideal_min) / 2.0, 1.0)
-
-    if ideal_min <= days <= ideal_max:
-        distance_ratio = abs(days - center) / half_span
-        return 92.0 - 12.0 * distance_ratio  # merkez ~92, ideal sinirlari ~80
-
-    if days < ideal_min:
-        outside = float(ideal_min - days)
+    if days <= 0:
+        raw_score = 40.0
+    elif days < 14:
+        raw_score = 40.0 + (days * 3.5)
+    elif days <= 28:
+        raw_score = 100.0 - (abs(days - 21) * 1.5)
+    elif days <= 90:
+        raw_score = 90.0 - ((days - 28) * 0.9)
     else:
-        outside = float(days - ideal_max)
+        raw_score = max(20.0, 35.0 - ((days - 90) * 0.1))
 
-    # Ideal disina cikildikca ussel olarak azalan, tabani 20 olan skor.
-    return 20.0 + 60.0 * math.exp(-outside / 35.0)
+    rounded = math.floor(raw_score + 0.5)
+    return float(max(0, min(100, rounded)))
 
 
 def compute_score(

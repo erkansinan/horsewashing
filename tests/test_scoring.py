@@ -57,12 +57,28 @@ def test_score_rest_peaks_in_ideal_window() -> None:
     assert ideal_score < 100.0
 
 
-def test_score_rest_varies_inside_ideal_window() -> None:
-    stats_center = HorseStatistics(horse_id="A", horse_name="A", past_performances=[_perf(30, 1)])
-    stats_edge = HorseStatistics(horse_id="B", horse_name="B", past_performances=[_perf(14, 1)])
-    center_score = score_rest(stats_center, 14, 45)
-    edge_score = score_rest(stats_edge, 14, 45)
-    assert center_score > edge_score
+def test_score_rest_peaks_around_21_days() -> None:
+    stats_peak = HorseStatistics(horse_id="A", horse_name="A", past_performances=[_perf(21, 1)])
+    stats_left_edge = HorseStatistics(horse_id="B", horse_name="B", past_performances=[_perf(14, 1)])
+    stats_right_edge = HorseStatistics(horse_id="C", horse_name="C", past_performances=[_perf(28, 1)])
+    peak_score = score_rest(stats_peak, 14, 45)
+    left_score = score_rest(stats_left_edge, 14, 45)
+    right_score = score_rest(stats_right_edge, 14, 45)
+    assert peak_score == 100.0
+    assert peak_score > left_score
+    assert peak_score > right_score
+
+
+def test_score_rest_matches_piecewise_formula_examples() -> None:
+    stats_7 = HorseStatistics(horse_id="A", horse_name="A", past_performances=[_perf(7, 1)])
+    stats_18 = HorseStatistics(horse_id="B", horse_name="B", past_performances=[_perf(18, 1)])
+    stats_40 = HorseStatistics(horse_id="C", horse_name="C", past_performances=[_perf(40, 1)])
+    stats_120 = HorseStatistics(horse_id="D", horse_name="D", past_performances=[_perf(120, 1)])
+
+    assert score_rest(stats_7, 14, 45) == 65.0
+    assert score_rest(stats_18, 14, 45) == 96.0
+    assert score_rest(stats_40, 14, 45) == 79.0
+    assert score_rest(stats_120, 14, 45) == 32.0
 
 
 def test_compute_score_within_bounds(settings: Settings) -> None:
