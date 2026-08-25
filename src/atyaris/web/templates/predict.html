@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
 <p><a href="/?source={{ source }}&date={{ date }}&city={{ city }}">&larr; Bultene don</a></p>
+{% if city and pdf_url %}
+  <p><a class="button" href="{{ pdf_url }}">Bu Siralama ile PDF Al</a></p>
+{% endif %}
 
 {% if error %}
   <p class="error">{{ error }}</p>
@@ -10,6 +13,25 @@
   {% set race = prediction.race %}
   {% set rows = rows if rows else prediction.ranked %}
   <h2>{{ race.hippodrome }} - {{ race.race_no }}. Kosu ({{ race.distance_m }}m, {{ race.surface.value }})</h2>
+
+  {% if table_usage_notes %}
+  <h3>Tabloyu Nasil Kullanmalisiniz?</h3>
+  <ul class="reasoning">
+    {% for note in table_usage_notes %}
+      <li>{{ note }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if prediction.imputation_notes %}
+  <h3>Imputation Ozetleri</h3>
+  <ul class="reasoning">
+    {% for note in prediction.imputation_notes %}
+      <li>{{ note }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
   <table>
     <thead>
       <tr>
@@ -17,12 +39,18 @@
         <th><a href="{{ sort_urls.number }}">No{% if sort_by == 'number' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>At</th>
         <th>Jokey</th>
+        <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.total }}">Toplam{% if sort_by == 'total' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.form }}">Form{% if sort_by == 'form' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.jockey_trainer }}">Jokey{% if sort_by == 'jockey_trainer' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.distance_surface }}">Pist{% if sort_by == 'distance_surface' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.weight }}">Ağırlık{% if sort_by == 'weight' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.rest }}">Dinlenme{% if sort_by == 'rest' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.win_probability }}">Kazanma Olasılığı{% if sort_by == 'win_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.confidence }}">Güven{% if sort_by == 'confidence' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.ev }}">EV{% if sort_by == 'ev' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.kelly }}">Kelly{% if sort_by == 'kelly' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>Value Bet</th>
         <th>Durum</th>
         <th>Etiket</th>
       </tr>
@@ -34,12 +62,18 @@
         <td>{{ row.entry.number }}</td>
         <td>{{ row.entry.horse_name }}</td>
         <td>{{ row.entry.jockey.name }}</td>
+        <td>{% if row.entry.odds is not none %}{{ "%.2f"|format(row.entry.odds) }}{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.total_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.form_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.jockey_trainer_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.distance_surface_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.weight_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.rest_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.win_probability is not none %}{{ "%.2f"|format(row.win_probability * 100) }}%{% else %}-{% endif %}</td>
+        <td>{% if row.confidence_score is not none %}{{ "%.2f"|format(row.confidence_score) }}{% else %}-{% endif %}</td>
+        <td>{% if row.value_bet and row.value_bet.expected_value is not none %}{{ "%.3f"|format(row.value_bet.expected_value) }}{% else %}-{% endif %}</td>
+        <td>{% if row.value_bet and row.value_bet.fractional_kelly_stake is not none %}{{ "%.3f"|format(row.value_bet.fractional_kelly_stake) }}{% else %}-{% endif %}</td>
+        <td>{% if row.value_bet and row.value_bet.is_value_bet %}Evet{% else %}Hayir{% endif %}</td>
         <td>{% if row.is_scratched %}Koşmaz{% else %}Aktif{% endif %}</td>
         <td><span class="tag">{{ row.tag }}</span></td>
       </tr>
@@ -49,12 +83,62 @@
 
   {% for row in rows if not row.is_scratched %}
     <h3>{{ row.entry.number }}. {{ row.entry.horse_name }} ({{ row.tag }}, skor {{ row.score.total_score }}/100)</h3>
+    {% if row.feature_snapshot %}
+      <p>
+        Lag/rolling: L1={{ row.feature_snapshot.lag_form_1 }},
+        L2={{ row.feature_snapshot.lag_form_2 }},
+        roll3={{ row.feature_snapshot.rolling_mean_3 }}±{{ row.feature_snapshot.rolling_std_3 }},
+        roll5={{ row.feature_snapshot.rolling_mean_5 }}±{{ row.feature_snapshot.rolling_std_5 }}
+      </p>
+    {% endif %}
     <ul class="reasoning">
       {% for bullet in row.reasoning %}
         <li>{{ bullet }}</li>
       {% endfor %}
     </ul>
   {% endfor %}
+
+  {% if prediction.backtest %}
+  <h3>Walk-Forward Backtest</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Pencere</th>
+        <th>Degerlendirilen Kosu</th>
+        <th>Log-loss</th>
+        <th>Calibration Error</th>
+        <th>ROI</th>
+        <th>Sharpe-benzeri</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{{ prediction.backtest.windows }}</td>
+        <td>{{ prediction.backtest.evaluated_races }}</td>
+        <td>{{ prediction.backtest.log_loss if prediction.backtest.log_loss is not none else '-' }}</td>
+        <td>{{ prediction.backtest.calibration_error if prediction.backtest.calibration_error is not none else '-' }}</td>
+        <td>{{ prediction.backtest.roi if prediction.backtest.roi is not none else '-' }}</td>
+        <td>{{ prediction.backtest.sharpe_like if prediction.backtest.sharpe_like is not none else '-' }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% if prediction.backtest.notes %}
+  <ul class="reasoning">
+    {% for note in prediction.backtest.notes %}
+      <li>{{ note }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+
+  {% if prediction.model_notes %}
+  <h3>Model Mimarisi Notlari</h3>
+  <ul class="reasoning">
+    {% for note in prediction.model_notes %}
+      <li>{{ note }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 
   <p class="disclaimer">{{ prediction.disclaimer }}</p>
 {% endif %}

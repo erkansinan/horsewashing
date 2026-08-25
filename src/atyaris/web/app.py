@@ -26,17 +26,72 @@ from atyaris.utils.logging_config import configure_logging
 logger = logging.getLogger(__name__)
 
 _SORTABLE_FIELDS = {
+    "strategy": "Stratejik Sira",
     "number": "No",
+    "odds": "Ganyan",
     "total": "Toplam",
     "form": "Form",
     "jockey_trainer": "Jokey",
     "distance_surface": "Pist",
     "weight": "Agirlik",
     "rest": "Dinlenme",
+    "win_probability": "Kazanma Olasiligi",
+    "confidence": "Guven",
+    "ev": "EV",
+    "kelly": "Kelly",
 }
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+
+def _safe_metric(value: float | None, fallback: float) -> float:
+    return value if value is not None else fallback
+
+
+def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
+    if sort_by == "strategy":
+        win_probability = _safe_metric(getattr(item, "win_probability", None), -1.0)
+        confidence_score = _safe_metric(getattr(item, "confidence_score", None), -1.0)
+        value_bet = getattr(item, "value_bet", None)
+        expected_value = _safe_metric(
+            getattr(value_bet, "expected_value", None) if value_bet else None,
+            -9999.0,
+        )
+        kelly_stake = _safe_metric(
+            getattr(value_bet, "fractional_kelly_stake", None) if value_bet else None,
+            -9999.0,
+        )
+        score = getattr(item, "score", None)
+        total_score = _safe_metric(getattr(score, "total_score", None) if score is not None else None, -1.0)
+        return (win_probability, confidence_score, total_score, expected_value, kelly_stake)
+    if sort_by == "number":
+        return item.entry.number
+    if sort_by == "odds":
+        return item.entry.odds if item.entry.odds is not None else 9999.0
+    if sort_by == "total":
+        return item.score.total_score
+    if sort_by == "form":
+        return item.score.form_score
+    if sort_by == "jockey_trainer":
+        return item.score.jockey_trainer_score
+    if sort_by == "distance_surface":
+        return item.score.distance_surface_score
+    if sort_by == "weight":
+        return item.score.weight_score
+    if sort_by == "rest":
+        return item.score.rest_score
+    if sort_by == "win_probability":
+        return _safe_metric(getattr(item, "win_probability", None), -1.0)
+    if sort_by == "confidence":
+        return _safe_metric(getattr(item, "confidence_score", None), -1.0)
+    if sort_by == "ev":
+        value_bet = getattr(item, "value_bet", None)
+        return _safe_metric(getattr(value_bet, "expected_value", None) if value_bet else None, -9999.0)
+    if sort_by == "kelly":
+        value_bet = getattr(item, "value_bet", None)
+        return _safe_metric(getattr(value_bet, "fractional_kelly_stake", None) if value_bet else None, -9999.0)
+    return item.score.total_score
 
 
 def create_app() -> FastAPI:
@@ -103,7 +158,10 @@ def create_app() -> FastAPI:
         source: str = Query("sample", pattern="^(sample|tjk)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
-        sort_by: str = Query("total", pattern="^(number|total|form|jockey_trainer|distance_surface|weight|rest)$"),
+        sort_by: str = Query(
+            "strategy",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly)$",
+        ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
         settings = get_settings()
@@ -111,6 +169,12 @@ def create_app() -> FastAPI:
         prediction = None
         display_rows = []
         sort_urls: dict[str, str] = {}
+        pdf_url = ""
+        table_usage_notes = [
+            "1) Once Kazanma Olasiligi ve Guven ile guclu adaylari ayiklayin.",
+            "2) Sonra EV > 0 olanlari value adayi olarak filtreleyin.",
+            "3) Bahis buyuklugunu Kelly (fractional) degerine gore sinirlayin.",
+        ]
 
         def _entry_key(entry) -> str:  # type: ignore[no-untyped-def]
             if entry.source_horse_id is not None:
@@ -132,6 +196,25 @@ def create_app() -> FastAPI:
         try:
             parsed_date = parse_date(date_str or None)
             data_source = build_data_source(source, settings)
+            if source == "tjk" and not city:
+                error = "TJK kaynaginda tahmin uretmeden once bir hipodrom secin."
+                return templates.TemplateResponse(
+                    request,
+                    "predict.html",
+                    {
+                        "prediction": prediction,
+                        "rows": display_rows,
+                        "table_usage_notes": table_usage_notes,
+                        "error": error,
+                        "source": source,
+                        "date": date_str,
+                        "city": city,
+                        "sort_by": sort_by,
+                        "sort_order": sort_order,
+                        "sort_urls": sort_urls,
+                        "sortable_fields": _SORTABLE_FIELDS,
+                    },
+                )
             races = fetch_races(data_source, parsed_date, city or None, None)
             race = next((r for r in races if r.id == race_id), None)
             if race is None:
@@ -139,15 +222,6 @@ def create_app() -> FastAPI:
             else:
                 engine = PredictionEngine(data_source, settings)
                 prediction = engine.predict(race)
-                key_map = {
-                    "number": lambda hp: hp.entry.number,
-                    "total": lambda hp: hp.score.total_score,
-                    "form": lambda hp: hp.score.form_score,
-                    "jockey_trainer": lambda hp: hp.score.jockey_trainer_score,
-                    "distance_surface": lambda hp: hp.score.distance_surface_score,
-                    "weight": lambda hp: hp.score.weight_score,
-                    "rest": lambda hp: hp.score.rest_score,
-                }
                 reverse = sort_order == "desc"
                 ranked_by_key = {_entry_key(hp.entry): hp for hp in prediction.ranked}
                 active_rows = [
@@ -156,6 +230,10 @@ def create_app() -> FastAPI:
                         score=hp.score,
                         reasoning=hp.reasoning,
                         tag=hp.tag,
+                        win_probability=hp.win_probability,
+                        confidence_score=hp.confidence_score,
+                        value_bet=hp.value_bet,
+                        feature_snapshot=hp.feature_snapshot,
                         is_scratched=False,
                     )
                     for hp in prediction.ranked
@@ -167,6 +245,10 @@ def create_app() -> FastAPI:
                         score=None,
                         reasoning=["Bu at aktif durumda; ancak istatistik verisi alinamadigi icin skorlanamadi."],
                         tag="Veri Eksik",
+                        win_probability=None,
+                        confidence_score=None,
+                        value_bet=None,
+                        feature_snapshot={},
                         is_scratched=False,
                     )
                     for entry in race.entries
@@ -179,6 +261,10 @@ def create_app() -> FastAPI:
                         score=None,
                         reasoning=["Bu at kosmaz (scratch) olarak isaretli."],
                         tag="Koşmaz",
+                        win_probability=None,
+                        confidence_score=None,
+                        value_bet=None,
+                        feature_snapshot={},
                         is_scratched=True,
                     )
                     for entry in race.entries
@@ -188,15 +274,29 @@ def create_app() -> FastAPI:
                 if sort_by == "number":
                     display_rows = sorted(
                         active_rows + unscored_active_rows + scratched_rows,
-                        key=lambda row: row.entry.number,
+                        key=lambda row: _prediction_sort_key(row, sort_by),
                         reverse=reverse,
                     )
                 else:
-                    display_rows = sorted(active_rows, key=key_map[sort_by], reverse=reverse) + sorted(
+                    display_rows = sorted(
+                        active_rows,
+                        key=lambda row: _prediction_sort_key(row, sort_by),
+                        reverse=reverse,
+                    ) + sorted(
                         unscored_active_rows, key=lambda row: row.entry.number
                     ) + sorted(
                         scratched_rows, key=lambda row: row.entry.number
                     )
+
+                pdf_url = "/predict-all-pdf?" + urlencode(
+                    {
+                        "source": source,
+                        "date": date_str,
+                        "city": city,
+                        "sort_by": sort_by,
+                        "sort_order": sort_order,
+                    }
+                )
 
                 for field in _SORTABLE_FIELDS:
                     next_direction = "asc" if field == sort_by and sort_order == "desc" else "desc"
@@ -219,6 +319,8 @@ def create_app() -> FastAPI:
             {
                 "prediction": prediction,
                 "rows": display_rows,
+                "pdf_url": pdf_url,
+                "table_usage_notes": table_usage_notes,
                 "error": error,
                 "source": source,
                 "date": date_str,
@@ -235,13 +337,18 @@ def create_app() -> FastAPI:
         source: str = Query("sample", pattern="^(sample|tjk)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
+        sort_by: str = Query(
+            "strategy",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly)$",
+        ),
+        sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> Response:
         settings = get_settings()
         if not city:
             raise HTTPException(status_code=400, detail="PDF olusturmak icin once bir hipodrom secin.")
 
         try:
-            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.pagesizes import A4, landscape
             from reportlab.lib import colors
             from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
             from reportlab.lib.units import mm
@@ -333,7 +440,7 @@ def create_app() -> FastAPI:
         buffer = BytesIO()
         doc = SimpleDocTemplate(
             buffer,
-            pagesize=A4,
+            pagesize=landscape(A4),
             leftMargin=12 * mm,
             rightMargin=12 * mm,
             topMargin=12 * mm,
@@ -393,9 +500,14 @@ def create_app() -> FastAPI:
 
         generated_race_count = 0
         skipped_races: list[str] = []
+
         for race in races:
             try:
-                prediction = engine.predict(race)
+                prediction = engine.predict(
+                    race,
+                    include_backtest=False,
+                    include_detailed_reasoning=False,
+                )
             except (ValueError, RuntimeError, DataSourceError) as exc:
                 skipped_races.append(f"{race.race_no}. kosu: {exc}")
                 logger.warning(
@@ -416,35 +528,57 @@ def create_app() -> FastAPI:
                     race_style,
                 )
             )
+
+            reverse = sort_order == "desc"
+            ranked = sorted(
+                prediction.ranked,
+                key=lambda hp: _prediction_sort_key(hp, sort_by),
+                reverse=reverse,
+            )
             rows = [
                 [
                     Paragraph("No", header_cell_style),
                     Paragraph("At", header_cell_style),
+                    Paragraph("Ganyan", header_cell_style),
+                    Paragraph("K.Olas.", header_cell_style),
+                    Paragraph("Guven", header_cell_style),
+                    Paragraph("EV", header_cell_style),
+                    Paragraph("Kelly", header_cell_style),
                     Paragraph("Toplam", header_cell_style),
-                    Paragraph("Form", header_cell_style),
-                    Paragraph("Jokey", header_cell_style),
-                    Paragraph("Pist", header_cell_style),
-                    Paragraph(_pdf_text("Ağırlık"), header_cell_style),
-                    Paragraph("Dinlenme", header_cell_style),
+                    Paragraph("Etiket", header_cell_style),
                 ]
             ]
-            for hp in prediction.ranked:
+            for hp in ranked:
+                odds_text = f"{hp.entry.odds:.2f}" if hp.entry.odds is not None else "-"
+                prob_text = f"{(hp.win_probability or 0.0) * 100:.2f}%" if hp.win_probability is not None else "-"
+                conf_text = f"{hp.confidence_score:.2f}" if hp.confidence_score is not None else "-"
+                ev_text = (
+                    f"{hp.value_bet.expected_value:.3f}"
+                    if hp.value_bet and hp.value_bet.expected_value is not None
+                    else "-"
+                )
+                kelly_text = (
+                    f"{hp.value_bet.fractional_kelly_stake:.3f}"
+                    if hp.value_bet and hp.value_bet.fractional_kelly_stake is not None
+                    else "-"
+                )
                 rows.append(
                     [
                         Paragraph(str(hp.entry.number), cell_numeric_style),
                         Paragraph(_pdf_text(hp.entry.horse_name), cell_style),
+                        Paragraph(odds_text, cell_numeric_style),
+                        Paragraph(prob_text, cell_numeric_style),
+                        Paragraph(conf_text, cell_numeric_style),
+                        Paragraph(ev_text, cell_numeric_style),
+                        Paragraph(kelly_text, cell_numeric_style),
                         Paragraph(f"{hp.score.total_score:.1f}", cell_numeric_style),
-                        Paragraph(f"{hp.score.form_score:.1f}", cell_numeric_style),
-                        Paragraph(f"{hp.score.jockey_trainer_score:.1f}", cell_numeric_style),
-                        Paragraph(f"{hp.score.distance_surface_score:.1f}", cell_numeric_style),
-                        Paragraph(f"{hp.score.weight_score:.1f}", cell_numeric_style),
-                        Paragraph(f"{hp.score.rest_score:.1f}", cell_numeric_style),
+                        Paragraph(_pdf_text(hp.tag), cell_style),
                     ]
                 )
 
             table = LongTable(
                 rows,
-                colWidths=[10 * mm, 56 * mm, 16 * mm, 14 * mm, 16 * mm, 14 * mm, 18 * mm, 19 * mm],
+                colWidths=[10 * mm, 58 * mm, 16 * mm, 18 * mm, 15 * mm, 14 * mm, 14 * mm, 15 * mm, 30 * mm],
                 repeatRows=1,
             )
             table.setStyle(

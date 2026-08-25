@@ -43,6 +43,7 @@ _JOCKEYS = [
 ]
 _TRAINERS = ["Osman Ozturk", "Necati Gur", "Kemal Aydin", "Yusuf Demir"]
 _CITIES = ["Istanbul (Veliefendi)", "Ankara", "Izmir (Sirinyer)"]
+_WEATHERS = ["Gunesli", "Bulutlu", "Yagmurlu", "Ruzgarli"]
 
 
 def _rng_for(seed_key: str) -> random.Random:
@@ -97,8 +98,16 @@ class SampleDataSource(RaceDataSource):
                     trainer=Trainer(name=rng.choice(_TRAINERS)),
                     weight_kg=round(rng.uniform(52, 61), 1),
                     odds=round(rng.uniform(1.5, 25.0), 2),
+                    handicap_points=round(rng.uniform(35.0, 95.0), 1),
+                    recent_form_positions=[rng.randint(1, 10) for _ in range(5)],
+                    form_raw="".join(str(rng.randint(1, 9)) for _ in range(5)),
                 )
             )
+
+        finish_order = list(range(1, n_horses + 1))
+        rng.shuffle(finish_order)
+        for idx, entry in enumerate(entries):
+            entry.actual_finish_position = finish_order[idx]
         return entries
 
     def get_horse_statistics(self, entry: RaceEntry) -> HorseStatistics:
@@ -120,6 +129,11 @@ class SampleDataSource(RaceDataSource):
                     trainer_name=entry.trainer.name,
                     weight_kg=round(entry.weight_kg + rng.uniform(-2, 2), 1),
                     odds=round(rng.uniform(1.5, 30.0), 2),
+                    race_time_seconds=round(rng.uniform(68.0, 132.0), 2),
+                    early_pace_index=round(rng.uniform(0.05, 0.95), 3),
+                    mid_pace_index=round(rng.uniform(0.05, 0.95), 3),
+                    late_pace_index=round(rng.uniform(0.05, 0.95), 3),
+                    weather=rng.choice(_WEATHERS),
                 )
             )
             cursor_date -= timedelta(days=rng.randint(14, 45))

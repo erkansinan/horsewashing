@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     recent_form_window: int = 8
     ideal_rest_days_min: int = 14
     ideal_rest_days_max: int = 45
+    ensemble_boosting_weight: float = 0.58
+    ensemble_ranking_weight: float = 0.42
+    calibration_temperature: float = 0.85
+    ev_probability_threshold: float = 0.18
+    ev_min_edge: float = 0.03
+    ev_min_value: float = 0.02
+    ev_fractional_kelly: float = 0.35
+    ev_max_kelly_fraction: float = 0.25
+    backtest_lookback_days: int = 8
     weights: ScoringWeights = ScoringWeights()
 
     @classmethod

@@ -223,6 +223,26 @@ Toplam skor, `config.yaml` uzerinden ayarlanabilir agirliklarla hesaplanir:
 | Kilo                  | %15                | Bugunku kilo, gecmis ortalamaya kiyasla               |
 | Dinlenme suresi       | %15                | Son kosudan bu yana gecen gun (ideal aralik: 14-45)   |
 
+## Tahmin Tablosu Yorumlama Rehberi
+
+Web tahmin tablosundaki su basliklar birlikte yorumlanmalidir:
+
+- Kazanma Olasiligi: Modelin o atin yarisi kazanma ihtimali icin kalibre ettigi olasiliktir.
+  Daha yuksek deger, goreceli kazanma sansinin daha yuksek oldugunu gosterir.
+- Guven: Modelin bu olasilik tahmininden ne kadar emin oldugunu gosterir.
+  Benzer olasilikta iki at varsa, Guven degeri yuksek olan tercih edilir.
+- EV: Beklenen degerdir ve su sekilde hesaplanir: EV = (Kazanma Olasiligi x Ganyan) - 1.
+  EV > 0 ise teorik olarak uzun vadede pozitif getiri adayi, EV < 0 ise negatif beklenti anlamina gelir.
+- Kelly: Sermaye yonetimi icin onerilen bahis oranidir.
+  Tablodaki deger fractional Kelly oldugundan, toplam bakiyenin tamamini degil kontrollu bir kismini onerir.
+
+Pratik yorum sirasi:
+
+1. Once Kazanma Olasiligi ve Guven ile modelin guclu gordugu atlari ayiklayin.
+2. Sonra EV ile piyasa oranina gore gercekten "deger" olup olmadigini kontrol edin.
+3. Bahis buyuklugunu Kelly degerine gore sinirlayin; Kelly dusukse ya bahis atlanir ya da cok kucuk tutulur.
+4. Tek bir kolona gore karar vermeyin; bu metrikler birlikte kullanildiginda daha anlamli sonuc verir.
+
 ## Test
 
 ```powershell

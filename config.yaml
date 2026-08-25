@@ -6,6 +6,15 @@ cache_path: ".cache/atyaris_cache.sqlite3"
 recent_form_window: 8
 ideal_rest_days_min: 14
 ideal_rest_days_max: 45
+ensemble_boosting_weight: 0.58
+ensemble_ranking_weight: 0.42
+calibration_temperature: 0.85
+ev_probability_threshold: 0.18
+ev_min_edge: 0.03
+ev_min_value: 0.02
+ev_fractional_kelly: 0.35
+ev_max_kelly_fraction: 0.25
+backtest_lookback_days: 8
 weights:
   form: 0.35
   jockey_trainer: 0.15

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Optional
+from typing import Dict, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,11 @@ class PastPerformance(BaseModel):
     trainer_name: Optional[str] = None
     weight_kg: Optional[float] = None
     odds: Optional[float] = None
+    race_time_seconds: Optional[float] = None
+    early_pace_index: Optional[float] = None
+    mid_pace_index: Optional[float] = None
+    late_pace_index: Optional[float] = None
+    weather: Optional[str] = None
 
     @property
     def is_win(self) -> bool:
@@ -102,6 +107,7 @@ class RaceEntry(BaseModel):
     recent_form_positions: list[int] = Field(default_factory=list)
     form_raw: Optional[str] = None
     is_scratched: bool = False  # kosmaz
+    actual_finish_position: Optional[int] = None
 
 
 class Race(BaseModel):
@@ -134,6 +140,29 @@ class ScoreBreakdown(BaseModel):
     total_score: float
 
 
+class ValueBetSignal(BaseModel):
+    """Piyasa oranina gore deger bahsi sinyali."""
+
+    implied_probability: Optional[float] = None
+    expected_value: Optional[float] = None
+    edge: Optional[float] = None
+    kelly_fraction: Optional[float] = None
+    fractional_kelly_stake: Optional[float] = None
+    is_value_bet: bool = False
+
+
+class BacktestMetrics(BaseModel):
+    """Walk-forward bazli model degerlendirme ozeti."""
+
+    windows: int = 0
+    evaluated_races: int = 0
+    log_loss: Optional[float] = None
+    calibration_error: Optional[float] = None
+    roi: Optional[float] = None
+    sharpe_like: Optional[float] = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class HorsePrediction(BaseModel):
     """Bir at icin uretilen tahmin: skor, gerekce ve etiket."""
 
@@ -141,6 +170,12 @@ class HorsePrediction(BaseModel):
     score: ScoreBreakdown
     reasoning: list[str]
     tag: str
+    model_score: Optional[float] = None
+    ranking_score: Optional[float] = None
+    win_probability: Optional[float] = None
+    confidence_score: Optional[float] = None
+    value_bet: Optional[ValueBetSignal] = None
+    feature_snapshot: Dict[str, Optional[Union[float, int, str]]] = Field(default_factory=dict)
 
 
 class RacePrediction(BaseModel):
@@ -148,6 +183,9 @@ class RacePrediction(BaseModel):
 
     race: Race
     ranked: list[HorsePrediction]
+    model_notes: list[str] = Field(default_factory=list)
+    imputation_notes: list[str] = Field(default_factory=list)
+    backtest: Optional[BacktestMetrics] = None
     disclaimer: str = (
         "Bu tahminler istatistiksel analize dayanir, kesinlik tasimaz; "
         "sorumlu bahis oynayin."
