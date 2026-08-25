@@ -212,6 +212,11 @@ class PredictionEngine:
             "Cikti ham skor degil, softmax + temperature scaling ile kalibre edilmis kazanma olasiligidir.",
             "Yaris problemi mutlak regresyondan cok goreceli siralama oldugu icin ranking kanali agirliklandirildi.",
             "Nihai siralamada sapmayi azaltmak icin model olasiligi + guven + baz skor + piyasa olasiligi ile konservatif bir consensus duzeltmesi uygulandi.",
+            (
+                f"Backtest leakage-safe modu: acik (as_of kesiti, en yeni {self._settings.backtest_exclude_recent_races} yaris dislanir)."
+                if self._settings.backtest_leakage_safe_mode
+                else "Backtest leakage-safe modu: kapali (tum gecmis kayitlar kullanilir)."
+            ),
             "Eksik/gurultulu veri median/notr imputasyon ile tamamlandi; notlar asagida listelendi.",
             backtest_note,
         ]

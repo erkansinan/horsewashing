@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     ev_fractional_kelly: float = 0.35
     ev_max_kelly_fraction: float = 0.25
     backtest_lookback_days: int = 8
+    backtest_leakage_safe_mode: bool = True
+    backtest_exclude_recent_races: int = 1
     weights: ScoringWeights = ScoringWeights()
 
     @classmethod

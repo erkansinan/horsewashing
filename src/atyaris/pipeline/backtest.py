@@ -91,7 +91,14 @@ def build_walk_forward_backtest(
             winner_id = _actual_winner_horse_id(race)
             if not winner_id:
                 continue
-            prepared = prepare_race_data(data_source, race)
+            prepared = prepare_race_data(
+                data_source,
+                race,
+                as_of_date=(race.start_time.date() if settings.backtest_leakage_safe_mode else None),
+                exclude_most_recent_races=(
+                    settings.backtest_exclude_recent_races if settings.backtest_leakage_safe_mode else 0
+                ),
+            )
             features = build_entry_features(race, prepared.stats_by_horse_id)
             ranked = ranker.rank(features)
             by_horse = {r.horse_id: r for r in ranked}
@@ -136,6 +143,11 @@ def build_walk_forward_backtest(
         sharpe_like=round(_sharpe_like(returns), 4) if returns else 0.0,
         notes=[
             "Walk-forward pencereleri gelecege bakmayan sekilde kuruldu (veri sizintisi engeli).",
+            (
+                f"Leakage-safe mod aktif: as_of kesiti + en yeni {settings.backtest_exclude_recent_races} kosu dislama uygulandi."
+                if settings.backtest_leakage_safe_mode
+                else "Leakage-safe mod kapali: tum erisilebilir gecmis kayitlar kullanildi."
+            ),
             "ROI yalnizca esik ustu sinyallerde 1 birim stake ile simule edildi.",
         ],
     )

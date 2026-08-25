@@ -106,7 +106,57 @@ def _impute_horse_statistics(entry: RaceEntry, stats: HorseStatistics | None, ra
     return imputed_stats, notes
 
 
-def prepare_race_data(data_source: RaceDataSource, race: Race) -> PreparedRaceData:
+def _filter_stats_for_backtest_window(
+    stats: HorseStatistics,
+    *,
+    as_of_date: date | None,
+    exclude_most_recent_races: int,
+) -> tuple[HorseStatistics, int, int]:
+    """Ileriye bakma hatasini azaltmak icin gecmisi zaman penceresine keser.
+
+    - ``as_of_date`` verildiyse yalnizca bu tarihten onceki kayitlar tutulur.
+    - ``exclude_most_recent_races`` > 0 ise kalan seriden en yeni N yaris dusulur.
+    """
+    perfs = sorted(stats.past_performances, key=lambda p: p.race_date, reverse=True)
+    removed_by_date = 0
+    if as_of_date is not None:
+        filtered = [p for p in perfs if p.race_date < as_of_date]
+        removed_by_date = len(perfs) - len(filtered)
+        perfs = filtered
+
+    removed_by_recent = 0
+    if exclude_most_recent_races > 0 and perfs:
+        removed_by_recent = min(exclude_most_recent_races, len(perfs))
+        perfs = perfs[removed_by_recent:]
+
+    wins = sum(1 for p in perfs if p.is_win)
+    places = sum(1 for p in perfs if p.is_placed)
+    combo_starts = sum(1 for p in perfs if p.jockey_name)
+    combo_wins = sum(1 for p in perfs if p.jockey_name and p.is_win)
+
+    filtered_stats = stats.model_copy(
+        update={
+            "past_performances": perfs,
+            "career_starts": len(perfs),
+            "career_wins": wins,
+            "career_places": places,
+            "last_year_starts": len(perfs),
+            "last_year_wins": wins,
+            "last_year_places": places,
+            "jockey_horse_combo_starts": combo_starts,
+            "jockey_horse_combo_wins": combo_wins,
+        }
+    )
+    return filtered_stats, removed_by_date, removed_by_recent
+
+
+def prepare_race_data(
+    data_source: RaceDataSource,
+    race: Race,
+    *,
+    as_of_date: date | None = None,
+    exclude_most_recent_races: int = 0,
+) -> PreparedRaceData:
     """Yaris icin tum at istatistiklerini toplayip imputasyon uygular."""
     stats_by_horse_id: dict[str, HorseStatistics] = {}
     missing_entries: list[RaceEntry] = []
@@ -119,6 +169,22 @@ def prepare_race_data(data_source: RaceDataSource, race: Race) -> PreparedRaceDa
         except Exception:
             raw_stats = None
             missing_entries.append(entry)
+
+        if raw_stats is not None and (as_of_date is not None or exclude_most_recent_races > 0):
+            filtered_stats, removed_by_date, removed_by_recent = _filter_stats_for_backtest_window(
+                raw_stats,
+                as_of_date=as_of_date,
+                exclude_most_recent_races=exclude_most_recent_races,
+            )
+            raw_stats = filtered_stats
+            if removed_by_date > 0:
+                imputation_notes.append(
+                    f"{entry.horse_name}: leakage-safe kesit icin {removed_by_date} kayit (as_of sonrasindan) dislandi."
+                )
+            if removed_by_recent > 0:
+                imputation_notes.append(
+                    f"{entry.horse_name}: leakage-safe modda en yeni {removed_by_recent} yaris ozellikle dislandi."
+                )
 
         imputed_stats, notes = _impute_horse_statistics(entry, raw_stats, race.start_time.date())
         stats_by_horse_id[entry.horse_id] = imputed_stats

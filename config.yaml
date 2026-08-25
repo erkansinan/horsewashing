@@ -15,6 +15,8 @@ ev_min_value: 0.02
 ev_fractional_kelly: 0.35
 ev_max_kelly_fraction: 0.25
 backtest_lookback_days: 8
+backtest_leakage_safe_mode: true
+backtest_exclude_recent_races: 1
 weights:
   form: 0.35
   jockey_trainer: 0.15
