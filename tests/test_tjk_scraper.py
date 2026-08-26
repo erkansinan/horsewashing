@@ -64,3 +64,40 @@ def test_get_horse_statistics_raises_not_implemented() -> None:
         assert False, "DataSourceError bekleniyordu"
     except DataSourceError:
         pass
+
+
+def test_get_daily_race_results_parses_positions() -> None:
+    source = TJKHtmlDataSource()
+    tabs_html = """
+    <html><body>
+      <ul class='gunluk-tabs'>
+        <li><a id='Ankara' href='/TR/YarisSever/Info/Sehir/GunlukYarisSonuclari?SehirId=5&QueryParameter_Tarih=18/08/2026'>Ankara</a></li>
+      </ul>
+    </body></html>
+    """
+    city_results_html = """
+    <html><body>
+      <h3>1. Kosu 14:00</h3>
+      <table>
+        <tr><td>1</td><td>DENIZ YILDIZI(4)</td><td>1.24.10</td></tr>
+        <tr><td>2</td><td>ASIL DUMAN(7)</td><td>1.24.70</td></tr>
+      </table>
+      <h3>2. Kosu 14:30</h3>
+      <table>
+        <tr><td>1</td><td>MERT YIGIT(2)</td><td>1.36.10</td></tr>
+      </table>
+    </body></html>
+    """
+
+    calls = {"count": 0}
+
+    def fake_get_html(url: str, params: dict[str, object]) -> str:  # noqa: ARG001
+        calls["count"] += 1
+        return tabs_html if calls["count"] == 1 else city_results_html
+
+    source._get_html = fake_get_html  # type: ignore[method-assign]
+    results = source.get_daily_race_results(date(2026, 8, 18), "Ankara")
+
+    assert results[1][4] == 1
+    assert results[1][7] == 2
+    assert results[2][2] == 1

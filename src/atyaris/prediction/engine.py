@@ -69,7 +69,14 @@ class PredictionEngine:
         if not entries:
             raise ValueError(f"Kosu {race.race_no} icin aktif at bulunamadi.")
 
-        prepared = prepare_race_data(self._data_source, race)
+        prepared = prepare_race_data(
+            self._data_source,
+            race,
+            as_of_date=(race.start_time.date() if self._settings.backtest_leakage_safe_mode else None),
+            exclude_most_recent_races=(
+                self._settings.backtest_exclude_recent_races if self._settings.backtest_leakage_safe_mode else 0
+            ),
+        )
         missing_ids = {entry.horse_id for entry in prepared.missing_stats_entries}
         features = build_entry_features(race, prepared.stats_by_horse_id)
         ranker = EnsembleRanker(
@@ -213,9 +220,9 @@ class PredictionEngine:
             "Yaris problemi mutlak regresyondan cok goreceli siralama oldugu icin ranking kanali agirliklandirildi.",
             "Nihai siralamada sapmayi azaltmak icin model olasiligi + guven + baz skor + piyasa olasiligi ile konservatif bir consensus duzeltmesi uygulandi.",
             (
-                f"Backtest leakage-safe modu: acik (as_of kesiti, en yeni {self._settings.backtest_exclude_recent_races} yaris dislanir)."
+                f"Leakage-safe veri kesiti: acik (as_of kesiti, en yeni {self._settings.backtest_exclude_recent_races} yaris dislanir)."
                 if self._settings.backtest_leakage_safe_mode
-                else "Backtest leakage-safe modu: kapali (tum gecmis kayitlar kullanilir)."
+                else "Leakage-safe veri kesiti: kapali (tum gecmis kayitlar kullanilir)."
             ),
             "Eksik/gurultulu veri median/notr imputasyon ile tamamlandi; notlar asagida listelendi.",
             backtest_note,

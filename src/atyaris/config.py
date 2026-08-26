@@ -54,6 +54,33 @@ class Settings(BaseSettings):
     backtest_lookback_days: int = 8
     backtest_leakage_safe_mode: bool = True
     backtest_exclude_recent_races: int = 1
+    backtest_optimize_calibration: bool = True
+    phase1_raw_csv_path: str = "data/raw/synthetic_races.csv"
+    phase1_clean_csv_path: str = "data/processed/clean_races.csv"
+    phase1_features_csv_path: str = "data/processed/features_phase1.csv"
+    phase1_model_path: str = "models/phase1_logreg.joblib"
+    phase1_min_train_days: int = 90
+    phase1_holdout_days: int = 30
+    phase2_enable_advanced_features: bool = True
+    phase2_style_front_threshold: float = 0.6
+    phase2_style_presser_threshold: float = 0.2
+    phase2_layoff_days: int = 75
+    phase3_calibration_method: str = "isotonic"
+    phase3_calibration_days: int = 21
+    phase3_enable_ev: bool = True
+    phase4_default_budget: float = 500.0
+    phase4_unit_cost: float = 1.0
+    phase4_beam_width: int = 80
+    phase4_top_per_leg: int = 4
+    phase4_simulation_count: int = 20000
+    phase4_base_payout: float = 120000.0
+    phase4_no_bet_ev_threshold: float = 0.0
+    phase4_min_confidence: float = 0.35
+    phase4_concentration_penalty: float = 0.15
+    phase5_tracking_db_path: str = "data/database/experiments.sqlite3"
+    phase5_report_dir: str = "reports"
+    phase5_top_feature_count: int = 15
+    phase5_auto_promote_candidate: bool = True
     weights: ScoringWeights = ScoringWeights()
 
     @classmethod

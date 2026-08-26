@@ -102,6 +102,54 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Phase 4 ML Pipeline (Leakage-Safe + Calibration + EV + 6'li Optimizer)
+
+Asagidaki komutlar, sentetik veri ile Phase 1 akisini uctan uca calistirir:
+
+```powershell
+python main.py ingest --start-date 2024-01-01 --end-date 2025-12-31
+python main.py preprocess
+python main.py features
+python main.py train
+python main.py predict --date 2025-12-31
+python main.py backtest
+python main.py optimize-ticket --date 2025-12-31 --budget 500
+python main.py report --date 2025-12-31 --budget 500
+```
+
+Esdeger olarak mevcut CLI uzerinden de calistirabilirsiniz:
+
+```powershell
+atyaris ml ingest
+atyaris ml preprocess
+atyaris ml features
+atyaris ml train
+atyaris ml predict --date 2025-12-31
+atyaris ml backtest
+atyaris ml optimize-ticket --date 2025-12-31 --budget 500
+atyaris ml report --date 2025-12-31 --budget 500
+```
+
+Not: `calibrate`, `optimize`, `report` komutlari aktiftir.
+
+Phase 3 notlari:
+- `train` komutu artik logistic + random forest ensemble egitir ve holdout uzerinde blend agirligini secer.
+- `calibrate` komutu aktif; `phase3_calibration_method` (`isotonic`/`platt`/`none`) ayarina gore kalibratoru yeniden uretir.
+- `predict` ciktilarinda `Edge`, `EV` ve `Decision (BET/NO_BET)` kolonlari bulunur.
+- `backtest` ciktilari artik `ece`, `roi` ve `total_bets` alanlarini da raporlar.
+
+Phase 4 notlari:
+- `optimize-ticket` komutu 6 ayaklik yarislari kullanarak beam search ile aday kolonlari uretir.
+- Monte Carlo simülasyon (`phase4_simulation_count`) ile her kolon icin `monte_carlo_hit_rate` hesaplanir.
+- Butce (`--budget`) ve birim maliyet (`phase4_unit_cost`) ile toplam kolon sayisi sinirlanir.
+- EV/confidence esikleri gecilemiyorsa sistem `NO_BET` sonucu dondurebilir.
+
+Phase 5 notlari:
+- `train` her calistiginda model version kaydi SQLite tracking veritabanina yazilir.
+- `report` komutu backtest + tahmin + kolon optimizasyon + explainability sonucunu birlestirir.
+- Otomatik dashboard HTML ve JSON rapor dosyasi `phase5_report_dir` altina yazilir.
+- Explainability katmani permutation importance uretir; SHAP kuruluysa opsiyonel SHAP ozeti de rapora eklenir.
+
 ## Kullanim
 
 ### Gunun bultenini listele (ornek veriyle)

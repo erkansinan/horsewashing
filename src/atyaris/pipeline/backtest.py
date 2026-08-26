@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 import math
 from statistics import mean, pstdev
+from typing import Any
 
 from atyaris.config import Settings
 from atyaris.data_sources.base import RaceDataSource
@@ -21,12 +22,34 @@ class BacktestRow:
     stake_return: float
 
 
+@dataclass
+class BacktestCase:
+    features: list[Any]
+    entries: list[Any]
+    winner_horse_id: str
+
+
 def _actual_winner_horse_id(race: Race) -> str | None:
     finished = [e for e in race.active_entries if e.actual_finish_position]
     if not finished:
         return None
     winner = min(finished, key=lambda e: e.actual_finish_position or 99)
     return winner.horse_id
+
+
+def _inject_external_results(
+    race: Race,
+    result_map: dict[int, dict[int, int]] | None,
+) -> None:
+    """Dis kaynaktan gelen yaris sonucuyla entry.actual_finish_position alanini doldurur."""
+    if not result_map:
+        return
+    race_results = result_map.get(race.race_no)
+    if not race_results:
+        return
+    for entry in race.active_entries:
+        if entry.number in race_results:
+            entry.actual_finish_position = race_results[entry.number]
 
 
 def _log_loss(rows: list[BacktestRow]) -> float:
@@ -68,6 +91,38 @@ def _sharpe_like(returns: list[float]) -> float:
     return avg / vol
 
 
+def _evaluate_cases(
+    cases: list[BacktestCase],
+    settings: Settings,
+    calibration_temperature: float,
+) -> list[BacktestRow]:
+    ranker = EnsembleRanker(
+        boosting_weight=settings.ensemble_boosting_weight,
+        ranking_weight=settings.ensemble_ranking_weight,
+        calibration_temperature=calibration_temperature,
+    )
+    rows: list[BacktestRow] = []
+    for case in cases:
+        ranked = ranker.rank(case.features)
+        by_horse = {r.horse_id: r for r in ranked}
+        for entry in case.entries:
+            pred = by_horse.get(entry.horse_id)
+            if pred is None:
+                continue
+            is_winner = 1 if entry.horse_id == case.winner_horse_id else 0
+            stake_return = 0.0
+            if pred.calibrated_probability >= settings.ev_probability_threshold and entry.odds and entry.odds > 1.0:
+                stake_return = (entry.odds - 1.0) if is_winner else -1.0
+            rows.append(
+                BacktestRow(
+                    win_probability=pred.calibrated_probability,
+                    is_winner=is_winner,
+                    stake_return=stake_return,
+                )
+            )
+    return rows
+
+
 def build_walk_forward_backtest(
     data_source: RaceDataSource,
     reference_date: date,
@@ -75,19 +130,24 @@ def build_walk_forward_backtest(
     lookback_days: int = 8,
 ) -> BacktestMetrics:
     """Zaman bazli geriye yuruyen mini backtest (walk-forward) uygular."""
-    ranker = EnsembleRanker(
-        boosting_weight=settings.ensemble_boosting_weight,
-        ranking_weight=settings.ensemble_ranking_weight,
-        calibration_temperature=settings.calibration_temperature,
-    )
-
     rows: list[BacktestRow] = []
     evaluated_races = 0
+    cases: list[BacktestCase] = []
+    result_cache: dict[tuple[date, str], dict[int, dict[int, int]]] = {}
 
     for shift in range(lookback_days, 0, -1):
         target_date = reference_date - timedelta(days=shift)
         races = data_source.get_daily_races(target_date)
         for race in races:
+            if _actual_winner_horse_id(race) is None and hasattr(data_source, "get_daily_race_results"):
+                cache_key = (target_date, race.hippodrome)
+                if cache_key not in result_cache:
+                    try:
+                        result_cache[cache_key] = data_source.get_daily_race_results(target_date, race.hippodrome)  # type: ignore[attr-defined]
+                    except Exception:
+                        result_cache[cache_key] = {}
+                _inject_external_results(race, result_cache.get(cache_key))
+
             winner_id = _actual_winner_horse_id(race)
             if not winner_id:
                 continue
@@ -100,25 +160,30 @@ def build_walk_forward_backtest(
                 ),
             )
             features = build_entry_features(race, prepared.stats_by_horse_id)
-            ranked = ranker.rank(features)
-            by_horse = {r.horse_id: r for r in ranked}
             evaluated_races += 1
+            cases.append(BacktestCase(features=features, entries=race.active_entries, winner_horse_id=winner_id))
 
-            for entry in race.active_entries:
-                pred = by_horse.get(entry.horse_id)
-                if pred is None:
-                    continue
-                is_winner = 1 if entry.horse_id == winner_id else 0
-                stake_return = 0.0
-                if pred.calibrated_probability >= settings.ev_probability_threshold and entry.odds and entry.odds > 1.0:
-                    stake_return = (entry.odds - 1.0) if is_winner else -1.0
-                rows.append(
-                    BacktestRow(
-                        win_probability=pred.calibrated_probability,
-                        is_winner=is_winner,
-                        stake_return=stake_return,
-                    )
-                )
+    if cases:
+        calibration_candidates = [settings.calibration_temperature]
+        if settings.backtest_optimize_calibration:
+            calibration_candidates = [0.65, 0.8, 0.95, 1.1, 1.25]
+
+        best_temperature = settings.calibration_temperature
+        best_rows: list[BacktestRow] = []
+        best_log_loss = float("inf")
+        for temp in calibration_candidates:
+            candidate_rows = _evaluate_cases(cases, settings, temp)
+            if not candidate_rows:
+                continue
+            candidate_loss = _log_loss(candidate_rows)
+            if candidate_loss < best_log_loss:
+                best_log_loss = candidate_loss
+                best_rows = candidate_rows
+                best_temperature = temp
+
+        rows = best_rows
+    else:
+        rows = []
 
     if not rows:
         return BacktestMetrics(
@@ -147,6 +212,11 @@ def build_walk_forward_backtest(
                 f"Leakage-safe mod aktif: as_of kesiti + en yeni {settings.backtest_exclude_recent_races} kosu dislama uygulandi."
                 if settings.backtest_leakage_safe_mode
                 else "Leakage-safe mod kapali: tum erisilebilir gecmis kayitlar kullanildi."
+            ),
+            (
+                f"Kalibrasyon optimizasyonu aktif: en iyi sicaklik {best_temperature:.2f} secildi (log-loss minimizasyonu)."
+                if settings.backtest_optimize_calibration and cases
+                else "Kalibrasyon optimizasyonu kapali veya veri yetersiz."
             ),
             "ROI yalnizca esik ustu sinyallerde 1 birim stake ile simule edildi.",
         ],

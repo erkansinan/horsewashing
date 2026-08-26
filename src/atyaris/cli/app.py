@@ -8,12 +8,14 @@ from rich.console import Console
 from rich.table import Table
 
 from atyaris.config import get_settings
+from atyaris.ml.cli import app as ml_app
 from atyaris.models.entities import Race, RacePrediction
 from atyaris.prediction.engine import PredictionEngine
 from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
 from atyaris.utils.logging_config import configure_logging
 
 app = typer.Typer(add_completion=False, help="Turkiye At Yarisi Tahmin Araci")
+app.add_typer(ml_app, name="ml")
 console = Console()
 
 

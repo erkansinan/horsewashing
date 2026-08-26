@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Phase 5 Dashboard</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+    h1, h2 { color: #0b3a6e; }
+    .card { background: white; border: 1px solid #dbe2ea; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #dbe2ea; padding: 6px 8px; text-align: left; }
+    th { background: #eef4fb; }
+    .meta { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Phase 5 Dashboard</h1>
+  <div class="card meta">
+    <div><strong>Model Version</strong><br>model_v20260825_224138</div>
+    <div><strong>Target Date</strong><br>2025-03-31</div>
+    <div><strong>Generated</strong><br>2026-08-25T22:42:45.942992</div>
+  </div>
+
+  <h2>Backtest Summary</h2>
+  <div class="card"><pre>{
+  "evaluated_days": 0,
+  "evaluated_races": 0,
+  "top1_hit_rate": 0.0,
+  "top2_hit_rate": 0.0,
+  "top3_hit_rate": 0.0,
+  "log_loss": 0.0,
+  "brier": 0.0,
+  "ece": 0.0,
+  "roi": 0.0,
+  "total_bets": 0,
+  "fold_max_train_date": [],
+  "fold_test_date": []
+}</pre></div>
+
+  <h2>Top Predictions (Top-3 per Race)</h2>
+  <div class="card"><table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>race_id</th>
+      <th>horse_id</th>
+      <th>calibrated_probability</th>
+      <th>edge</th>
+      <th>ev</th>
+      <th>bet_decision</th>
+      <th>confidence</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>20250331_01</td>
+      <td>H0149</td>
+      <td>0.282316</td>
+      <td>0.060265</td>
+      <td>0.403109</td>
+      <td>BET</td>
+      <td>0.800809</td>
+    </tr>
+    <tr>
+      <td>20250331_01</td>
+      <td>H0035</td>
+      <td>0.282316</td>
+      <td>0.035018</td>
+      <td>0.261951</td>
+      <td>BET</td>
+      <td>0.757016</td>
+    </tr>
+    <tr>
+      <td>20250331_01</td>
+      <td>H0111</td>
+      <td>0.140171</td>
+      <td>-0.032317</td>
+      <td>-0.102907</td>
+      <td>NO_BET</td>
+      <td>0.929094</td>
+    </tr>
+    <tr>
+      <td>20250331_02</td>
+      <td>H0118</td>
+      <td>0.461257</td>
+      <td>0.171712</td>
+      <td>0.231556</td>
+      <td>BET</td>
+      <td>0.993537</td>
+    </tr>
+    <tr>
+      <td>20250331_02</td>
+      <td>H0029</td>
+      <td>0.184611</td>
+      <td>0.005949</td>
+      <td>-0.200634</td>
+      <td>NO_BET</td>
+      <td>0.859543</td>
+    </tr>
+    <tr>
+      <td>20250331_02</td>
+      <td>H0000</td>
+      <td>0.048307</td>
+      <td>-0.026398</td>
+      <td>-0.500019</td>
+      <td>NO_BET</td>
+      <td>0.994923</td>
+    </tr>
+    <tr>
+      <td>20250331_03</td>
+      <td>H0123</td>
+      <td>0.386881</td>
+      <td>0.072463</td>
+      <td>0.613295</td>
+      <td>BET</td>
+      <td>0.939911</td>
+    </tr>
+    <tr>
+      <td>20250331_03</td>
+      <td>H0247</td>
+      <td>0.386881</td>
+      <td>0.004563</td>
+      <td>0.327003</td>
+      <td>NO_BET</td>
+      <td>0.960831</td>
+    </tr>
+    <tr>
+      <td>20250331_03</td>
+      <td>H0046</td>
+      <td>0.081350</td>
+      <td>-0.044102</td>
+      <td>-0.149892</td>
+      <td>NO_BET</td>
+      <td>0.893617</td>
+    </tr>
+    <tr>
+      <td>20250331_04</td>
+      <td>H0185</td>
+      <td>0.536318</td>
+      <td>0.230275</td>
+      <td>0.844935</td>
+      <td>BET</td>
+      <td>0.997351</td>
+    </tr>
+    <tr>
+      <td>20250331_04</td>
+      <td>H0050</td>
+      <td>0.214653</td>
+      <td>-0.048935</td>
+      <td>-0.143534</td>
+      <td>NO_BET</td>
+      <td>0.821355</td>
+    </tr>
+    <tr>
+      <td>20250331_04</td>
+      <td>H0199</td>
+      <td>0.085827</td>
+      <td>-0.094172</td>
+      <td>-0.498772</td>
+      <td>NO_BET</td>
+      <td>0.926740</td>
+    </tr>
+    <tr>
+      <td>20250331_05</td>
+      <td>H0138</td>
+      <td>0.581694</td>
+      <td>0.064672</td>
+      <td>0.256458</td>
+      <td>BET</td>
+      <td>0.963088</td>
+    </tr>
+    <tr>
+      <td>20250331_05</td>
+      <td>H0196</td>
+      <td>0.094694</td>
+      <td>-0.005132</td>
+      <td>0.060576</td>
+      <td>NO_BET</td>
+      <td>0.809273</td>
+    </tr>
+    <tr>
+      <td>20250331_05</td>
+      <td>H0049</td>
+      <td>0.089491</td>
+      <td>-0.001789</td>
+      <td>0.096269</td>
+      <td>NO_BET</td>
+      <td>0.849864</td>
+    </tr>
+    <tr>
+      <td>20250331_06</td>
+      <td>H0244</td>
+      <td>0.477876</td>
+      <td>0.133605</td>
+      <td>0.290266</td>
+      <td>BET</td>
+      <td>0.980136</td>
+    </tr>
+    <tr>
+      <td>20250331_06</td>
+      <td>H0233</td>
+      <td>0.154512</td>
+      <td>-0.002622</td>
+      <td>-0.085287</td>
+      <td>NO_BET</td>
+      <td>0.946449</td>
+    </tr>
+    <tr>
+      <td>20250331_06</td>
+      <td>H0132</td>
+      <td>0.061780</td>
+      <td>-0.033045</td>
+      <td>-0.393937</td>
+      <td>NO_BET</td>
+      <td>0.929625</td>
+    </tr>
+  </tbody>
+</table></div>
+
+  <h2>Ticket Portfolio</h2>
+  <div class="card"><pre>{
+  "status": "OK",
+  "budget": 10.0,
+  "spent": 10.0,
+  "column_count": 10,
+  "total_expected_value": 6675960.9738773005,
+  "average_hit_rate": 0.013455
+}</pre><table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>column_id</th>
+      <th>combination</th>
+      <th>probability</th>
+      <th>market_probability</th>
+      <th>estimated_payout</th>
+      <th>ev</th>
+      <th>edge</th>
+      <th>confidence</th>
+      <th>cost</th>
+      <th>monte_carlo_hit_rate</th>
+      <th>strategy</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>20250331_01:H0149, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0138, 20250331_06:H0244</td>
+      <td>0.007511</td>
+      <td>0.001101</td>
+      <td>1.089714e+08</td>
+      <td>818464.574032</td>
+      <td>0.006410</td>
+      <td>0.945805</td>
+      <td>1.0</td>
+      <td>0.02845</td>
+      <td>Conservative</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>20250331_01:H0035, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0138, 20250331_06:H0244</td>
+      <td>0.007511</td>
+      <td>0.001226</td>
+      <td>9.784623e+07</td>
+      <td>734905.576562</td>
+      <td>0.006284</td>
+      <td>0.938507</td>
+      <td>1.0</td>
+      <td>0.02820</td>
+      <td>Conservative</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>20250331_01:H0149, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0049, 20250331_06:H0244</td>
+      <td>0.001156</td>
+      <td>0.000194</td>
+      <td>6.172245e+08</td>
+      <td>713209.617566</td>
+      <td>0.000961</td>
+      <td>0.926935</td>
+      <td>1.0</td>
+      <td>0.00330</td>
+      <td>Conservative</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>20250331_01:H0149, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0196, 20250331_06:H0244</td>
+      <td>0.001223</td>
+      <td>0.000213</td>
+      <td>5.643833e+08</td>
+      <td>690066.848073</td>
+      <td>0.001010</td>
+      <td>0.920169</td>
+      <td>1.0</td>
+      <td>0.00515</td>
+      <td>Balanced</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>20250331_01:H0149, 20250331_02:H0118, 20250331_03:H0247, 20250331_04:H0185, 20250331_05:H0138, 20250331_06:H0244</td>
+      <td>0.007511</td>
+      <td>0.001339</td>
+      <td>8.961803e+07</td>
+      <td>673104.891023</td>
+      <td>0.006172</td>
+      <td>0.949292</td>
+      <td>1.0</td>
+      <td>0.02680</td>
+      <td>Balanced</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>20250331_01:H0035, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0049, 20250331_06:H0244</td>
+      <td>0.001156</td>
+      <td>0.000217</td>
+      <td>5.542106e+08</td>
+      <td>640396.336129</td>
+      <td>0.000939</td>
+      <td>0.919636</td>
+      <td>1.0</td>
+      <td>0.00420</td>
+      <td>Balanced</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>20250331_01:H0035, 20250331_02:H0118, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0196, 20250331_06:H0244</td>
+      <td>0.001223</td>
+      <td>0.000237</td>
+      <td>5.067642e+08</td>
+      <td>619616.264199</td>
+      <td>0.000986</td>
+      <td>0.912871</td>
+      <td>1.0</td>
+      <td>0.00400</td>
+      <td>Aggressive</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>20250331_01:H0035, 20250331_02:H0118, 20250331_03:H0247, 20250331_04:H0185, 20250331_05:H0138, 20250331_06:H0244</td>
+      <td>0.007511</td>
+      <td>0.001491</td>
+      <td>8.046872e+07</td>
+      <td>604385.991622</td>
+      <td>0.006020</td>
+      <td>0.941993</td>
+      <td>1.0</td>
+      <td>0.02720</td>
+      <td>Aggressive</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td>20250331_01:H0149, 20250331_02:H0232, 20250331_03:H0123, 20250331_04:H0185, 20250331_05:H0138, 20250331_06:H0244</td>
+      <td>0.000707</td>
+      <td>0.000143</td>
+      <td>8.414876e+08</td>
+      <td>595267.634504</td>
+      <td>0.000565</td>
+      <td>0.928062</td>
+      <td>1.0</td>
+      <td>0.00275</td>
+      <td>Aggressive</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td>20250331_01:H0149, 20250331_02:H0118, 20250331_03:H0247, 20250331_04:H0185, 20250331_05:H0049, 20250331_06:H0244</td>
+      <td>0.001156</td>
+      <td>0.000236</td>
+      <td>5.076053e+08</td>
+      <td>586543.240168</td>
+      <td>0.000919</td>
+      <td>0.930421</td>
+      <td>1.0</td>
+      <td>0.00450</td>
+      <td>Aggressive</td>
+    </tr>
+  </tbody>
+</table></div>
+
+  <h2>Explainability (Permutation Importance)</h2>
+  <div class="card"><table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>feature</th>
+      <th>importance_mean</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>market_probability_norm</td>
+      <td>0.145658</td>
+    </tr>
+    <tr>
+      <td>form_avg_5</td>
+      <td>0.061434</td>
+    </tr>
+    <tr>
+      <td>surface_fit</td>
+      <td>0.026364</td>
+    </tr>
+    <tr>
+      <td>track_fit</td>
+      <td>0.022727</td>
+    </tr>
+    <tr>
+      <td>field_strength_index</td>
+      <td>0.018877</td>
+    </tr>
+    <tr>
+      <td>last_run_perf</td>
+      <td>0.015457</td>
+    </tr>
+    <tr>
+      <td>form_avg_3</td>
+      <td>0.014799</td>
+    </tr>
+    <tr>
+      <td>form_avg_10</td>
+      <td>0.013548</td>
+    </tr>
+    <tr>
+      <td>recovery_score</td>
+      <td>0.011247</td>
+    </tr>
+    <tr>
+      <td>short_rest_flag</td>
+      <td>0.008876</td>
+    </tr>
+    <tr>
+      <td>opponent_strength_mean</td>
+      <td>0.007023</td>
+    </tr>
+    <tr>
+      <td>form_var_5</td>
+      <td>0.003311</td>
+    </tr>
+    <tr>
+      <td>seasonal_race_load</td>
+      <td>0.003300</td>
+    </tr>
+    <tr>
+      <td>weight</td>
+      <td>0.003120</td>
+    </tr>
+    <tr>
+      <td>trend_3_10</td>
+      <td>0.002331</td>
+    </tr>
+  </tbody>
+</table></div>
+
+  <h2>Tracking Snapshot</h2>
+  <div class="card"><pre>{
+  "models": [
+    {
+      "model_version": "model_v20260825_224138",
+      "created_at": "2026-08-25T22:41:38.259772",
+      "status": "candidate",
+      "calibration_method": "isotonic",
+      "blend_weight": 0.1
+    }
+  ],
+  "backtests": [
+    {
+      "model_version": "model_v20260825_224138",
+      "created_at": "2026-08-25T22:42:45.816370",
+      "metrics": {
+        "evaluated_days": 0,
+        "evaluated_races": 0,
+        "top1_hit_rate": 0.0,
+        "top2_hit_rate": 0.0,
+        "top3_hit_rate": 0.0,
+        "log_loss": 0.0,
+        "brier": 0.0,
+        "ece": 0.0,
+        "roi": 0.0,
+        "total_bets": 0,
+        "fold_max_train_date": [],
+        "fold_test_date": []
+      }
+    },
+    {
+      "model_version": "model_v20260825_224138",
+      "created_at": "2026-08-25T22:41:44.949048",
+      "metrics": {
+        "evaluated_days": 0,
+        "evaluated_races": 0,
+        "top1_hit_rate": 0.0,
+        "top2_hit_rate": 0.0,
+        "top3_hit_rate": 0.0,
+        "log_loss": 0.0,
+        "brier": 0.0,
+        "ece": 0.0,
+        "roi": 0.0,
+        "total_bets": 0,
+        "fold_max_train_date": [],
+        "fold_test_date": []
+      }
+    }
+  ],
+  "tickets": [
+    {
+      "model_version": "model_v20260825_224138",
+      "created_at": "2026-08-25T22:42:45.821372",
+      "target_date": "2025-03-31",
+      "budget": 10.0,
+      "summary": {
+        "status": "OK",
+        "budget": 10.0,
+        "spent": 10.0,
+        "column_count": 10,
+        "total_expected_value": 6675960.9738773005,
+        "average_hit_rate": 0.013455
+      }
+    },
+    {
+      "model_version": "model_v20260825_224138",
+      "created_at": "2026-08-25T22:41:44.953372",
+      "target_date": "2025-03-31",
+      "budget": 10.0,
+      "summary": {
+        "status": "OK",
+        "budget": 10.0,
+        "spent": 10.0,
+        "column_count": 10,
+        "total_expected_value": 6675960.9738773005,
+        "average_hit_rate": 0.013455
+      }
+    }
+  ]
+}</pre></div>
+</body>
+</html>

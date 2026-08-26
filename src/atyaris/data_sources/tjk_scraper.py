@@ -116,6 +116,8 @@ def _match_hippodrome(city: str) -> str | None:
 _DAILY_PROGRAM_PATH = "/TR/YarisSever/Info/Page/GunlukYarisProgrami"
 _DAILY_PROGRAM_DATA_PATH = "/TR/YarisSever/Info/Data/GunlukYarisProgrami"
 _DAILY_PROGRAM_CITY_PATH = "/TR/YarisSever/Info/Sehir/GunlukYarisProgrami"
+_DAILY_RESULTS_DATA_PATH = "/TR/YarisSever/Info/Data/GunlukYarisSonuclari"
+_DAILY_RESULTS_CITY_PATH = "/TR/YarisSever/Info/Sehir/GunlukYarisSonuclari"
 _HORSE_HISTORY_PATH = "/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri"
 
 _SURFACE_MAP = {
@@ -185,6 +187,85 @@ class TJKHtmlDataSource(RaceDataSource):
             if m:
                 mapping[matched] = int(m.group(1))
         return mapping
+
+    def _get_results_hippodrome_sehir_ids(self, target_date: date) -> dict[str, int]:
+        """Gunluk yaris sonuclari sayfasindaki hipodrom->SehirId eslesmesi."""
+        url = f"{self._base_url}{_DAILY_RESULTS_DATA_PATH}"
+        params = {
+            "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
+            "Era": "today",
+        }
+        html = self._get_html(url, params)
+        soup = BeautifulSoup(html, "lxml")
+        mapping: dict[str, int] = {}
+        for link in soup.select("ul.gunluk-tabs li a"):
+            raw = (link.get("id") or link.get_text(" ", strip=True) or "").strip()
+            if not raw:
+                continue
+            name = re.sub(r"\s*\(.*\)\s*$", "", raw).strip()
+            matched = _match_hippodrome(name)
+            if not matched:
+                continue
+            href = link.get("href") or ""
+            m = re.search(r"[?&]SehirId=(\d+)", href)
+            if m:
+                mapping[matched] = int(m.group(1))
+        return mapping
+
+    def get_daily_race_results(self, target_date: date, city: str) -> dict[int, dict[int, int]]:
+        """Secili hipodrom/tarih icin kosu sonucu haritasi dondurur.
+
+        Donus: ``{race_no: {horse_number: finish_position}}``
+        """
+        matched = _match_hippodrome(city)
+        if matched is None:
+            return {}
+
+        try:
+            sehir_ids = self._get_results_hippodrome_sehir_ids(target_date)
+        except Exception as exc:  # noqa: BLE001
+            raise DataSourceError(f"Sonuc hipodrom/SehirId listesi cekilirken hata: {exc}") from exc
+
+        sehir_id = sehir_ids.get(matched)
+        if sehir_id is None:
+            return {}
+
+        url = f"{self._base_url}{_DAILY_RESULTS_CITY_PATH}"
+        params = {
+            "SehirId": sehir_id,
+            "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
+            "SehirAdi": matched,
+            "Era": "today",
+        }
+        html = self._get_html(url, params)
+        soup = BeautifulSoup(html, "lxml")
+
+        results: dict[int, dict[int, int]] = {}
+        for header_text in soup.find_all(string=_RACE_HEADER_RE):
+            match = _RACE_HEADER_RE.search(str(header_text))
+            if not match:
+                continue
+            race_no = int(match.group(1))
+            table = header_text.parent.find_next("table")
+            if table is None:
+                continue
+
+            race_map = results.setdefault(race_no, {})
+            for row in table.find_all("tr"):
+                cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+                if len(cells) < 2:
+                    continue
+                pos_match = re.search(r"^\d+", cells[0] or "")
+                if not pos_match:
+                    continue
+                finish_position = int(pos_match.group(0))
+                horse_number_match = re.search(r"\((\d+)\)", cells[1] or "")
+                if not horse_number_match:
+                    continue
+                horse_number = int(horse_number_match.group(1))
+                race_map[horse_number] = finish_position
+
+        return results
 
     def get_available_hippodromes(self, target_date: date) -> list[str]:
         """Verilen tarihte TJK gunluk programinda listelenen hipodromlari dondurur.
