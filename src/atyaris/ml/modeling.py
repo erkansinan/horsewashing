@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 
 import joblib
 import numpy as np
@@ -10,6 +11,18 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+
+def _safe_joblib_load(path: str):
+    try:
+        return joblib.load(path)
+    except ModuleNotFoundError as exc:
+        if exc.name != "numpy._core":
+            raise
+        import numpy.core as numpy_core  # type: ignore[attr-defined]
+
+        sys.modules.setdefault("numpy._core", numpy_core)
+        return joblib.load(path)
 
 
 @dataclass
@@ -131,7 +144,7 @@ def save_artifact(artifact: ModelArtifact, path: str) -> None:
 
 
 def load_artifact(path: str) -> ModelArtifact:
-    payload = joblib.load(path)
+    payload = _safe_joblib_load(path)
     return ModelArtifact(pipeline=payload["pipeline"], feature_columns=list(payload["feature_columns"]))
 
 
@@ -149,7 +162,7 @@ def save_phase3_artifact(artifact: EnsembleArtifact, calibrator_payload: dict[st
 
 
 def load_phase3_artifact(path: str) -> tuple[EnsembleArtifact, dict[str, object]]:
-    payload = joblib.load(path)
+    payload = _safe_joblib_load(path)
     artifact = EnsembleArtifact(
         logistic=payload["logistic"],
         random_forest=payload["random_forest"],

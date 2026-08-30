@@ -7,11 +7,15 @@ ile paylasir; boylece iki arayuz arasinda is mantigi tekrarlanmaz.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+import re
 from types import SimpleNamespace
+from urllib.parse import urlencode
 from xml.sax.saxutils import escape
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -19,6 +23,16 @@ from fastapi.templating import Jinja2Templates
 from atyaris.config import get_settings
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.ml.pipeline import (
+    build_features,
+    ingest_synthetic,
+    optimize_for_date,
+    paths_from_settings,
+    predict_for_date,
+    preprocess_raw,
+    train_phase1_model,
+)
+from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.prediction.engine import PredictionEngine
 from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
 from atyaris.utils.logging_config import configure_logging
@@ -41,12 +55,41 @@ _SORTABLE_FIELDS = {
     "kelly": "Kelly",
 }
 
+_ML_SORTABLE_FIELDS = {
+    "rank": "Rank",
+    "horse_id": "At ID",
+    "odds": "Ganyan",
+    "calibrated_probability": "P(win)",
+    "confidence": "Guven",
+    "edge": "Edge",
+    "ev": "EV",
+}
+
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
+@dataclass
+class MLRaceSummary:
+    race_id: str
+    race_name: str
+    horse_count: int
+    top_horse_name: str
+    top_probability: float
+    value_bet_count: int
+
+
 def _safe_metric(value: float | None, fallback: float) -> float:
     return value if value is not None else fallback
+
+
+def _safe_float(value, default: float = 0.0) -> float:  # type: ignore[no-untyped-def]
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
@@ -94,6 +137,171 @@ def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
     return item.score.total_score
 
 
+def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
+    if sort_by == "rank":
+        return int(row.get("rank", 9999))
+    if sort_by == "horse_id":
+        return str(row.get("horse_id", ""))
+    if sort_by == "odds":
+        return _safe_float(row.get("odds"), 9999.0)
+    if sort_by == "calibrated_probability":
+        return _safe_float(row.get("calibrated_probability"), -1.0)
+    if sort_by == "confidence":
+        return _safe_float(row.get("confidence"), -1.0)
+    if sort_by == "edge":
+        return _safe_float(row.get("edge"), -9999.0)
+    if sort_by == "ev":
+        return _safe_float(row.get("ev"), -9999.0)
+    return _safe_float(row.get("calibrated_probability"), -1.0)
+
+
+def _ml_race_summaries(frame: pd.DataFrame) -> list[MLRaceSummary]:
+    if frame.empty:
+        return []
+
+    rows: list[MLRaceSummary] = []
+    grouped = frame.sort_values(["race_id", "rank"]).groupby("race_id", sort=True)
+    for race_id, race_df in grouped:
+        first = race_df.iloc[0]
+        rows.append(
+            MLRaceSummary(
+                race_id=str(race_id),
+                race_name=str(first.get("race_name", race_id)),
+                horse_count=int(len(race_df)),
+                top_horse_name=str(first.get("horse_name", first.get("horse_id", "-"))),
+                top_probability=float(first.get("calibrated_probability", 0.0)),
+                value_bet_count=int((race_df.get("bet_decision", "NO_BET") == "BET").sum()),
+            )
+        )
+    return rows
+
+
+def _parse_race_no(race_id: str) -> int | None:
+    m = re.search(r"_(\d+)$", race_id)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+    out = frame.copy()
+    if out.empty:
+        if "race_name" not in out.columns:
+            out["race_name"] = pd.Series(dtype="object")
+        if "horse_name" not in out.columns:
+            out["horse_name"] = pd.Series(dtype="object")
+        return out
+
+    if not paths.clean_csv.exists():
+        out["race_name"] = out["race_id"].astype(str)
+        out["horse_name"] = out["horse_id"].astype(str)
+        return out
+
+    clean = pd.read_csv(paths.clean_csv)
+    clean["date"] = pd.to_datetime(clean["date"]).dt.date
+    day_clean = clean[clean["date"] == target_date].copy()
+    if day_clean.empty:
+        out["race_name"] = out["race_id"].astype(str)
+        out["horse_name"] = out["horse_id"].astype(str)
+        return out
+
+    labels = day_clean[["race_id", "horse_id", "horse_name", "track"]].drop_duplicates()
+    out = out.merge(labels, on=["race_id", "horse_id"], how="left", suffixes=("", "_label"))
+
+    race_label_map: dict[str, str] = {}
+    for rid in out["race_id"].astype(str).unique().tolist():
+        sub = out[out["race_id"].astype(str) == rid]
+        track = str(sub["track"].dropna().iloc[0]) if "track" in sub.columns and not sub["track"].dropna().empty else "-"
+        race_no = _parse_race_no(rid)
+        if race_no is None:
+            race_label_map[rid] = f"{track} - {rid}"
+        else:
+            race_label_map[rid] = f"{track} - {race_no}. Kosu"
+
+    out["race_name"] = out["race_id"].astype(str).map(race_label_map)
+    out["horse_name"] = out["horse_name"].fillna(out["horse_id"]).astype(str)
+    return out
+
+
+def _ml_has_date(paths, target_date: date) -> bool:  # type: ignore[no-untyped-def]
+    if not paths.features_csv.exists():
+        return False
+    try:
+        dates = pd.read_csv(paths.features_csv, usecols=["date"])
+    except Exception:  # noqa: BLE001
+        return False
+    parsed = pd.to_datetime(dates["date"], errors="coerce").dt.date
+    return bool((parsed == target_date).any())
+
+
+def _ml_model_loadable(paths) -> bool:  # type: ignore[no-untyped-def]
+    if not paths.model_path.exists():
+        return False
+    try:
+        load_phase3_artifact(str(paths.model_path))
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ignore[no-untyped-def]
+    paths = paths_from_settings(settings)
+    needs_refresh = (not _ml_model_loadable(paths)) or (not _ml_has_date(paths, target_date))
+    if not needs_refresh:
+        return
+
+    start_date = target_date - timedelta(days=420)
+    ingest_synthetic(start_date, target_date, paths)
+    preprocess_raw(paths)
+    build_features(paths)
+    train_phase1_model(
+        paths,
+        holdout_days=settings.phase1_holdout_days,
+        calibration_days=settings.phase3_calibration_days,
+        calibration_method=settings.phase3_calibration_method,
+    )
+
+
+def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+    paths = paths_from_settings(settings)
+    _ensure_ml_ready_for_date(settings, target_date)
+    try:
+        pred = predict_for_date(
+            paths,
+            target_date,
+            enable_ev=settings.phase3_enable_ev,
+            ev_probability_threshold=settings.ev_probability_threshold,
+            ev_min_edge=settings.ev_min_edge,
+            ev_min_value=settings.ev_min_value,
+        )
+        return _attach_ml_labels(paths, target_date, pred)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ML predict failed, rebuilding artifacts once: %s", exc)
+        # Force-refresh artifacts once in case persisted files are from an incompatible runtime.
+        start_date = target_date - timedelta(days=420)
+        ingest_synthetic(start_date, target_date, paths)
+        preprocess_raw(paths)
+        build_features(paths)
+        train_phase1_model(
+            paths,
+            holdout_days=settings.phase1_holdout_days,
+            calibration_days=settings.phase3_calibration_days,
+            calibration_method=settings.phase3_calibration_method,
+        )
+        pred = predict_for_date(
+            paths,
+            target_date,
+            enable_ev=settings.phase3_enable_ev,
+            ev_probability_threshold=settings.ev_probability_threshold,
+            ev_min_edge=settings.ev_min_edge,
+            ev_min_value=settings.ev_min_value,
+        )
+        return _attach_ml_labels(paths, target_date, pred)
+
+
 def create_app() -> FastAPI:
     """FastAPI uygulamasini olusturur (uvicorn factory olarak kullanilir)."""
     configure_logging()
@@ -102,7 +310,7 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
-        source: str = Query("sample", pattern="^(sample|tjk)$"),
+        source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
     ) -> HTMLResponse:
@@ -110,11 +318,45 @@ def create_app() -> FastAPI:
         error = None
         info = None
         races = []
+        ml_races: list[MLRaceSummary] = []
         hippodromes: list[str] = []
         resolved_date = date_str
         try:
             parsed_date = parse_date(date_str or None)
             resolved_date = parsed_date.isoformat()
+
+            if source == "ml":
+                pred_full = _predict_ml_for_date_with_recovery(settings, parsed_date)
+                if "track" in pred_full.columns:
+                    hippodromes = sorted({str(x) for x in pred_full["track"].dropna().astype(str).tolist()})
+
+                pred = pred_full
+                if city and "track" in pred_full.columns:
+                    pred = pred_full[pred_full["track"].astype(str).str.upper() == city.upper()].copy()
+
+                ml_races = _ml_race_summaries(pred)
+                if not ml_races:
+                    info = (
+                        "Secili tarih ve hipodrom icin ML kosu bulunamadi."
+                        if city
+                        else "Secili tarih icin ML kosu bulunamadi."
+                    )
+
+                return templates.TemplateResponse(
+                    request,
+                    "index.html",
+                    {
+                        "races": races,
+                        "ml_races": ml_races,
+                        "error": error,
+                        "info": info,
+                        "source": source,
+                        "date": resolved_date,
+                        "city": city,
+                        "hippodromes": hippodromes,
+                    },
+                )
+
             data_source = build_data_source(source, settings)
             if isinstance(data_source, TJKHtmlDataSource):
                 hippodromes = data_source.get_available_hippodromes(parsed_date)
@@ -136,12 +378,16 @@ def create_app() -> FastAPI:
             error = f"Gecersiz istek: {exc}"
         except DataSourceError as exc:
             error = f"Veri kaynagi hatasi: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Index endpoint failure")
+            error = f"Beklenmeyen hata: {exc}"
 
         return templates.TemplateResponse(
             request,
             "index.html",
             {
                 "races": races,
+                "ml_races": ml_races,
                 "error": error,
                 "info": info,
                 "source": source,
@@ -155,18 +401,19 @@ def create_app() -> FastAPI:
     def predict(
         request: Request,
         race_id: str,
-        source: str = Query("sample", pattern="^(sample|tjk)$"),
+        source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
         sort_by: str = Query(
             "strategy",
-            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly)$",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|edge)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
         settings = get_settings()
         error = None
         prediction = None
+        ml_prediction = None
         display_rows = []
         sort_urls: dict[str, str] = {}
         pdf_url = ""
@@ -195,6 +442,71 @@ def create_app() -> FastAPI:
 
         try:
             parsed_date = parse_date(date_str or None)
+
+            if source == "ml":
+                paths = paths_from_settings(settings)
+                pred = _predict_ml_for_date_with_recovery(settings, parsed_date)
+                if city and "track" in pred.columns:
+                    pred = pred[pred["track"].astype(str).str.upper() == city.upper()].copy()
+
+                race_df = pred[pred["race_id"].astype(str) == race_id].copy()
+                if race_df.empty:
+                    error = (
+                        "ML race_id bulunamadi. Secili hipodrom filtresi nedeniyle kosu bulunamadi olabilir."
+                        if city
+                        else "ML race_id bulunamadi. Lutfen ML yaris listesinden tekrar secin."
+                    )
+                else:
+                    ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
+                    reverse = sort_order == "desc"
+                    records = race_df.to_dict(orient="records")
+                    records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
+
+                    opt = optimize_for_date(paths, parsed_date, settings, budget=settings.phase4_default_budget)
+                    ticket_preview = [
+                        c for c in opt.get("columns", []) if race_id in c.get("combination", {})
+                    ]
+
+                    ml_prediction = {
+                        "race_id": race_id,
+                        "race_name": str(records[0].get("race_name", race_id)) if records else race_id,
+                        "rows": records,
+                        "summary": {
+                            "horse_count": int(len(records)),
+                            "bet_count": int(sum(1 for r in records if r.get("bet_decision") == "BET")),
+                            "top_probability": _safe_float(records[0].get("calibrated_probability"), 0.0) if records else 0.0,
+                        },
+                        "ticket_preview": ticket_preview,
+                        "optimization_summary": opt.get("summary", {}),
+                        "disclaimer": "Bu tahminler istatistiksel analize dayanir, kesinlik tasimaz; sorumlu bahis oynayin.",
+                    }
+
+                    for field in _ML_SORTABLE_FIELDS:
+                        next_direction = "asc" if field == ml_sort_by and sort_order == "desc" else "desc"
+                        if field == ml_sort_by and sort_order == "asc":
+                            next_direction = "desc"
+                        sort_urls[field] = _build_predict_url(sort_field=field, sort_direction=next_direction)
+
+                return templates.TemplateResponse(
+                    request,
+                    "predict.html",
+                    {
+                        "prediction": prediction,
+                        "ml_prediction": ml_prediction,
+                        "rows": display_rows,
+                        "pdf_url": pdf_url,
+                        "table_usage_notes": table_usage_notes,
+                        "error": error,
+                        "source": source,
+                        "date": date_str,
+                        "city": city,
+                        "sort_by": sort_by,
+                        "sort_order": sort_order,
+                        "sort_urls": sort_urls,
+                        "sortable_fields": _ML_SORTABLE_FIELDS,
+                    },
+                )
+
             data_source = build_data_source(source, settings)
             if source == "tjk" and not city:
                 error = "TJK kaynaginda tahmin uretmeden once bir hipodrom secin."
@@ -203,6 +515,7 @@ def create_app() -> FastAPI:
                     "predict.html",
                     {
                         "prediction": prediction,
+                        "ml_prediction": ml_prediction,
                         "rows": display_rows,
                         "table_usage_notes": table_usage_notes,
                         "error": error,
@@ -215,6 +528,7 @@ def create_app() -> FastAPI:
                         "sortable_fields": _SORTABLE_FIELDS,
                     },
                 )
+
             races = fetch_races(data_source, parsed_date, city or None, None)
             race = next((r for r in races if r.id == race_id), None)
             if race is None:
@@ -312,12 +626,16 @@ def create_app() -> FastAPI:
             )
         except DataSourceError as exc:
             error = f"Veri kaynagi hatasi: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Predict endpoint failure")
+            error = f"Beklenmeyen hata: {exc}"
 
         return templates.TemplateResponse(
             request,
             "predict.html",
             {
                 "prediction": prediction,
+                "ml_prediction": ml_prediction,
                 "rows": display_rows,
                 "pdf_url": pdf_url,
                 "table_usage_notes": table_usage_notes,
@@ -334,7 +652,7 @@ def create_app() -> FastAPI:
 
     @app.get("/predict-all-pdf")
     def predict_all_pdf(
-        source: str = Query("sample", pattern="^(sample|tjk)$"),
+        source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
         sort_by: str = Query(
@@ -344,12 +662,14 @@ def create_app() -> FastAPI:
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> Response:
         settings = get_settings()
+        if source == "ml":
+            raise HTTPException(status_code=400, detail="ML modunda PDF ciktisi simdilik desteklenmiyor.")
         if not city:
             raise HTTPException(status_code=400, detail="PDF olusturmak icin once bir hipodrom secin.")
 
         try:
-            from reportlab.lib.pagesizes import A4, landscape
             from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4, landscape
             from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
             from reportlab.lib.units import mm
             import reportlab

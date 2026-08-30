@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from datetime import timedelta
+
+import pandas as pd
 
 from atyaris.ml.pipeline import (
     Phase1Paths,
@@ -61,3 +64,26 @@ def test_phase3_backtest_reports_calibration_and_roi(tmp_path) -> None:
     assert "ece" in out
     assert "roi" in out
     assert "total_bets" in out
+
+
+def test_phase3_predict_returns_empty_for_unknown_date(tmp_path) -> None:
+    paths = _setup_phase3_artifacts(tmp_path)
+
+    frame = pd.read_csv(paths.features_csv)
+    frame["date"] = pd.to_datetime(frame["date"]).dt.date
+    unknown_date = max(frame["date"]) + timedelta(days=400)
+
+    pred = predict_for_date(
+        paths,
+        unknown_date,
+        enable_ev=True,
+        ev_probability_threshold=0.18,
+        ev_min_edge=0.03,
+        ev_min_value=0.02,
+    )
+
+    assert pred.empty
+    assert "raw_probability" in pred.columns
+    assert "calibrated_probability" in pred.columns
+    assert "rank" in pred.columns
+    assert "confidence" in pred.columns

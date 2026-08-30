@@ -5,6 +5,7 @@
     <select id="filter-source" name="source">
       <option value="sample" {% if source == "sample" %}selected{% endif %}>sample (demo)</option>
       <option value="tjk" {% if source == "tjk" %}selected{% endif %}>tjk (canli)</option>
+      <option value="ml" {% if source == "ml" %}selected{% endif %}>ml (phase3/4)</option>
     </select>
   </label>
   <label>Tarih
@@ -29,7 +30,35 @@
   <p>{{ info }}</p>
 {% endif %}
 
-{% if races %}
+{% if source == "ml" and ml_races %}
+  <h2>ML Yarislari</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Kosu</th>
+        <th>At Sayisi</th>
+        <th>Top Aday</th>
+        <th>Top P(win)</th>
+        <th>BET Sinyali</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for race in ml_races %}
+      <tr>
+        <td>{{ race.race_name }}</td>
+        <td>{{ race.horse_count }}</td>
+        <td>{{ race.top_horse_name }}</td>
+        <td>{{ "%.2f"|format(race.top_probability * 100) }}%</td>
+        <td>{{ race.value_bet_count }}</td>
+        <td>
+          <a class="button" href="/predict?race_id={{ race.race_id }}&source=ml&date={{ date }}&city={{ city }}&sort_by=calibrated_probability&sort_order=desc">ML Tahmin Gor</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% elif races %}
   <h2>Gunun Yarislari</h2>
   {% if city %}
   <p>
@@ -64,7 +93,7 @@
       {% endfor %}
     </tbody>
   </table>
-{% elif not error %}
+{% elif not error and source != "ml" %}
   <p>Filtreleri secip "Bulteni Getir" ile o gunku yaris programini listeleyin.</p>
 {% endif %}
 

@@ -9,7 +9,83 @@
   <p class="error">{{ error }}</p>
 {% endif %}
 
-{% if prediction %}
+{% if ml_prediction %}
+  <h2>ML Tahmin - {{ ml_prediction.race_name }}</h2>
+
+  <div class="disclaimer">
+    At Sayisi: {{ ml_prediction.summary.horse_count }} |
+    BET Sinyali: {{ ml_prediction.summary.bet_count }} |
+    Top P(win): {{ "%.2f"|format(ml_prediction.summary.top_probability * 100) }}%
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th><a href="{{ sort_urls.rank }}">Rank{% if sort_by == 'rank' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>At</th>
+        <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.calibrated_probability }}">P(win){% if sort_by == 'calibrated_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.confidence }}">Guven{% if sort_by == 'confidence' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.edge }}">Edge{% if sort_by == 'edge' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.ev }}">EV{% if sort_by == 'ev' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>Karar</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in ml_prediction.rows %}
+      <tr>
+        <td>{{ row.rank }}</td>
+        <td>{{ row.horse_name if row.horse_name else row.horse_id }}</td>
+        <td>{% if row.odds is not none %}{{ "%.2f"|format(row.odds) }}{% else %}-{% endif %}</td>
+        <td>{{ "%.2f"|format(row.calibrated_probability * 100) }}%</td>
+        <td>{{ "%.3f"|format(row.confidence) }}</td>
+        <td>{% if row.edge is not none %}{{ "%.3f"|format(row.edge) }}{% else %}-{% endif %}</td>
+        <td>{% if row.ev is not none %}{{ "%.3f"|format(row.ev) }}{% else %}-{% endif %}</td>
+        <td><span class="tag">{{ row.bet_decision }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Kupon Optimizasyon Ozet</h3>
+  <ul class="reasoning">
+    <li>Durum: {{ ml_prediction.optimization_summary.status }}</li>
+    <li>Butce: {{ ml_prediction.optimization_summary.budget }}</li>
+    <li>Harcanan: {{ ml_prediction.optimization_summary.spent }}</li>
+    <li>Kolon Sayisi: {{ ml_prediction.optimization_summary.column_count }}</li>
+  </ul>
+
+  {% if ml_prediction.ticket_preview %}
+  <h3>Bu Kosuyu Iceren Ornek Kolonlar</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Strateji</th>
+        <th>Kombinasyon</th>
+        <th>Prob</th>
+        <th>EV</th>
+        <th>M.Carlo Hit</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for col in ml_prediction.ticket_preview[:8] %}
+      <tr>
+        <td>{{ col.column_id }}</td>
+        <td>{{ col.strategy }}</td>
+        <td>{{ col.combination }}</td>
+        <td>{{ "%.6f"|format(col.probability) }}</td>
+        <td>{{ "%.3f"|format(col.ev) }}</td>
+        <td>{{ "%.6f"|format(col.monte_carlo_hit_rate) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <p class="disclaimer">{{ ml_prediction.disclaimer }}</p>
+
+{% elif prediction %}
   {% set race = prediction.race %}
   {% set rows = rows if rows else prediction.ranked %}
   <h2>{{ race.hippodrome }} - {{ race.race_no }}. Kosu ({{ race.distance_m }}m, {{ race.surface.value }})</h2>

@@ -133,6 +133,23 @@ def predict_for_date(
     frame = pd.read_csv(paths.features_csv)
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     day_df = frame[frame["date"] == target_date].copy()
+
+    # No rows for the requested date: return an empty frame with expected output columns
+    # instead of passing zero samples into model/scaler steps.
+    if day_df.empty:
+        out = day_df.copy()
+        for col in ["raw_probability", "calibrated_probability", "rank", "uncertainty", "confidence"]:
+            if col not in out.columns:
+                out[col] = pd.Series(dtype="float64")
+        if enable_ev:
+            for col in ["market_probability", "implied_probability", "edge", "ev", "bet_decision"]:
+                if col not in out.columns:
+                    if col == "bet_decision":
+                        out[col] = pd.Series(dtype="object")
+                    else:
+                        out[col] = pd.Series(dtype="float64")
+        return out
+
     artifact, calibrator_payload = load_phase3_artifact(str(paths.model_path))
     calibrator = from_payload(calibrator_payload)
 

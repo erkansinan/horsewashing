@@ -204,6 +204,51 @@ atyaris web
 - `--host`/`--port`/`--reload` secenekleriyle ozellestirilebilir:
   `atyaris web --port 8080 --reload`.
 
+### Web'de ML (phase3/4) ile Tahmin
+
+Web arayuzunde `Kaynak` alaninda `ml (phase3/4)` secildiginde,
+sayfa klasik skor motoru yerine ML pipeline ciktilarini gosterir.
+
+ML modu icin onerilen baslatma:
+
+```powershell
+.venv\Scripts\Activate.ps1
+.venv\Scripts\atyaris.exe web
+```
+
+Not: Sistemde global `atyaris` komutu varsa farkli Python ortamina gidebilir.
+Bu durumda `.venv\Scripts\atyaris.exe web` kullanin.
+
+ML modunda kullanim adimlari:
+
+1. Ana sayfada `Kaynak = ml (phase3/4)` secin.
+2. Takvimden tarih secin.
+3. (Opsiyonel) Hipodrom filtresi secin.
+4. `Bulteni Getir` ile ML yaris listesini acin.
+5. Ilgili satirdan `ML Tahmin Gor` ile kosu detayina gecin.
+
+ML tahmin ekraninda sunulan basliklar:
+
+- `P(win)`: Kalibre edilmis kazanma olasiligi.
+- `Guven`: Modelin belirsizlikten turetilen guven skoru.
+- `Edge` ve `EV`: Piyasa oranina gore deger analizi.
+- `Karar (BET/NO_BET)`: EV/esik kurallarina gore bahis sinyali.
+- `Kupon Optimizasyon Ozet`: Phase 4 beam search + Monte Carlo sonucu.
+
+Otomatik ML hazirlik davranisi:
+
+- Secilen tarih icin model/veri hazir degilse, web katmani gerekli
+  sentetik veri + feature + train adimlarini bir kez otomatik tamamlar.
+- Eski/uyumsuz model dosyasi algilanirsa model yeniden uretilir.
+
+Sik gorulen durumlar:
+
+- `Secili tarih icin ML kosu bulunamadi.`:
+  Tarih filtrelemesi sonucunda ilgili gunde kayitli race olmayabilir.
+- `ML race_id bulunamadi...`:
+  Sayfa acikken tarih/hipodrom degisti ise eski linkle gidilmis olabilir;
+  liste ekranindan kosuyu yeniden secin.
+
 ## Ornek Calistirma Ciktisi (uctan uca akis, gercek/dogrulanmis cikti)
 
 Asagidaki cikti `atyaris predict --source sample --city Ankara --races 1`

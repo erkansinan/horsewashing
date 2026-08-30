@@ -8,6 +8,7 @@ from datetime import datetime
 
 from fastapi.testclient import TestClient
 import atyaris.web.app as web_app_module
+import pandas as pd
 
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.sample_source import SampleDataSource
@@ -108,3 +109,93 @@ def test_predict_all_pdf_returns_400_when_all_races_unpredictable(monkeypatch) -
 
     assert response.status_code == 400
     assert "PDF uretilemedi" in response.text
+
+
+def test_index_ml_mode_lists_ml_races(monkeypatch) -> None:
+    fake_pred = pd.DataFrame(
+        [
+            {
+                "race_id": "20260830_01",
+                "horse_id": "H0001",
+                "rank": 1,
+                "calibrated_probability": 0.34,
+                "bet_decision": "BET",
+                "track": "ANKARA",
+            },
+            {
+                "race_id": "20260830_01",
+                "horse_id": "H0002",
+                "rank": 2,
+                "calibrated_probability": 0.23,
+                "bet_decision": "NO_BET",
+                "track": "ANKARA",
+            },
+        ]
+    )
+    monkeypatch.setattr(web_app_module, "_ensure_ml_ready_for_date", lambda settings, target_date: None)
+    monkeypatch.setattr(web_app_module, "predict_for_date", lambda *args, **kwargs: fake_pred)
+
+    client = _client()
+    response = client.get("/", params={"source": "ml", "date": date.today().isoformat()})
+
+    assert response.status_code == 200
+    assert "ML Yarislari" in response.text
+    assert "ML Tahmin Gor" in response.text
+
+
+def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
+    fake_pred = pd.DataFrame(
+        [
+            {
+                "race_id": "20260830_01",
+                "horse_id": "H0001",
+                "rank": 1,
+                "odds": 2.5,
+                "calibrated_probability": 0.34,
+                "confidence": 0.88,
+                "edge": 0.12,
+                "ev": 0.10,
+                "bet_decision": "BET",
+                "track": "ANKARA",
+            },
+            {
+                "race_id": "20260830_01",
+                "horse_id": "H0002",
+                "rank": 2,
+                "odds": 4.1,
+                "calibrated_probability": 0.23,
+                "confidence": 0.71,
+                "edge": -0.01,
+                "ev": -0.02,
+                "bet_decision": "NO_BET",
+                "track": "ANKARA",
+            },
+        ]
+    )
+    fake_opt = {
+        "summary": {"status": "OK", "budget": 500.0, "spent": 12.0, "column_count": 1},
+        "columns": [
+            {
+                "column_id": "C1",
+                "strategy": "balanced",
+                "combination": {"20260830_01": "H0001"},
+                "probability": 0.12,
+                "ev": 0.34,
+                "monte_carlo_hit_rate": 0.08,
+            }
+        ],
+    }
+
+    monkeypatch.setattr(web_app_module, "_ensure_ml_ready_for_date", lambda settings, target_date: None)
+    monkeypatch.setattr(web_app_module, "predict_for_date", lambda *args, **kwargs: fake_pred)
+    monkeypatch.setattr(web_app_module, "optimize_for_date", lambda *args, **kwargs: fake_opt)
+
+    client = _client()
+    response = client.get(
+        "/predict",
+        params={"race_id": "20260830_01", "source": "ml", "date": date.today().isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert "ML Tahmin - Race 20260830_01" in response.text
+    assert "istatistiksel analize dayanir" in response.text
