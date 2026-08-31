@@ -234,6 +234,13 @@ ML tahmin ekraninda sunulan basliklar:
 - `Edge` ve `EV`: Piyasa oranina gore deger analizi.
 - `Karar (BET/NO_BET)`: EV/esik kurallarina gore bahis sinyali.
 - `Kupon Optimizasyon Ozet`: Phase 4 beam search + Monte Carlo sonucu.
+- Tablolarda teknik ID yerine okunur etiketler kullanilir:
+  yaris satirinda `Hipodrom - N. Kosu`, at satirinda `At adi` gosterilir.
+
+Hipodrom secimi notu:
+
+- ML modunda sehir filtresi Turkce karakter farklarindan bagimsiz eslesir.
+  Ornek: `İstanbul`, `istanbul`, `ISTANBUL` ayni secim olarak kabul edilir.
 
 Otomatik ML hazirlik davranisi:
 

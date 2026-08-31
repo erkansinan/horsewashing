@@ -22,6 +22,7 @@
     <thead>
       <tr>
         <th><a href="{{ sort_urls.rank }}">Rank{% if sort_by == 'rank' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>No</th>
         <th>At</th>
         <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.calibrated_probability }}">P(win){% if sort_by == 'calibrated_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
@@ -35,6 +36,7 @@
       {% for row in ml_prediction.rows %}
       <tr>
         <td>{{ row.rank }}</td>
+        <td>{% if row.number is defined and row.number is not none %}{{ row.number }}{% else %}-{% endif %}</td>
         <td>{{ row.horse_name if row.horse_name else row.horse_id }}</td>
         <td>{% if row.odds is not none %}{{ "%.2f"|format(row.odds) }}{% else %}-{% endif %}</td>
         <td>{{ "%.2f"|format(row.calibrated_probability * 100) }}%</td>

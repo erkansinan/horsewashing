@@ -65,6 +65,29 @@ _ML_SORTABLE_FIELDS = {
     "ev": "EV",
 }
 
+_TRACK_DISPLAY_MAP = {
+    "ANKARA": "Ankara",
+    "ISTANBUL": "İstanbul",
+    "IZMIR": "İzmir",
+}
+
+_TR_ASCII_MAP = str.maketrans(
+    {
+        "ç": "c",
+        "Ç": "C",
+        "ğ": "g",
+        "Ğ": "G",
+        "ı": "i",
+        "İ": "I",
+        "ö": "o",
+        "Ö": "O",
+        "ş": "s",
+        "Ş": "S",
+        "ü": "u",
+        "Ü": "U",
+    }
+)
+
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -77,6 +100,11 @@ class MLRaceSummary:
     top_horse_name: str
     top_probability: float
     value_bet_count: int
+
+
+def _bulletin_source_for_ml(settings):  # type: ignore[no-untyped-def]
+    """ML web flow uses real daily bulletin for date/city/race selection."""
+    return build_data_source("tjk", settings)
 
 
 def _safe_metric(value: float | None, fallback: float) -> float:
@@ -176,6 +204,43 @@ def _ml_race_summaries(frame: pd.DataFrame) -> list[MLRaceSummary]:
     return rows
 
 
+def _ml_race_summaries_from_races(  # type: ignore[no-untyped-def]
+    races: list,
+    data_source,
+    settings,
+) -> list[MLRaceSummary]:
+    engine = PredictionEngine(data_source, settings)
+    rows: list[MLRaceSummary] = []
+    for race in sorted(races, key=lambda r: (r.hippodrome, r.race_no)):
+        active = [e for e in race.entries if not e.is_scratched]
+        top = active[0].horse_name if active else "-"
+        top_probability = 0.0
+        value_bet_count = 0
+        try:
+            race_pred = engine.predict(race)
+            ranked = race_pred.ranked
+            if ranked:
+                top = ranked[0].entry.horse_name
+                top_probability = _safe_float(ranked[0].win_probability, 0.0)
+            value_bet_count = int(
+                sum(1 for hp in ranked if hp.value_bet and hp.value_bet.is_value_bet)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ML race summary prediction failed for %s: %s", race.id, exc)
+
+        rows.append(
+            MLRaceSummary(
+                race_id=str(race.id),
+                race_name=f"{race.hippodrome} - {race.race_no}. Kosu",
+                horse_count=len(active),
+                top_horse_name=top,
+                top_probability=top_probability,
+                value_bet_count=value_bet_count,
+            )
+        )
+    return rows
+
+
 def _parse_race_no(race_id: str) -> int | None:
     m = re.search(r"_(\d+)$", race_id)
     if not m:
@@ -184,6 +249,15 @@ def _parse_race_no(race_id: str) -> int | None:
         return int(m.group(1))
     except ValueError:
         return None
+
+
+def _display_track_name(track: str) -> str:
+    key = _normalize_track_key(track)
+    return _TRACK_DISPLAY_MAP.get(key, track)
+
+
+def _normalize_track_key(value: str) -> str:
+    return value.strip().translate(_TR_ASCII_MAP).upper()
 
 
 def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataFrame:  # type: ignore[no-untyped-def]
@@ -215,11 +289,12 @@ def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataF
     for rid in out["race_id"].astype(str).unique().tolist():
         sub = out[out["race_id"].astype(str) == rid]
         track = str(sub["track"].dropna().iloc[0]) if "track" in sub.columns and not sub["track"].dropna().empty else "-"
+        track_display = _display_track_name(track)
         race_no = _parse_race_no(rid)
         if race_no is None:
-            race_label_map[rid] = f"{track} - {rid}"
+            race_label_map[rid] = f"{track_display} - {rid}"
         else:
-            race_label_map[rid] = f"{track} - {race_no}. Kosu"
+            race_label_map[rid] = f"{track_display} - {race_no}. Kosu"
 
     out["race_name"] = out["race_id"].astype(str).map(race_label_map)
     out["horse_name"] = out["horse_name"].fillna(out["horse_id"]).astype(str)
@@ -326,21 +401,23 @@ def create_app() -> FastAPI:
             resolved_date = parsed_date.isoformat()
 
             if source == "ml":
-                pred_full = _predict_ml_for_date_with_recovery(settings, parsed_date)
-                if "track" in pred_full.columns:
-                    hippodromes = sorted({str(x) for x in pred_full["track"].dropna().astype(str).tolist()})
+                data_source = _bulletin_source_for_ml(settings)
+                if isinstance(data_source, TJKHtmlDataSource):
+                    hippodromes = data_source.get_available_hippodromes(parsed_date)
+                else:
+                    all_races = fetch_races(data_source, parsed_date, None, None)
+                    hippodromes = sorted({r.hippodrome for r in all_races})
 
-                pred = pred_full
-                if city and "track" in pred_full.columns:
-                    pred = pred_full[pred_full["track"].astype(str).str.upper() == city.upper()].copy()
+                if city:
+                    races = fetch_races(data_source, parsed_date, city, None)
+                    ml_races = _ml_race_summaries_from_races(races, data_source, settings)
+                else:
+                    info = "Lutfen listeden bir hipodrom secin."
+                    ml_races = []
 
-                ml_races = _ml_race_summaries(pred)
                 if not ml_races:
-                    info = (
-                        "Secili tarih ve hipodrom icin ML kosu bulunamadi."
-                        if city
-                        else "Secili tarih icin ML kosu bulunamadi."
-                    )
+                    if city:
+                        info = "Secili tarih ve hipodrom icin ML kosu bulunamadi."
 
                 return templates.TemplateResponse(
                     request,
@@ -446,26 +523,34 @@ def create_app() -> FastAPI:
             if source == "ml":
                 paths = paths_from_settings(settings)
                 pred = _predict_ml_for_date_with_recovery(settings, parsed_date)
-                if city and "track" in pred.columns:
-                    pred = pred[pred["track"].astype(str).str.upper() == city.upper()].copy()
-
                 race_df = pred[pred["race_id"].astype(str) == race_id].copy()
-                if race_df.empty:
-                    error = (
-                        "ML race_id bulunamadi. Secili hipodrom filtresi nedeniyle kosu bulunamadi olabilir."
-                        if city
-                        else "ML race_id bulunamadi. Lutfen ML yaris listesinden tekrar secin."
-                    )
-                else:
+
+                if not race_df.empty:
                     ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                     reverse = sort_order == "desc"
                     records = race_df.to_dict(orient="records")
                     records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
 
+                    horse_name_lookup = {
+                        str(r.get("horse_id", "")): str(r.get("horse_name", r.get("horse_id", "")))
+                        for r in records
+                    }
+                    race_name_lookup = {
+                        str(r.get("race_id", "")): str(r.get("race_name", r.get("race_id", "")))
+                        for r in records
+                    }
+
                     opt = optimize_for_date(paths, parsed_date, settings, budget=settings.phase4_default_budget)
-                    ticket_preview = [
-                        c for c in opt.get("columns", []) if race_id in c.get("combination", {})
-                    ]
+                    ticket_preview = []
+                    for c in opt.get("columns", []):
+                        combo = c.get("combination", {})
+                        if race_id not in combo:
+                            continue
+                        combo_readable = {
+                            race_name_lookup.get(str(k), str(k)): horse_name_lookup.get(str(v), str(v))
+                            for k, v in combo.items()
+                        }
+                        ticket_preview.append({**c, "combination": combo_readable})
 
                     ml_prediction = {
                         "race_id": race_id,
@@ -486,6 +571,74 @@ def create_app() -> FastAPI:
                         if field == ml_sort_by and sort_order == "asc":
                             next_direction = "desc"
                         sort_urls[field] = _build_predict_url(sort_field=field, sort_direction=next_direction)
+                else:
+                    # If race is from daily bulletin (e.g., TJK ids), generate ML-style table
+                    # from PredictionEngine for the selected real race.
+                    data_source = _bulletin_source_for_ml(settings)
+                    if city:
+                        races = fetch_races(data_source, parsed_date, city, None)
+                    else:
+                        races = fetch_races(data_source, parsed_date, None, None)
+                    race = next((r for r in races if str(r.id) == str(race_id)), None)
+
+                    if race is None:
+                        error = "Secilen kosu bulunamadi. Lutfen listeden yeniden secin."
+                    else:
+                        engine = PredictionEngine(data_source, settings)
+                        race_pred = engine.predict(race)
+
+                        records = []
+                        for i, hp in enumerate(race_pred.ranked, start=1):
+                            ev = hp.value_bet.expected_value if hp.value_bet and hp.value_bet.expected_value is not None else None
+                            edge = hp.value_bet.edge if hp.value_bet and hp.value_bet.edge is not None else None
+                            decision = "BET" if hp.value_bet and hp.value_bet.is_value_bet else "NO_BET"
+                            records.append(
+                                {
+                                    "rank": i,
+                                    "number": hp.entry.number,
+                                    "horse_id": hp.entry.horse_id,
+                                    "horse_name": hp.entry.horse_name,
+                                    "odds": hp.entry.odds,
+                                    "calibrated_probability": hp.win_probability if hp.win_probability is not None else 0.0,
+                                    "confidence": hp.confidence_score if hp.confidence_score is not None else 0.0,
+                                    "edge": edge,
+                                    "ev": ev,
+                                    "bet_decision": decision,
+                                    "race_id": str(race.id),
+                                    "race_name": f"{race.hippodrome} - {race.race_no}. Kosu",
+                                }
+                            )
+
+                        ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
+                        reverse = sort_order == "desc"
+                        records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
+                        for idx, rec in enumerate(records, start=1):
+                            rec["rank"] = idx
+
+                        ml_prediction = {
+                            "race_id": str(race.id),
+                            "race_name": f"{race.hippodrome} - {race.race_no}. Kosu",
+                            "rows": records,
+                            "summary": {
+                                "horse_count": len(records),
+                                "bet_count": int(sum(1 for r in records if r.get("bet_decision") == "BET")),
+                                "top_probability": _safe_float(records[0].get("calibrated_probability"), 0.0) if records else 0.0,
+                            },
+                            "ticket_preview": [],
+                            "optimization_summary": {
+                                "status": "INFO",
+                                "budget": settings.phase4_default_budget,
+                                "spent": 0.0,
+                                "column_count": 0,
+                            },
+                            "disclaimer": "Bu tahminler istatistiksel analize dayanir, kesinlik tasimaz; sorumlu bahis oynayin.",
+                        }
+
+                        for field in _ML_SORTABLE_FIELDS:
+                            next_direction = "asc" if field == ml_sort_by and sort_order == "desc" else "desc"
+                            if field == ml_sort_by and sort_order == "asc":
+                                next_direction = "desc"
+                            sort_urls[field] = _build_predict_url(sort_field=field, sort_direction=next_direction)
 
                 return templates.TemplateResponse(
                     request,

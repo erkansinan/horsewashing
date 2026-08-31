@@ -112,35 +112,19 @@ def test_predict_all_pdf_returns_400_when_all_races_unpredictable(monkeypatch) -
 
 
 def test_index_ml_mode_lists_ml_races(monkeypatch) -> None:
-    fake_pred = pd.DataFrame(
-        [
-            {
-                "race_id": "20260830_01",
-                "horse_id": "H0001",
-                "rank": 1,
-                "calibrated_probability": 0.34,
-                "bet_decision": "BET",
-                "track": "ANKARA",
-            },
-            {
-                "race_id": "20260830_01",
-                "horse_id": "H0002",
-                "rank": 2,
-                "calibrated_probability": 0.23,
-                "bet_decision": "NO_BET",
-                "track": "ANKARA",
-            },
-        ]
-    )
-    monkeypatch.setattr(web_app_module, "_ensure_ml_ready_for_date", lambda settings, target_date: None)
-    monkeypatch.setattr(web_app_module, "predict_for_date", lambda *args, **kwargs: fake_pred)
+    source = SampleDataSource()
+    monkeypatch.setattr(web_app_module, "_bulletin_source_for_ml", lambda settings: source)
 
     client = _client()
-    response = client.get("/", params={"source": "ml", "date": date.today().isoformat()})
+    response = client.get(
+        "/",
+        params={"source": "ml", "date": date.today().isoformat(), "city": "Ankara"},
+    )
 
     assert response.status_code == 200
     assert "ML Yarislari" in response.text
     assert "ML Tahmin Gor" in response.text
+    assert "Ankara" in response.text
 
 
 def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
@@ -197,5 +181,5 @@ def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert "ML Tahmin - Race 20260830_01" in response.text
+    assert "ML Tahmin -" in response.text
     assert "istatistiksel analize dayanir" in response.text
