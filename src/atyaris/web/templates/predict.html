@@ -10,7 +10,7 @@
 {% endif %}
 
 {% if ml_prediction %}
-  <h2>ML Tahmin - {{ ml_prediction.race_name }}</h2>
+  <h2>ML Tahmin - {{ ml_prediction.race_name }} (Benter)</h2>
 
   <div class="disclaimer">
     At Sayisi: {{ ml_prediction.summary.horse_count }} |
@@ -26,9 +26,13 @@
         <th>At</th>
         <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.calibrated_probability }}">P(win){% if sort_by == 'calibrated_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.place2_probability }}">P(2.){% if sort_by == 'place2_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.place3_probability }}">P(3.){% if sort_by == 'place3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.top3_probability }}">P(Top3){% if sort_by == 'top3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.confidence }}">Guven{% if sort_by == 'confidence' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.edge }}">Edge{% if sort_by == 'edge' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.ev }}">EV{% if sort_by == 'ev' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.kelly_fraction }}">Kelly{% if sort_by == 'kelly_fraction' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>Karar</th>
       </tr>
     </thead>
@@ -40,9 +44,13 @@
         <td>{{ row.horse_name if row.horse_name else row.horse_id }}</td>
         <td>{% if row.odds is not none %}{{ "%.2f"|format(row.odds) }}{% else %}-{% endif %}</td>
         <td>{{ "%.2f"|format(row.calibrated_probability * 100) }}%</td>
+        <td>{{ "%.2f"|format((row.place2_probability|default(0.0)) * 100) }}%</td>
+        <td>{{ "%.2f"|format((row.place3_probability|default(0.0)) * 100) }}%</td>
+        <td>{{ "%.2f"|format((row.top3_probability|default(0.0)) * 100) }}%</td>
         <td>{{ "%.3f"|format(row.confidence) }}</td>
         <td>{% if row.edge is not none %}{{ "%.3f"|format(row.edge) }}{% else %}-{% endif %}</td>
         <td>{% if row.ev is not none %}{{ "%.3f"|format(row.ev) }}{% else %}-{% endif %}</td>
+        <td>{% if row.kelly_fraction is defined and row.kelly_fraction is not none %}{{ "%.3f"|format(row.kelly_fraction) }}{% else %}0.000{% endif %}</td>
         <td><span class="tag">{{ row.bet_decision }}</span></td>
       </tr>
       {% endfor %}
@@ -56,6 +64,171 @@
     <li>Harcanan: {{ ml_prediction.optimization_summary.spent }}</li>
     <li>Kolon Sayisi: {{ ml_prediction.optimization_summary.column_count }}</li>
   </ul>
+
+  {% if ml_prediction.analysis %}
+  <h3>Istatistiksel Analiz Ozeti</h3>
+  {% if ml_prediction.analysis.data_summary %}
+  <ul class="reasoning">
+    {% for item in ml_prediction.analysis.data_summary %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if ml_prediction.analysis.method_notes %}
+  <ul class="reasoning">
+    {% for item in ml_prediction.analysis.method_notes %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if ml_prediction.analysis.data_notes %}
+  <ul class="reasoning">
+    {% for item in ml_prediction.analysis.data_notes %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if ml_prediction.analysis.feature_notes %}
+  <h4>Modelde One Cikan Girdiler</h4>
+  <ul class="reasoning">
+    {% for item in ml_prediction.analysis.feature_notes %}
+      <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if ml_prediction.analysis.horse_stats %}
+  <h4>At Bazinda Kullanilan Istatistikler</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>At</th>
+        <th>No</th>
+        <th>Kilo</th>
+        <th>Mesafe</th>
+        <th>Alan</th>
+        <th>Form3</th>
+        <th>Form5</th>
+        <th>Form10</th>
+        <th>Dinlenme</th>
+        <th>Track Fit</th>
+        <th>Surface Fit</th>
+        <th>Distance Fit</th>
+        <th>Pace Pressure</th>
+        <th>Ortak Pist+Msf Derece Ort. (sn)</th>
+        <th>Market Prob</th>
+        <th>Edge</th>
+        <th>EV</th>
+        <th>Kelly</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in ml_prediction.analysis.horse_stats %}
+      <tr>
+        <td>
+          <details>
+            <summary>{{ item.horse }}</summary>
+            {% if item.source_horse_id %}
+            <p>Kosan atin ID'si: {{ item.source_horse_id }}</p>
+            {% endif %}
+            {% if item.tjk_stats_url %}
+            <p><a href="{{ item.tjk_stats_url }}" target="_blank" rel="noopener">TJK At Kosu Bilgileri (canli)</a></p>
+            {% endif %}
+            {% if item.tjk_workout_url %}
+            <p><a href="{{ item.tjk_workout_url }}" target="_blank" rel="noopener">TJK Idman Istatistikleri (canli)</a></p>
+            {% endif %}
+            {% if item.tjk_summary %}
+            <ul class="reasoning">
+              {% for summary_item in item.tjk_summary %}
+                <li>{{ summary_item }}</li>
+              {% endfor %}
+            </ul>
+            {% endif %}
+            {% if item.tjk_history %}
+            <table>
+              <thead>
+                <tr>
+                  <th>Tarih</th>
+                  <th>Şehir</th>
+                  <th>Msf</th>
+                  <th>Pist</th>
+                  <th>S</th>
+                  <th>Derece</th>
+                  <th>Sıklet</th>
+                  <th>Takı</th>
+                  <th>Jokey</th>
+                  <th>St</th>
+                  <th>Gny</th>
+                  <th>Grup</th>
+                  <th>K. No-K. Adı</th>
+                  <th>Kcins</th>
+                  <th>Ant.</th>
+                  <th>Sahip</th>
+                  <th>HP</th>
+                  <th>Ikramiye</th>
+                  <th>S20</th>
+                  <th></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for hist in item.tjk_history %}
+                <tr>
+                  <td>{{ hist.race_date }}</td>
+                  <td>{{ hist.hippodrome }}</td>
+                  <td>{{ hist.distance_m }}</td>
+                  <td>{{ hist.surface }}</td>
+                  <td>{{ hist.finish_position }}</td>
+                  <td>{{ hist.race_time_seconds }}</td>
+                  <td>{{ hist.weight_kg }}</td>
+                  <td>{{ hist.equipment }}</td>
+                  <td>{{ hist.jockey_name }}</td>
+                  <td>{% if hist.field_size is not none %}{{ hist.field_size }} at{% else %}-{% endif %}</td>
+                  <td>{{ hist.odds }}</td>
+                  <td>{{ hist.group_info }}</td>
+                  <td>{{ hist.race_name }}</td>
+                  <td>{{ hist.race_class }}</td>
+                  <td>{{ hist.trainer_name }}</td>
+                  <td>{{ hist.owner_name }}</td>
+                  <td>{{ hist.handicap_points }}</td>
+                  <td>{{ hist.prize_info }}</td>
+                  <td>{{ hist.s20 }}</td>
+                  <td>{{ hist.extra1 }}</td>
+                  <td>{{ hist.extra2 }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% else %}
+            <p>Bu at icin TJK gecmis verisi cekilemedi.</p>
+            {% if item.tjk_error %}
+            <p>Hata detayi: {{ item.tjk_error }}</p>
+            {% endif %}
+            {% endif %}
+          </details>
+        </td>
+        <td>{{ item.number }}</td>
+        <td>{{ item.weight }}</td>
+        <td>{{ item.distance }}</td>
+        <td>{{ item.field_size }}</td>
+        <td>{{ item.form_avg_3 }}</td>
+        <td>{{ item.form_avg_5 }}</td>
+        <td>{{ item.form_avg_10 }}</td>
+        <td>{{ item.days_since_last_race }}</td>
+        <td>{{ item.track_fit }}</td>
+        <td>{{ item.surface_fit }}</td>
+        <td>{{ item.distance_fit }}</td>
+        <td>{{ item.pace_pressure }}</td>
+        <td>{{ item.avg_race_time_shared_combo }}</td>
+        <td>{{ item.market_probability_norm }}</td>
+        <td>{{ item.edge }}</td>
+        <td>{{ item.ev }}</td>
+        <td>{{ item.kelly_fraction }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% endif %}
 
   {% if ml_prediction.ticket_preview %}
   <h3>Bu Kosuyu Iceren Ornek Kolonlar</h3>

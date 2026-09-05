@@ -7,29 +7,36 @@ from atyaris.ml.optimizer import optimize_ticket_portfolio
 from atyaris.ml.pipeline import (
     Phase1Paths,
     build_features,
-    ingest_synthetic,
+    ingest_real_data,
     optimize_for_date,
     preprocess_raw,
     train_phase1_model,
 )
 
 
-def _prepare_prediction_frame(tmp_path):
+def _prepare_prediction_frame(tmp_path, monkeypatch):
+    from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
+
     paths = Phase1Paths(
         raw_csv=tmp_path / "raw.csv",
         clean_csv=tmp_path / "clean.csv",
         features_csv=tmp_path / "features.csv",
         model_path=tmp_path / "phase3.joblib",
     )
-    ingest_synthetic(date(2025, 1, 1), date(2025, 4, 30), paths)
+    provider = _FixtureRacingDataProvider()
+    monkeypatch.setattr(
+        "atyaris.ml.pipeline.ingest_real_tjk_data",
+        lambda start_date, end_date, paths_arg: provider.get_dataset(start_date, end_date),
+    )
+    ingest_real_data(date(2025, 1, 1), date(2025, 4, 30), paths)
     preprocess_raw(paths)
     build_features(paths)
     train_phase1_model(paths, holdout_days=20, calibration_days=14, calibration_method="isotonic")
     return paths
 
 
-def test_phase4_budget_constraint_and_cost(tmp_path) -> None:
-    paths = _prepare_prediction_frame(tmp_path)
+def test_phase4_budget_constraint_and_cost(tmp_path, monkeypatch) -> None:
+    paths = _prepare_prediction_frame(tmp_path, monkeypatch)
     settings = Settings(
         phase4_default_budget=5.0,
         phase4_unit_cost=1.0,

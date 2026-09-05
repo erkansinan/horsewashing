@@ -5,7 +5,7 @@
     <select id="filter-source" name="source">
       <option value="sample" {% if source == "sample" %}selected{% endif %}>sample (demo)</option>
       <option value="tjk" {% if source == "tjk" %}selected{% endif %}>tjk (canli)</option>
-      <option value="ml" {% if source == "ml" %}selected{% endif %}>ml (phase3/4)</option>
+      <option value="ml" {% if source == "ml" %}selected{% endif %}>ml (benter)</option>
     </select>
   </label>
   <label>Tarih
@@ -31,7 +31,7 @@
 {% endif %}
 
 {% if source == "ml" and ml_races %}
-  <h2>ML Yarislari</h2>
+  <h2>ML Yarislari (Benter Model)</h2>
   <table>
     <thead>
       <tr>

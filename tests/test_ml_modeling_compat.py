@@ -10,8 +10,8 @@ import atyaris.ml.modeling as modeling
 
 def _minimal_payload() -> dict[str, object]:
     return {
-        "logistic": object(),
-        "random_forest": object(),
+        "stage1_model": object(),
+        "stage2_model": object(),
         "feature_columns": ["f1", "f2"],
         "logistic_weight": 0.5,
         "calibrator": {"method": "none"},

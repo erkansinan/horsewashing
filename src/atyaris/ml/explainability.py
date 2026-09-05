@@ -4,65 +4,52 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.inspection import permutation_importance
 
-from atyaris.ml.modeling import EnsembleArtifact
+from atyaris.ml.market_blend import BenterTwoStageArtifact
+from atyaris.ml.market_blend import predict_two_stage_probability
 
 
 def compute_permutation_importance(
-    artifact: EnsembleArtifact,
+    artifact: BenterTwoStageArtifact,
     frame: pd.DataFrame,
     feature_columns: list[str],
-    n_repeats: int = 5,
+    n_repeats: int = 3,
     random_state: int = 42,
 ) -> list[dict[str, float | str]]:
     if frame.empty:
         return []
 
-    x = frame[feature_columns].to_numpy()
-    y = frame["is_winner"].to_numpy()
-
-    result = permutation_importance(
-        artifact.logistic,
-        x,
-        y,
-        n_repeats=n_repeats,
-        random_state=random_state,
-        scoring="neg_log_loss",
-    )
+    rng = np.random.default_rng(random_state)
+    base_prob = np.clip(predict_two_stage_probability(artifact, frame), 1e-9, 1.0)
+    y = frame["is_winner"].to_numpy(dtype=float)
+    base_loss = float(-np.mean(y * np.log(base_prob)))
 
     rows = []
-    for i, col in enumerate(feature_columns):
-        rows.append({"feature": col, "importance_mean": float(result.importances_mean[i])})
+    for col in feature_columns:
+        losses = []
+        for _ in range(n_repeats):
+            perm = frame.copy()
+            perm[col] = rng.permutation(perm[col].to_numpy())
+            p = np.clip(predict_two_stage_probability(artifact, perm), 1e-9, 1.0)
+            losses.append(float(-np.mean(y * np.log(p))))
+        rows.append({"feature": col, "importance_mean": float(np.mean(losses) - base_loss)})
     rows.sort(key=lambda r: r["importance_mean"], reverse=True)
     return rows
 
 
 def compute_optional_shap_summary(
-    artifact: EnsembleArtifact,
+    artifact: BenterTwoStageArtifact,
     frame: pd.DataFrame,
     feature_columns: list[str],
     sample_size: int = 300,
 ) -> dict[str, Any]:
-    try:
-        import shap  # type: ignore
-    except Exception:
-        return {"available": False, "reason": "shap kutuphanesi kurulu degil"}
-
     if frame.empty:
         return {"available": False, "reason": "bos veri"}
 
-    sample = frame.sample(min(sample_size, len(frame)), random_state=42)
-    x = sample[feature_columns]
-    explainer = shap.TreeExplainer(artifact.random_forest)
-    shap_values = explainer.shap_values(x)
-
-    if isinstance(shap_values, list):
-        vals = shap_values[1] if len(shap_values) > 1 else shap_values[0]
-    else:
-        vals = shap_values
-
-    abs_mean = np.abs(vals).mean(axis=0)
-    rows = [{"feature": feature_columns[i], "mean_abs_shap": float(abs_mean[i])} for i in range(len(feature_columns))]
-    rows.sort(key=lambda r: r["mean_abs_shap"], reverse=True)
-    return {"available": True, "top_features": rows[:15]}
+    coefs = artifact.stage1_model.coef_
+    rows = [
+        {"feature": feature_columns[i], "abs_stage1_coef": float(abs(coefs[i]))}
+        for i in range(min(len(feature_columns), len(coefs)))
+    ]
+    rows.sort(key=lambda r: r["abs_stage1_coef"], reverse=True)
+    return {"available": True, "method": "abs_stage1_coefficient", "top_features": rows[:15]}

@@ -12,7 +12,7 @@ from atyaris.config import get_settings
 from atyaris.ml.phase5 import register_training_run, run_phase5_report
 from atyaris.ml.pipeline import (
     build_features,
-    ingest_synthetic,
+    ingest_real_data,
     optimize_for_date,
     paths_from_settings,
     predict_for_date,
@@ -32,7 +32,7 @@ def ingest_cmd(
 ) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
-    data = ingest_synthetic(date.fromisoformat(start_date), date.fromisoformat(end_date), paths)
+    data = ingest_real_data(date.fromisoformat(start_date), date.fromisoformat(end_date), paths)
     console.print(f"Ingest tamam: {len(data)} satir -> {paths.raw_csv}")
 
 
@@ -102,8 +102,11 @@ def predict_cmd(
     table.add_column("Race")
     table.add_column("Horse")
     table.add_column("P(win)")
+    table.add_column("P(2.)")
+    table.add_column("P(3.)")
     table.add_column("Edge")
     table.add_column("EV")
+    table.add_column("Kelly")
     table.add_column("Decision")
     table.add_column("Rank")
 
@@ -112,8 +115,11 @@ def predict_cmd(
             str(row["race_id"]),
             str(row["horse_id"]),
             f"{row['calibrated_probability']:.3f}",
+            f"{row.get('place2_probability', 0.0):.3f}",
+            f"{row.get('place3_probability', 0.0):.3f}",
             f"{row.get('edge', 0.0):.3f}",
             f"{row.get('ev', 0.0):.3f}",
+            f"{row.get('kelly_fraction', 0.0):.3f}",
             str(row.get("bet_decision", "-")),
             str(int(row["rank"])),
         )

@@ -51,6 +51,7 @@ from atyaris.models.entities import (
     RaceEntry,
     Trainer,
     TrackSurface,
+    WorkoutRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ _DAILY_PROGRAM_CITY_PATH = "/TR/YarisSever/Info/Sehir/GunlukYarisProgrami"
 _DAILY_RESULTS_DATA_PATH = "/TR/YarisSever/Info/Data/GunlukYarisSonuclari"
 _DAILY_RESULTS_CITY_PATH = "/TR/YarisSever/Info/Sehir/GunlukYarisSonuclari"
 _HORSE_HISTORY_PATH = "/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri"
+_HORSE_WORKOUT_PATH = "/TR/YarisSever/Query/Page/IdmanIstatistikleri"
 
 _SURFACE_MAP = {
     "kum": TrackSurface.KUM,
@@ -508,6 +510,12 @@ class TJKHtmlDataSource(RaceDataSource):
                 m = re.search(r"QueryParameter_AtId=(\d+)", href)
                 if m:
                     source_horse_id = int(m.group(1))
+            if source_horse_id is None:
+                # Bazi TJK satirlarinda AtId href yerine onclick/data-* icinde gelebilir.
+                row_markup = str(row)
+                m = re.search(r"QueryParameter_AtId=(\d+)", row_markup)
+                if m:
+                    source_horse_id = int(m.group(1))
 
         return RaceEntry(
             number=number,
@@ -533,9 +541,8 @@ class TJKHtmlDataSource(RaceDataSource):
 
         url = f"{self._base_url}{_HORSE_HISTORY_PATH}"
         params = {
-            "1": "1",
             "QueryParameter_AtId": str(entry.source_horse_id),
-            "Era": "tomorrow",
+            "Era": "past",
         }
         html = self._get_html(url, params)
         soup = BeautifulSoup(html, "lxml")
@@ -547,15 +554,22 @@ class TJKHtmlDataSource(RaceDataSource):
         history_table = None
         date_re = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
+        best_history_rows = 0
         for table in tables:
             rows = table.find_all("tr")
             if not rows:
                 continue
-            first_cells = [c.get_text(" ", strip=True) for c in rows[0].find_all(["th", "td"])]
-            if first_cells and "1’incilik" in first_cells:
+            row_texts = [
+                [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
+                for row in rows
+            ]
+            joined = " | ".join(" | ".join(cells) for cells in row_texts if cells)
+            if "TOPLAM" in joined:
                 summary_table = table
-            if first_cells and first_cells[0] and date_re.fullmatch(first_cells[0]):
+            matching_rows = [cells for cells in row_texts if cells and date_re.fullmatch(cells[0] or "")]
+            if matching_rows and len(matching_rows) > best_history_rows:
                 history_table = table
+                best_history_rows = len(matching_rows)
 
         if history_table is None:
             raise DataSourceError("AtKosuBilgileri gecmis kosu tablosu bulunamadi.")
@@ -605,22 +619,92 @@ class TJKHtmlDataSource(RaceDataSource):
                 last_year_wins = _parse_int(latest[2])
                 last_year_places = _parse_int(latest[2]) + _parse_int(latest[3]) + _parse_int(latest[4])
 
+        def _normalize_header(text: str) -> str:
+            folded = text.lower().strip().replace(" ", "")
+            folded = (
+                folded.replace("ı", "i")
+                .replace("İ", "i")
+                .replace("ş", "s")
+                .replace("Ş", "s")
+                .replace("ğ", "g")
+                .replace("Ğ", "g")
+                .replace("ç", "c")
+                .replace("Ç", "c")
+                .replace("ö", "o")
+                .replace("Ö", "o")
+                .replace("ü", "u")
+                .replace("Ü", "u")
+            )
+            return re.sub(r"[^a-z0-9]", "", folded)
+
+        def _parse_time_to_seconds(text: str) -> float | None:
+            raw = (text or "").strip()
+            if not raw or raw == "-":
+                return None
+            m = re.search(r"(\d+)[\.,:](\d{2})(?:[\.,:](\d{2}))?", raw)
+            if not m:
+                return None
+            minutes = int(m.group(1))
+            seconds = int(m.group(2))
+            hundredths = int(m.group(3) or 0)
+            return float(minutes * 60 + seconds + (hundredths / 100.0))
+
+        def _parse_split_time_to_seconds(text: str) -> float | None:
+            raw = (text or "").strip()
+            if not raw or raw == "-":
+                return None
+            normalized = raw.replace(",", ".")
+            m = re.match(r"^(\d+)[\.:](\d{1,2})(?:[\.:](\d{1,2}))?$", normalized)
+            if m:
+                first = int(m.group(1))
+                second = int(m.group(2))
+                third = m.group(3)
+                if third is not None:
+                    hundredths = int(third)
+                    return float(first * 60 + second + (hundredths / 100.0))
+                if first <= 4 and second <= 59:
+                    return float(first * 60 + second)
+            try:
+                return float(normalized)
+            except ValueError:
+                return None
+
+        header_map: dict[str, int] = {}
+        for row in history_table.find_all("tr"):
+            headers = [c.get_text(" ", strip=True) for c in row.find_all("th")]
+            if not headers:
+                continue
+            normalized = [_normalize_header(h) for h in headers]
+            if "tarih" in normalized and ("msf" in normalized or "mesafe" in normalized):
+                for idx, name in enumerate(normalized):
+                    header_map[name] = idx
+                break
+
+        def _cell(cells: list[str], *aliases: str) -> str:
+            for alias in aliases:
+                idx = header_map.get(alias)
+                if idx is not None and idx < len(cells):
+                    return cells[idx]
+            return ""
+
         past_performances: list[PastPerformance] = []
         for row in history_table.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
-            if len(cells) < 11:
+            if not cells:
                 continue
-            if not date_re.fullmatch(cells[0]):
+
+            date_text = _cell(cells, "tarih") or (cells[0] if cells else "")
+            if not date_re.fullmatch(date_text):
                 continue
 
             try:
-                race_date = datetime.strptime(cells[0], "%d.%m.%Y").date()
+                race_date = datetime.strptime(date_text, "%d.%m.%Y").date()
             except ValueError:
                 continue
 
-            hippodrome = cells[1]
-            distance_m = _parse_int(cells[2])
-            surface_info = cells[3]
+            hippodrome = _cell(cells, "sehir") or _cell(cells, "şehir") or (cells[1] if len(cells) > 1 else "")
+            distance_m = _parse_int(_cell(cells, "msf", "mesafe") or (cells[2] if len(cells) > 2 else ""))
+            surface_info = _cell(cells, "pist") or (cells[3] if len(cells) > 3 else "")
             if "Ç:" in surface_info or "Çim" in surface_info:
                 surface = TrackSurface.CIM
             elif "S:" in surface_info or "Sentetik" in surface_info:
@@ -628,11 +712,21 @@ class TJKHtmlDataSource(RaceDataSource):
             else:
                 surface = TrackSurface.KUM
 
-            finish_position = _parse_int(cells[4]) or None
-            weight_kg = _parse_float(cells[6])
-            jockey_name = cells[8] or None
-            field_size = _parse_int(cells[9]) or None
-            odds = _parse_float(cells[10])
+            finish_position = _parse_int(_cell(cells, "s", "sira") or (cells[4] if len(cells) > 4 else "")) or None
+            race_time_seconds = _parse_time_to_seconds(_cell(cells, "derece") or (cells[5] if len(cells) > 5 else ""))
+            weight_kg = _parse_float(_cell(cells, "siklet") or (cells[6] if len(cells) > 6 else ""))
+            equipment = _cell(cells, "taki") or (cells[7] if len(cells) > 7 else None)
+            jockey_name = _cell(cells, "jokey") or (cells[8] if len(cells) > 8 else None)
+            field_size = _parse_int(_cell(cells, "st") or (cells[9] if len(cells) > 9 else "")) or None
+            odds = _parse_float(_cell(cells, "gny") or (cells[10] if len(cells) > 10 else ""))
+            group_info = _cell(cells, "grup") or (cells[11] if len(cells) > 11 else None)
+            race_name = _cell(cells, "k.no-k.adi") or _cell(cells, "k.no-k.adi") or (cells[12] if len(cells) > 12 else None)
+            race_class = _cell(cells, "kcins") or (cells[13] if len(cells) > 13 else None)
+            trainer_name = _cell(cells, "ant") or _cell(cells, "ant.") or (cells[14] if len(cells) > 14 else None)
+            owner_name = _cell(cells, "sahip") or (cells[15] if len(cells) > 15 else None)
+            handicap_points = _parse_float(_cell(cells, "hp") or (cells[16] if len(cells) > 16 else ""))
+            prize_info = _cell(cells, "ikramiye") or (cells[17] if len(cells) > 17 else None)
+            s20 = _cell(cells, "s20") or (cells[18] if len(cells) > 18 else None)
 
             past_performances.append(
                 PastPerformance(
@@ -643,9 +737,22 @@ class TJKHtmlDataSource(RaceDataSource):
                     finish_position=finish_position,
                     field_size=field_size,
                     jockey_name=jockey_name,
-                    trainer_name=None,
+                    trainer_name=trainer_name,
+                    equipment=equipment,
+                    group_info=group_info,
+                    race_name=race_name,
+                    race_class=race_class,
+                    owner_name=owner_name,
+                    handicap_points=handicap_points,
+                    prize_info=prize_info,
+                    s20=s20,
                     weight_kg=weight_kg,
                     odds=odds,
+                    race_time_seconds=race_time_seconds,
+                    early_pace_index=None,
+                    mid_pace_index=None,
+                    late_pace_index=None,
+                    weather=None,
                 )
             )
 
@@ -658,6 +765,11 @@ class TJKHtmlDataSource(RaceDataSource):
                 if p.finish_position == 1:
                     combo_wins += 1
 
+        if not past_performances:
+            raise DataSourceError(
+                "AtKosuBilgileri gecmis kosu tablosu bulundu fakat parse edilebilen satir yok."
+            )
+
         if not career_starts:
             career_starts = len(past_performances)
         if not career_wins:
@@ -665,10 +777,92 @@ class TJKHtmlDataSource(RaceDataSource):
         if not career_places:
             career_places = sum(1 for p in past_performances if p.finish_position and p.finish_position <= 3)
 
+        workout_records: list[WorkoutRecord] = []
+        workout_url = f"{self._base_url}{_HORSE_WORKOUT_PATH}"
+        workout_params = {"QueryParameter_AtId": str(entry.source_horse_id)}
+        try:
+            workout_html = self._get_html(workout_url, workout_params)
+            workout_soup = BeautifulSoup(workout_html, "lxml")
+            workout_tables = workout_soup.find_all("table")
+            workout_table = None
+            for table in workout_tables:
+                headers = [
+                    c.get_text(" ", strip=True)
+                    for c in table.find_all("tr")[0].find_all(["th", "td"])
+                ] if table.find_all("tr") else []
+                normalized = [_normalize_header(h) for h in headers]
+                if "itarihi" in normalized and "ihip" in normalized:
+                    workout_table = table
+                    break
+
+            if workout_table is not None:
+                header_map: dict[str, int] = {}
+                for row in workout_table.find_all("tr"):
+                    headers = [c.get_text(" ", strip=True) for c in row.find_all("th")]
+                    if not headers:
+                        continue
+                    normalized = [_normalize_header(h) for h in headers]
+                    if "itarihi" in normalized and "ihip" in normalized:
+                        for idx, name in enumerate(normalized):
+                            header_map[name] = idx
+                        break
+
+                def _wcell(cells: list[str], *aliases: str) -> str:
+                    for alias in aliases:
+                        idx = header_map.get(alias)
+                        if idx is not None and idx < len(cells):
+                            return cells[idx]
+                    return ""
+
+                split_distances = [1400, 1200, 1000, 800, 600, 400, 200]
+                for row in workout_table.find_all("tr"):
+                    cells = [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
+                    if not cells:
+                        continue
+                    workout_date_text = _wcell(cells, "itarihi")
+                    if not re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", workout_date_text or ""):
+                        continue
+
+                    workout_date = None
+                    try:
+                        workout_date = datetime.strptime(workout_date_text, "%d.%m.%Y").date()
+                    except ValueError:
+                        pass
+
+                    picked_distance = None
+                    picked_time = None
+                    for dist in split_distances:
+                        value = _wcell(cells, str(dist) + "m")
+                        if not value:
+                            continue
+                        parsed = _parse_split_time_to_seconds(value)
+                        if parsed is not None:
+                            picked_distance = dist
+                            picked_time = parsed
+                            break
+
+                    workout_records.append(
+                        WorkoutRecord(
+                            workout_date=workout_date,
+                            hippodrome=_wcell(cells, "ihip") or None,
+                            surface=_wcell(cells, "pist") or None,
+                            workout_type=_wcell(cells, "ituru") or None,
+                            workout_jockey=_wcell(cells, "ijokeyi") or None,
+                            status=_wcell(cells, "durum") or None,
+                            ranking_status=_wcell(cells, "pdur") or None,
+                            detail=_wcell(cells, "detay") or None,
+                            distance_m=picked_distance,
+                            time_seconds=picked_time,
+                        )
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("IdmanIstatistikleri parse edilemedi (%s): %s", entry.source_horse_id, exc)
+
         return HorseStatistics(
             horse_id=entry.horse_id,
             horse_name=entry.horse_name,
             past_performances=past_performances,
+            workout_records=workout_records,
             career_starts=career_starts,
             career_wins=career_wins,
             career_places=career_places,

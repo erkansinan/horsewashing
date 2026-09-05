@@ -5,11 +5,11 @@ from datetime import date
 import pandas as pd
 
 from atyaris.ml.features import build_leakage_safe_features, preprocess_dataset
-from atyaris.ml.provider import SyntheticRacingDataProvider
+from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
 
 
 def _dataset() -> pd.DataFrame:
-    provider = SyntheticRacingDataProvider()
+    provider = _FixtureRacingDataProvider()
     return provider.get_dataset(date(2025, 1, 1), date(2025, 4, 30))
 
 

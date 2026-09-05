@@ -7,11 +7,13 @@ import pandas as pd
 
 from atyaris.config import Settings
 from atyaris.ml.phase5 import register_training_run, run_phase5_report
-from atyaris.ml.pipeline import Phase1Paths, build_features, ingest_synthetic, preprocess_raw, train_phase1_model
+from atyaris.ml.pipeline import Phase1Paths, build_features, ingest_real_data, preprocess_raw, train_phase1_model
 from atyaris.ml.tracking import load_recent_runs
 
 
-def test_phase5_report_generation_and_tracking(tmp_path) -> None:
+def test_phase5_report_generation_and_tracking(tmp_path, monkeypatch) -> None:
+    from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
+
     paths = Phase1Paths(
         raw_csv=tmp_path / "raw.csv",
         clean_csv=tmp_path / "clean.csv",
@@ -19,7 +21,12 @@ def test_phase5_report_generation_and_tracking(tmp_path) -> None:
         model_path=tmp_path / "phase3.joblib",
     )
 
-    ingest_synthetic(date(2025, 1, 1), date(2025, 4, 30), paths)
+    provider = _FixtureRacingDataProvider()
+    monkeypatch.setattr(
+        "atyaris.ml.pipeline.ingest_real_tjk_data",
+        lambda start_date, end_date, paths_arg: provider.get_dataset(start_date, end_date),
+    )
+    ingest_real_data(date(2025, 1, 1), date(2025, 4, 30), paths)
     preprocess_raw(paths)
     build_features(paths)
     artifact = train_phase1_model(paths, holdout_days=20, calibration_days=14, calibration_method="isotonic")

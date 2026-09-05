@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import date
 
 from atyaris.ml.features import build_leakage_safe_features
-from atyaris.ml.provider import SyntheticRacingDataProvider
+from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
 
 
 def test_phase2_feature_columns_exist() -> None:
-    provider = SyntheticRacingDataProvider()
+    provider = _FixtureRacingDataProvider()
     data = provider.get_dataset(date(2025, 1, 1), date(2025, 2, 28))
     built = build_leakage_safe_features(data)
 
@@ -37,7 +37,7 @@ def test_phase2_feature_columns_exist() -> None:
 
 
 def test_phase2_ranges_and_style_simplex() -> None:
-    provider = SyntheticRacingDataProvider()
+    provider = _FixtureRacingDataProvider()
     data = provider.get_dataset(date(2025, 3, 1), date(2025, 4, 15))
     built = build_leakage_safe_features(data)
     frame = built.frame

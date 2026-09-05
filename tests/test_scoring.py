@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from atyaris.config import Settings
-from atyaris.models.entities import HorseStatistics, Jockey, PastPerformance, RaceEntry, Trainer, TrackSurface
+from atyaris.models.entities import HorseStatistics, Jockey, PastPerformance, RaceEntry, Trainer, TrackSurface, WorkoutRecord
 from atyaris.prediction.scoring import compute_score, score_distance_surface, score_form, score_rest, score_weight
 
 
@@ -31,6 +31,38 @@ def test_score_form_higher_for_better_recent_finishes() -> None:
 def test_score_form_neutral_without_history() -> None:
     empty = HorseStatistics(horse_id="C", horse_name="C")
     assert score_form(empty, window=5) == 40.0
+
+
+def test_score_form_uses_workout_when_no_official_race_history() -> None:
+    no_history_with_work = HorseStatistics(
+        horse_id="N",
+        horse_name="N",
+        workout_records=[
+            WorkoutRecord(
+                workout_date=date.today() - timedelta(days=6),
+                distance_m=800,
+                time_seconds=47.5,
+            )
+        ],
+    )
+    assert score_form(no_history_with_work, window=5) > 40.0
+
+
+def test_score_form_uses_workout_records() -> None:
+    base_perfs = [_perf(10, 3), _perf(30, 3)]
+    weak = HorseStatistics(
+        horse_id="W",
+        horse_name="W",
+        past_performances=base_perfs,
+        workout_records=[WorkoutRecord(workout_date=date.today() - timedelta(days=5), distance_m=800, time_seconds=55.0)],
+    )
+    strong = HorseStatistics(
+        horse_id="S",
+        horse_name="S",
+        past_performances=base_perfs,
+        workout_records=[WorkoutRecord(workout_date=date.today() - timedelta(days=5), distance_m=800, time_seconds=47.0)],
+    )
+    assert score_form(strong, window=5) > score_form(weak, window=5)
 
 
 def test_score_distance_surface_rewards_consistent_wins_over_single_non_win() -> None:

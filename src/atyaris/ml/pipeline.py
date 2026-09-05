@@ -10,22 +10,23 @@ import pandas as pd
 from atyaris.config import Settings
 from atyaris.ml.backtest import WalkForwardResult, walk_forward_backtest
 from atyaris.ml.calibration import apply_calibrator, fit_calibrator, from_payload, to_payload
-from atyaris.ml.ev import add_market_ev_columns
+from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import FeatureBuildResult, assert_no_leakage_columns, build_leakage_safe_features, preprocess_dataset
-from atyaris.ml.modeling import (
-    EnsembleArtifact,
-    load_phase3_artifact,
-    predict_ensemble_raw_probability,
-    save_phase3_artifact,
-    train_phase3_ensemble,
+from atyaris.ml.harville import add_harville_columns
+from atyaris.ml.market_blend import (
+    BenterTwoStageArtifact,
+    extract_market_reference_probability,
+    fit_two_stage_benter,
+    predict_two_stage_probability,
 )
+from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
-from atyaris.ml.provider import SyntheticProviderConfig, SyntheticRacingDataProvider
+from atyaris.ml.real_ingestion import ingest_real_tjk_data
 
 
 @dataclass
 class Phase1Paths:
-    raw_csv: Path = Path("data/raw/synthetic_races.csv")
+    raw_csv: Path = Path("data/raw/tjk_real_races.csv")
     clean_csv: Path = Path("data/processed/clean_races.csv")
     features_csv: Path = Path("data/processed/features_phase1.csv")
     model_path: Path = Path("models/phase1_logreg.joblib")
@@ -44,9 +45,8 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def ingest_synthetic(start_date: date, end_date: date, paths: Phase1Paths) -> pd.DataFrame:
-    provider = SyntheticRacingDataProvider(SyntheticProviderConfig())
-    data = provider.get_dataset(start_date, end_date)
+def ingest_real_data(start_date: date, end_date: date, paths: Phase1Paths) -> pd.DataFrame:
+    data = ingest_real_tjk_data(start_date, end_date, paths)
     _ensure_parent(paths.raw_csv)
     data.to_csv(paths.raw_csv, index=False)
     return data
@@ -69,33 +69,38 @@ def build_features(paths: Phase1Paths) -> FeatureBuildResult:
     return built
 
 
+def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
+    drop_cols = {
+        "race_id",
+        "date",
+        "race_datetime",
+        "horse_id",
+        "is_winner",
+        "odds",
+        "raw_probability",
+        "calibrated_probability",
+        "place2_probability",
+        "place3_probability",
+        "top3_probability",
+        "rank",
+        "bet_decision",
+        "edge",
+        "ev",
+        "kelly_fraction",
+        "confidence",
+    }
+    return [c for c in frame.columns if c not in drop_cols]
+
+
 def train_phase1_model(
     paths: Phase1Paths,
     holdout_days: int = 30,
     calibration_days: int = 21,
     calibration_method: str = "isotonic",
-) -> EnsembleArtifact:
+) -> BenterTwoStageArtifact:
     frame = pd.read_csv(paths.features_csv)
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
-    feature_columns = [
-        c
-        for c in frame.columns
-        if c
-        not in {
-            "race_id",
-            "date",
-            "race_datetime",
-            "horse_id",
-            "is_winner",
-            "odds",
-            "raw_probability",
-            "calibrated_probability",
-            "rank",
-            "bet_decision",
-            "edge",
-            "ev",
-        }
-    ]
+    feature_columns = _benter_feature_columns(frame)
 
     split_date = max(frame["date"]) - timedelta(days=holdout_days)
     calibration_split = split_date - timedelta(days=calibration_days)
@@ -108,9 +113,17 @@ def train_phase1_model(
     if calibration_df.empty:
         calibration_df = frame[frame["date"] >= split_date].copy()
 
-    artifact = train_phase3_ensemble(train_df, calibration_df, feature_columns)
+    artifact = fit_two_stage_benter(
+        train_df,
+        calibration_df,
+        feature_columns,
+        stage1_penalty="l2",
+        stage1_regularization=0.05,
+        stage2_penalty="l2",
+        stage2_regularization=0.02,
+    )
 
-    raw_cal = predict_ensemble_raw_probability(artifact, calibration_df)
+    raw_cal = predict_two_stage_probability(artifact, calibration_df)
     calibrator = fit_calibrator(
         y_true=calibration_df["is_winner"].to_numpy(),
         raw_prob=raw_cal,
@@ -138,11 +151,19 @@ def predict_for_date(
     # instead of passing zero samples into model/scaler steps.
     if day_df.empty:
         out = day_df.copy()
-        for col in ["raw_probability", "calibrated_probability", "rank", "uncertainty", "confidence"]:
+        for col in [
+            "raw_probability",
+            "calibrated_probability",
+            "place2_probability",
+            "place3_probability",
+            "top3_probability",
+            "rank",
+            "confidence",
+        ]:
             if col not in out.columns:
                 out[col] = pd.Series(dtype="float64")
         if enable_ev:
-            for col in ["market_probability", "implied_probability", "edge", "ev", "bet_decision"]:
+            for col in ["market_probability", "implied_probability", "edge", "ev", "kelly_fraction", "bet_decision"]:
                 if col not in out.columns:
                     if col == "bet_decision":
                         out[col] = pd.Series(dtype="object")
@@ -154,22 +175,33 @@ def predict_for_date(
     calibrator = from_payload(calibrator_payload)
 
     out = day_df.copy()
-    out["raw_probability"] = predict_ensemble_raw_probability(artifact, out)
+    out["raw_probability"] = predict_two_stage_probability(artifact, out)
     out["calibrated_probability"] = apply_calibrator(calibrator, out["raw_probability"].to_numpy())
 
     # Race-level normalization.
     denom = out.groupby("race_id")["calibrated_probability"].transform("sum").replace(0.0, 1.0)
     out["calibrated_probability"] = out["calibrated_probability"] / denom
+    out["market_probability_used"] = extract_market_reference_probability(out)
     out["rank"] = out.groupby("race_id")["calibrated_probability"].rank(ascending=False, method="dense")
-
-    # Confidence from model disagreement proxy.
-    p_log = artifact.logistic.predict_proba(out[artifact.feature_columns].to_numpy())[:, 1]
-    p_rf = artifact.random_forest.predict_proba(out[artifact.feature_columns].to_numpy())[:, 1]
-    out["uncertainty"] = np.abs(p_log - p_rf)
-    out["confidence"] = (1.0 - out["uncertainty"]).clip(lower=0.0, upper=1.0)
+    out = add_harville_columns(out, win_col="calibrated_probability")
 
     if enable_ev:
-        out = add_market_ev_columns(out, ev_probability_threshold, ev_min_edge, ev_min_value)
+        out = add_ev_kelly_columns(
+            out,
+            min_probability=ev_probability_threshold,
+            min_edge=ev_min_edge,
+            min_ev=ev_min_value,
+            fractional_kelly=0.35,
+            max_kelly_fraction=0.25,
+        )
+    else:
+        out["edge"] = out["calibrated_probability"] - out["market_probability_used"]
+        out["ev"] = out["calibrated_probability"] * out["odds"] - 1.0
+        out["kelly_fraction"] = 0.0
+        out["bet_decision"] = "NO_BET"
+
+    # Confidence proxy: larger model-market divergence indicates stronger model conviction.
+    out["confidence"] = (0.5 + np.abs(out["edge"]).clip(upper=0.5)).astype(float)
     return out
 
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from xml.sax.saxutils import escape
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -22,16 +23,17 @@ from fastapi.templating import Jinja2Templates
 
 from atyaris.config import get_settings
 from atyaris.data_sources.base import DataSourceError
-from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.data_sources.tjk_scraper import KNOWN_HIPPODROMES, TJKHtmlDataSource
 from atyaris.ml.pipeline import (
     build_features,
-    ingest_synthetic,
+    ingest_real_data,
     optimize_for_date,
     paths_from_settings,
     predict_for_date,
     preprocess_raw,
     train_phase1_model,
 )
+from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.prediction.engine import PredictionEngine
 from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
@@ -60,9 +62,13 @@ _ML_SORTABLE_FIELDS = {
     "horse_id": "At ID",
     "odds": "Ganyan",
     "calibrated_probability": "P(win)",
+    "place2_probability": "P(2.)",
+    "place3_probability": "P(3.)",
+    "top3_probability": "P(Top3)",
     "confidence": "Guven",
     "edge": "Edge",
     "ev": "EV",
+    "kelly_fraction": "Kelly",
 }
 
 _TRACK_DISPLAY_MAP = {
@@ -120,6 +126,17 @@ def _safe_float(value, default: float = 0.0) -> float:  # type: ignore[no-untype
         return default
 
 
+def _is_placeholder_horse_name(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text or text.lower() == "nan":
+        return True
+    if re.fullmatch(r"H\d{4}", text):
+        return True
+    if re.fullmatch(r"HORSE[_-]?\d+", text):
+        return True
+    return False
+
+
 def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
     if sort_by == "strategy":
         win_probability = _safe_metric(getattr(item, "win_probability", None), -1.0)
@@ -174,12 +191,20 @@ def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
         return _safe_float(row.get("odds"), 9999.0)
     if sort_by == "calibrated_probability":
         return _safe_float(row.get("calibrated_probability"), -1.0)
+    if sort_by == "place2_probability":
+        return _safe_float(row.get("place2_probability"), -1.0)
+    if sort_by == "place3_probability":
+        return _safe_float(row.get("place3_probability"), -1.0)
+    if sort_by == "top3_probability":
+        return _safe_float(row.get("top3_probability"), -1.0)
     if sort_by == "confidence":
         return _safe_float(row.get("confidence"), -1.0)
     if sort_by == "edge":
         return _safe_float(row.get("edge"), -9999.0)
     if sort_by == "ev":
         return _safe_float(row.get("ev"), -9999.0)
+    if sort_by == "kelly_fraction":
+        return _safe_float(row.get("kelly_fraction"), -9999.0)
     return _safe_float(row.get("calibrated_probability"), -1.0)
 
 
@@ -209,28 +234,19 @@ def _ml_race_summaries_from_races(  # type: ignore[no-untyped-def]
     data_source,
     settings,
 ) -> list[MLRaceSummary]:
-    engine = PredictionEngine(data_source, settings)
+    _ = (data_source, settings)
     rows: list[MLRaceSummary] = []
     for race in sorted(races, key=lambda r: (r.hippodrome, r.race_no)):
         active = [e for e in race.entries if not e.is_scratched]
-        top = active[0].horse_name if active else "-"
+        # Index sayfasinda yalnizca bulten listesi gosterilir; agir ML tahmini
+        # kullanici kosu secince /predict adiminda calistirilir.
+        top = "-"
         top_probability = 0.0
         value_bet_count = 0
-        try:
-            race_pred = engine.predict(race)
-            ranked = race_pred.ranked
-            if ranked:
-                top = ranked[0].entry.horse_name
-                top_probability = _safe_float(ranked[0].win_probability, 0.0)
-            value_bet_count = int(
-                sum(1 for hp in ranked if hp.value_bet and hp.value_bet.is_value_bet)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("ML race summary prediction failed for %s: %s", race.id, exc)
 
         rows.append(
             MLRaceSummary(
-                race_id=str(race.id),
+                race_id=_to_ml_frame_race_id(str(race.id), race.start_time.date()) or str(race.id),
                 race_name=f"{race.hippodrome} - {race.race_no}. Kosu",
                 horse_count=len(active),
                 top_horse_name=top,
@@ -243,12 +259,29 @@ def _ml_race_summaries_from_races(  # type: ignore[no-untyped-def]
 
 def _parse_race_no(race_id: str) -> int | None:
     m = re.search(r"_(\d+)$", race_id)
-    if not m:
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
+    m = re.search(r"-(\d+)$", race_id)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _to_ml_frame_race_id(race_id: str, target_date: date) -> str | None:
+    """Map external race identifiers to synthetic ML frame id format: YYYYMMDD_NN."""
+    if re.fullmatch(r"\d{8}_\d{2}", race_id):
+        return race_id
+    race_no = _parse_race_no(race_id)
+    if race_no is None:
         return None
-    try:
-        return int(m.group(1))
-    except ValueError:
-        return None
+    return f"{target_date.strftime('%Y%m%d')}_{race_no:02d}"
 
 
 def _display_track_name(track: str) -> str:
@@ -260,6 +293,157 @@ def _normalize_track_key(value: str) -> str:
     return value.strip().translate(_TR_ASCII_MAP).upper()
 
 
+def _normalize_name_key(value: object) -> str:
+    text = str(value or "").translate(_TR_ASCII_MAP).lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _record_number(rec: dict) -> int | None:
+    for key in ("number", "draw"):
+        raw = rec.get(key)
+        try:
+            if raw is None or pd.isna(raw):
+                continue
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _race_matches_bulletin(records: list[dict], race) -> bool:  # type: ignore[no-untyped-def]
+    if not records:
+        return False
+    expected_numbers = {int(e.number) for e in race.entries}
+    if not expected_numbers:
+        return False
+    observed_numbers = {n for n in (_record_number(r) for r in records) if n is not None}
+    if not observed_numbers:
+        return False
+    return len(records) == len(expected_numbers) and observed_numbers.issubset(expected_numbers)
+
+
+def _place_probabilities_from_records(records: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
+    if len(records) < 2:
+        return {}, {}
+    win_probs = np.asarray([_safe_float(r.get("calibrated_probability"), 0.0) for r in records], dtype=float)
+    win_probs = np.clip(win_probs, 1e-12, 1.0)
+    win_probs = win_probs / max(win_probs.sum(), 1e-12)
+
+    p2 = np.zeros_like(win_probs)
+    p3 = np.zeros_like(win_probs)
+    n = len(records)
+    for i in range(n):
+        s2 = 0.0
+        s3 = 0.0
+        for j in range(n):
+            if i == j:
+                continue
+            denom_j = max(1e-12, 1.0 - win_probs[j])
+            s2 += win_probs[j] * (win_probs[i] / denom_j)
+            for k in range(n):
+                if k == i or k == j:
+                    continue
+                denom_k = max(1e-12, 1.0 - win_probs[j] - win_probs[k])
+                s3 += win_probs[j] * (win_probs[k] / denom_j) * (win_probs[i] / denom_k)
+        p2[i] = s2
+        p3[i] = s3
+
+    keys = [str(r.get("horse_id", "")) for r in records]
+    return dict(zip(keys, p2.tolist())), dict(zip(keys, p3.tolist()))
+
+
+def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    context: dict[str, object] = {
+        "data_notes": [
+            "Gunluk bulten, kosu sonucu ve at gecmisi TJK canli sayfalarindan cekilir.",
+            "Gercek veri eksikse model bu ekranda uydurma deger uretmez.",
+            "Harville sira olasiliklari, ayni kosudaki gercek kazanma olasiliklarindan turetilir.",
+        ],
+        "feature_notes": [],
+        "data_summary": [],
+        "horse_stats": [],
+        "backtest_summary": None,
+        "method_notes": [
+            "Cekirdek model: Benter iki asamali conditional logit.",
+            "Sira olasiliklari: Harville formulu.",
+            "Karar katmani: kalibrasyon + EV + fractional Kelly.",
+        ],
+    }
+
+    try:
+        if paths.features_csv.exists():
+            features = pd.read_csv(paths.features_csv)
+            context["data_summary"] = [
+                f"Toplam feature satiri: {len(features)}",
+                f"Benzersiz kosu sayisi: {int(features['race_id'].nunique()) if 'race_id' in features.columns else 0}",
+                f"Tarih araligi: {features['date'].min() if 'date' in features.columns and not features.empty else '-'} -> {features['date'].max() if 'date' in features.columns and not features.empty else '-'}",
+            ]
+    except Exception:
+        pass
+
+    try:
+        artifact, _ = load_phase3_artifact(str(paths.model_path))
+        feature_cols = artifact.feature_columns
+        sample = pred.head(200).copy()
+        if "is_winner" not in sample.columns:
+            sample["is_winner"] = 0
+        perm = compute_permutation_importance(artifact, sample, feature_cols, n_repeats=2)
+        shap = compute_optional_shap_summary(artifact, sample, feature_cols)
+        top_features = perm[:8]
+        if not top_features and shap.get("available"):
+            top_features = shap.get("top_features", [])[:8]
+        context["feature_notes"] = [
+            f"{item['feature']}: {float(item.get('importance_mean', item.get('abs_stage1_coef', 0.0))):.4f}"
+            for item in top_features
+        ]
+    except Exception:
+        pass
+
+    try:
+        if records:
+            record_frame = pd.DataFrame(records)
+            summary_lines = [
+                f"Secili kosu at sayisi: {int(len(record_frame))}",
+                f"Ortalama P(win): {float(pd.to_numeric(record_frame.get('calibrated_probability', pd.Series(dtype=float)), errors='coerce').mean() or 0.0):.3f}",
+                f"EV > 0 aday sayisi: {int((pd.to_numeric(record_frame.get('ev', pd.Series(dtype=float)), errors='coerce') > 0).sum()) if 'ev' in record_frame.columns else 0}",
+            ]
+            context["data_summary"] = context.get("data_summary", []) + summary_lines
+    except Exception:
+        pass
+
+    try:
+        stat_rows = []
+        for rec in records:
+            stat_rows.append(
+                {
+                    "horse": str(rec.get("horse_name") or rec.get("horse_id") or "-"),
+                    "number": rec.get("number", "-"),
+                    "draw": rec.get("draw", rec.get("number", "-")),
+                    "weight": rec.get("weight", "-"),
+                    "distance": rec.get("distance", "-"),
+                    "field_size": rec.get("field_size", "-"),
+                    "form_avg_3": rec.get("form_avg_3", "-"),
+                    "form_avg_5": rec.get("form_avg_5", "-"),
+                    "form_avg_10": rec.get("form_avg_10", "-"),
+                    "days_since_last_race": rec.get("days_since_last_race", "-"),
+                    "track_fit": rec.get("track_fit", "-"),
+                    "surface_fit": rec.get("surface_fit", "-"),
+                    "distance_fit": rec.get("distance_fit", "-"),
+                    "pace_pressure": rec.get("pace_pressure", "-"),
+                    "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
+                    "edge": rec.get("edge", "-"),
+                    "ev": rec.get("ev", "-"),
+                    "kelly_fraction": rec.get("kelly_fraction", "-"),
+                }
+            )
+        context["horse_stats"] = stat_rows
+    except Exception:
+        pass
+
+    return context
+
+
 def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     out = frame.copy()
     if out.empty:
@@ -267,11 +451,14 @@ def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataF
             out["race_name"] = pd.Series(dtype="object")
         if "horse_name" not in out.columns:
             out["horse_name"] = pd.Series(dtype="object")
+        if "number" not in out.columns:
+            out["number"] = pd.Series(dtype="float64")
         return out
 
     if not paths.clean_csv.exists():
         out["race_name"] = out["race_id"].astype(str)
         out["horse_name"] = out["horse_id"].astype(str)
+        out["number"] = pd.to_numeric(out.get("draw", pd.Series(np.nan, index=out.index)), errors="coerce")
         return out
 
     clean = pd.read_csv(paths.clean_csv)
@@ -280,9 +467,10 @@ def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataF
     if day_clean.empty:
         out["race_name"] = out["race_id"].astype(str)
         out["horse_name"] = out["horse_id"].astype(str)
+        out["number"] = pd.to_numeric(out.get("draw", pd.Series(np.nan, index=out.index)), errors="coerce")
         return out
 
-    labels = day_clean[["race_id", "horse_id", "horse_name", "track"]].drop_duplicates()
+    labels = day_clean[["race_id", "horse_id", "horse_name", "track", "draw"]].drop_duplicates()
     out = out.merge(labels, on=["race_id", "horse_id"], how="left", suffixes=("", "_label"))
 
     race_label_map: dict[str, str] = {}
@@ -298,7 +486,88 @@ def _attach_ml_labels(paths, target_date: date, frame: pd.DataFrame) -> pd.DataF
 
     out["race_name"] = out["race_id"].astype(str).map(race_label_map)
     out["horse_name"] = out["horse_name"].fillna(out["horse_id"]).astype(str)
+    out["number"] = pd.to_numeric(out.get("draw", pd.Series(np.nan, index=out.index)), errors="coerce")
     return out
+
+
+def _overlay_bulletin_horse_names(
+    records: list[dict],
+    *,
+    settings,
+    target_date: date,
+    city: str,
+    requested_race_id: str,
+) -> list[dict]:  # type: ignore[no-untyped-def]
+    """Replace synthetic horse labels with bulletin names using race+number mapping."""
+    if not records or not city:
+        return records
+
+    try:
+        data_source = _bulletin_source_for_ml(settings)
+        races = fetch_races(data_source, target_date, city, None)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Bulletin name overlay skipped: %s", exc)
+        return records
+
+    requested_no = _parse_race_no(requested_race_id)
+    target_race = None
+    for race in races:
+        race_id = str(race.id)
+        if race_id == requested_race_id:
+            target_race = race
+            break
+        mapped = _to_ml_frame_race_id(race_id, target_date)
+        if mapped and mapped == requested_race_id:
+            target_race = race
+            break
+        if requested_no is not None and race.race_no == requested_no:
+            target_race = race
+            break
+
+    if target_race is None:
+        return records
+
+    number_to_name = {
+        int(entry.number): str(entry.horse_name)
+        for entry in target_race.entries
+    }
+    horse_id_to_name = {
+        str(entry.horse_id): str(entry.horse_name)
+        for entry in target_race.entries
+        if entry.horse_id is not None
+    }
+    source_horse_id_to_name = {
+        str(entry.source_horse_id): str(entry.horse_name)
+        for entry in target_race.entries
+        if entry.source_horse_id is not None
+    }
+
+    for rec in records:
+        current_name = rec.get("horse_name")
+        if not _is_placeholder_horse_name(current_name):
+            continue
+
+        number = rec.get("number")
+        try:
+            num = int(number) if number is not None and not pd.isna(number) else None
+        except (TypeError, ValueError):
+            num = None
+        if num is not None and num in number_to_name:
+            rec["horse_name"] = number_to_name[num]
+            continue
+
+        horse_id = str(rec.get("horse_id", "")).strip()
+        if horse_id and horse_id in horse_id_to_name:
+            rec["horse_name"] = horse_id_to_name[horse_id]
+            continue
+
+        source_horse_id = rec.get("source_horse_id")
+        if source_horse_id is not None:
+            src_key = str(source_horse_id).strip()
+            if src_key in source_horse_id_to_name:
+                rec["horse_name"] = source_horse_id_to_name[src_key]
+
+    return records
 
 
 def _ml_has_date(paths, target_date: date) -> bool:  # type: ignore[no-untyped-def]
@@ -322,6 +591,17 @@ def _ml_model_loadable(paths) -> bool:  # type: ignore[no-untyped-def]
     return True
 
 
+def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> tuple[list[str], str | None]:
+    try:
+        return data_source.get_available_hippodromes(target_date), None
+    except DataSourceError as exc:
+        logger.warning("TJK hipodrom listesi alinamadi, bilinen listeyle devam edilecek: %s", exc)
+        return list(KNOWN_HIPPODROMES), (
+            "TJK'ya su an ulasilamiyor (DNS/ag gecici hatasi). "
+            "Bilinen hipodrom listesi gosteriliyor; birazdan tekrar deneyin."
+        )
+
+
 def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
     needs_refresh = (not _ml_model_loadable(paths)) or (not _ml_has_date(paths, target_date))
@@ -329,7 +609,7 @@ def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ign
         return
 
     start_date = target_date - timedelta(days=420)
-    ingest_synthetic(start_date, target_date, paths)
+    ingest_real_data(start_date, target_date, paths)
     preprocess_raw(paths)
     build_features(paths)
     train_phase1_model(
@@ -357,7 +637,7 @@ def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFr
         logger.warning("ML predict failed, rebuilding artifacts once: %s", exc)
         # Force-refresh artifacts once in case persisted files are from an incompatible runtime.
         start_date = target_date - timedelta(days=420)
-        ingest_synthetic(start_date, target_date, paths)
+        ingest_real_data(start_date, target_date, paths)
         preprocess_raw(paths)
         build_features(paths)
         train_phase1_model(
@@ -403,7 +683,9 @@ def create_app() -> FastAPI:
             if source == "ml":
                 data_source = _bulletin_source_for_ml(settings)
                 if isinstance(data_source, TJKHtmlDataSource):
-                    hippodromes = data_source.get_available_hippodromes(parsed_date)
+                    hippodromes, source_info = _safe_tjk_hippodromes(data_source, parsed_date)
+                    if source_info:
+                        info = source_info
                 else:
                     all_races = fetch_races(data_source, parsed_date, None, None)
                     hippodromes = sorted({r.hippodrome for r in all_races})
@@ -411,8 +693,12 @@ def create_app() -> FastAPI:
                 if city:
                     races = fetch_races(data_source, parsed_date, city, None)
                     ml_races = _ml_race_summaries_from_races(races, data_source, settings)
+                    if ml_races:
+                        quick_info = "Bulten listesi hazir. Tahminler yalnizca kosu secildiginde hesaplanir."
+                        info = f"{info} {quick_info}".strip() if info else quick_info
                 else:
-                    info = "Lutfen listeden bir hipodrom secin."
+                    city_prompt = "Lutfen listeden bir hipodrom secin."
+                    info = f"{info} {city_prompt}".strip() if info else city_prompt
                     ml_races = []
 
                 if not ml_races:
@@ -436,7 +722,9 @@ def create_app() -> FastAPI:
 
             data_source = build_data_source(source, settings)
             if isinstance(data_source, TJKHtmlDataSource):
-                hippodromes = data_source.get_available_hippodromes(parsed_date)
+                hippodromes, source_info = _safe_tjk_hippodromes(data_source, parsed_date)
+                if source_info:
+                    info = source_info
                 if city:
                     races = fetch_races(data_source, parsed_date, city, None)
                     if not races:
@@ -446,7 +734,8 @@ def create_app() -> FastAPI:
                         )
                 else:
                     races = []
-                    info = "Lutfen listeden bir hipodrom secin."
+                    city_prompt = "Lutfen listeden bir hipodrom secin."
+                    info = f"{info} {city_prompt}".strip() if info else city_prompt
             else:
                 all_races = fetch_races(data_source, parsed_date, None, None)
                 hippodromes = sorted({r.hippodrome for r in all_races})
@@ -483,7 +772,7 @@ def create_app() -> FastAPI:
         city: str = Query(""),
         sort_by: str = Query(
             "strategy",
-            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|edge)$",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|edge|kelly_fraction)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
@@ -523,33 +812,363 @@ def create_app() -> FastAPI:
             if source == "ml":
                 paths = paths_from_settings(settings)
                 pred = _predict_ml_for_date_with_recovery(settings, parsed_date)
-                race_df = pred[pred["race_id"].astype(str) == race_id].copy()
+                requested_race_no = _parse_race_no(str(race_id))
+                target_track_key = _normalize_track_key(city) if city else ""
+
+                data_source = _bulletin_source_for_ml(settings)
+                try:
+                    if city:
+                        bulletin_races = fetch_races(data_source, parsed_date, city, None)
+                    else:
+                        bulletin_races = fetch_races(data_source, parsed_date, None, None)
+                except Exception:  # noqa: BLE001
+                    bulletin_races = []
+
+                selected_race = next((r for r in bulletin_races if str(r.id) == str(race_id)), None)
+                if selected_race is None:
+                    mapped_for_lookup = _to_ml_frame_race_id(str(race_id), parsed_date)
+                    if mapped_for_lookup is not None:
+                        selected_race = next(
+                            (
+                                r
+                                for r in bulletin_races
+                                if _to_ml_frame_race_id(str(r.id), parsed_date) == mapped_for_lookup
+                            ),
+                            None,
+                        )
+                if selected_race is None and requested_race_no is not None and city:
+                    selected_race = next((r for r in bulletin_races if int(r.race_no) == requested_race_no), None)
+
+                scoped_pred = pred.copy()
+                if target_track_key and "track" in scoped_pred.columns:
+                    track_keys = scoped_pred["track"].astype(str).map(_normalize_track_key)
+                    scoped_pred = scoped_pred[track_keys == target_track_key].copy()
+
+                race_df = pd.DataFrame()
+                if selected_race is not None:
+                    selected_race_no = int(selected_race.race_no)
+                    scoped_race_no = scoped_pred["race_id"].astype(str).map(_parse_race_no)
+                    race_df = scoped_pred[scoped_race_no == selected_race_no].copy()
+                elif mapped_race_id := _to_ml_frame_race_id(race_id, parsed_date):
+                    race_df = scoped_pred[scoped_pred["race_id"].astype(str) == mapped_race_id].copy()
+                elif requested_race_no is not None:
+                    scoped_race_no = scoped_pred["race_id"].astype(str).map(_parse_race_no)
+                    race_df = scoped_pred[scoped_race_no == requested_race_no].copy()
+                else:
+                    race_df = scoped_pred[scoped_pred["race_id"].astype(str) == str(race_id)].copy()
+
+                if selected_race is not None and not race_df.empty:
+                    candidate_records = race_df.to_dict(orient="records")
+                    if not _race_matches_bulletin(candidate_records, selected_race):
+                        race_df = pd.DataFrame()
 
                 if not race_df.empty:
                     ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                     reverse = sort_order == "desc"
                     records = race_df.to_dict(orient="records")
-                    records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
+                    for rec in records:
+                        horse_name = rec.get("horse_name")
+                        if horse_name in (None, "", "nan"):
+                            rec["horse_name"] = str(rec.get("horse_id", "-"))
 
-                    horse_name_lookup = {
-                        str(r.get("horse_id", "")): str(r.get("horse_name", r.get("horse_id", "")))
-                        for r in records
-                    }
-                    race_name_lookup = {
-                        str(r.get("race_id", "")): str(r.get("race_name", r.get("race_id", "")))
-                        for r in records
-                    }
+                        if rec.get("number") is None:
+                            draw_val = rec.get("draw")
+                            try:
+                                rec["number"] = int(draw_val) if draw_val is not None and not pd.isna(draw_val) else None
+                            except (TypeError, ValueError):
+                                rec["number"] = None
+
+                    records = _overlay_bulletin_horse_names(
+                        records,
+                        settings=settings,
+                        target_date=parsed_date,
+                        city=city,
+                        requested_race_id=race_id,
+                    )
+
+                    p2_fallback, p3_fallback = _place_probabilities_from_records(records)
+                    for rec in records:
+                        hid = str(rec.get("horse_id", ""))
+                        p2_val = _safe_float(rec.get("place2_probability"), 0.0)
+                        p3_val = _safe_float(rec.get("place3_probability"), 0.0)
+                        if p2_val <= 0.0 and hid in p2_fallback:
+                            rec["place2_probability"] = p2_fallback[hid]
+                        if p3_val <= 0.0 and hid in p3_fallback:
+                            rec["place3_probability"] = p3_fallback[hid]
+                        rec["top3_probability"] = min(
+                            1.0,
+                            _safe_float(rec.get("calibrated_probability"), 0.0)
+                            + _safe_float(rec.get("place2_probability"), 0.0)
+                            + _safe_float(rec.get("place3_probability"), 0.0),
+                        )
+
+                    records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
+                    for idx, rec in enumerate(records, start=1):
+                        rec["rank"] = idx
+
+                    horse_stats_rows: list[dict[str, object]] = []
+                    for rec in records:
+                        horse_stats_rows.append(
+                            {
+                                "horse": str(rec.get("horse_name") or rec.get("horse_id") or "-"),
+                                "horse_id": rec.get("horse_id", "-"),
+                                "number": rec.get("number", "-"),
+                                "draw": rec.get("draw", rec.get("number", "-")),
+                                "weight": rec.get("weight", "-"),
+                                "distance": rec.get("distance", "-"),
+                                "field_size": rec.get("field_size", "-"),
+                                "form_avg_3": rec.get("form_avg_3", "-"),
+                                "form_avg_5": rec.get("form_avg_5", "-"),
+                                "form_avg_10": rec.get("form_avg_10", "-"),
+                                "days_since_last_race": rec.get("days_since_last_race", "-"),
+                                "track_fit": rec.get("track_fit", "-"),
+                                "surface_fit": rec.get("surface_fit", "-"),
+                                "distance_fit": rec.get("distance_fit", "-"),
+                                "pace_pressure": rec.get("pace_pressure", "-"),
+                                "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
+                                "edge": rec.get("edge", "-"),
+                                "ev": rec.get("ev", "-"),
+                                "kelly_fraction": rec.get("kelly_fraction", "-"),
+                                "avg_race_time_shared_combo": "-",
+                                "tjk_stats_url": "",
+                                "tjk_workout_url": "",
+                                "source_horse_id": rec.get("source_horse_id", ""),
+                                "tjk_error": "",
+                                "tjk_summary": [],
+                                "tjk_history": [],
+                            }
+                        )
+
+                    shared_combo_label: str | None = None
+                    if selected_race is not None:
+                        target_date_value = parsed_date
+                        target_distance = int(selected_race.distance_m)
+                        target_surface = selected_race.surface.value if hasattr(selected_race.surface, "value") else str(selected_race.surface)
+
+                        entry_by_number = {int(entry.number): entry for entry in selected_race.entries}
+                        entry_by_horse_id = {str(entry.horse_id): entry for entry in selected_race.entries}
+                        entry_by_source_horse_id = {
+                            int(entry.source_horse_id): entry
+                            for entry in selected_race.entries
+                            if entry.source_horse_id is not None
+                        }
+                        entry_by_name = {
+                            _normalize_name_key(entry.horse_name): entry
+                            for entry in selected_race.entries
+                        }
+                        stats_by_entry_key: dict[str, object] = {}
+                        horse_history_map: dict[str, list] = {}
+                        combo_counter: dict[tuple[int, str], int] = {}
+                        for entry in selected_race.entries:
+                            try:
+                                stats = data_source.get_horse_statistics(entry)
+                            except Exception:
+                                continue
+                            stats_by_entry_key[f"horse:{entry.horse_id}"] = stats
+                            if entry.source_horse_id is not None:
+                                stats_by_entry_key[f"source:{entry.source_horse_id}"] = stats
+                            horse_history_map[str(entry.horse_id)] = stats.past_performances
+                            for perf in stats.past_performances:
+                                if perf.race_date >= target_date_value:
+                                    continue
+                                key = (int(perf.distance_m), perf.surface.value if hasattr(perf.surface, "value") else str(perf.surface))
+                                combo_counter[key] = combo_counter.get(key, 0) + 1
+
+                        shared_combo = None
+                        if combo_counter:
+                            shared_combo = max(combo_counter.items(), key=lambda item: item[1])[0]
+                            shared_distance, shared_surface = shared_combo
+                            shared_combo_label = f"Ortak pist+mesafe kombinasyonu: {shared_distance}m / {shared_surface}"
+
+                        for row in horse_stats_rows:
+                            row_number = row.get("number")
+                            try:
+                                row_number_int = int(row_number) if row_number not in (None, "-") else None
+                            except (TypeError, ValueError):
+                                row_number_int = None
+                            matching_entry = entry_by_number.get(row_number_int) if row_number_int is not None else None
+                            if matching_entry is None:
+                                row_source_horse_id = row.get("source_horse_id")
+                                try:
+                                    src_id = int(row_source_horse_id) if row_source_horse_id not in (None, "") else None
+                                except (TypeError, ValueError):
+                                    src_id = None
+                                if src_id is not None:
+                                    matching_entry = entry_by_source_horse_id.get(src_id)
+                            if matching_entry is None:
+                                row_horse_id = str(row.get("horse_id", "")).strip()
+                                if row_horse_id:
+                                    matching_entry = entry_by_horse_id.get(row_horse_id)
+                            if matching_entry is None:
+                                row_horse_name_key = _normalize_name_key(row.get("horse"))
+                                if row_horse_name_key:
+                                    matching_entry = entry_by_name.get(row_horse_name_key)
+
+                            if matching_entry is not None:
+                                row["source_horse_id"] = str(matching_entry.source_horse_id or "")
+                                if matching_entry.source_horse_id is not None:
+                                    row["tjk_stats_url"] = (
+                                        "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?"
+                                        f"QueryParameter_AtId={matching_entry.source_horse_id}&&Era=past"
+                                    )
+                                    row["tjk_workout_url"] = (
+                                        "https://www.tjk.org/TR/YarisSever/Query/Page/IdmanIstatistikleri?"
+                                        f"QueryParameter_AtId={matching_entry.source_horse_id}"
+                                    )
+                                stats = stats_by_entry_key.get(f"source:{matching_entry.source_horse_id}")
+                                if stats is None:
+                                    stats = stats_by_entry_key.get(f"horse:{matching_entry.horse_id}")
+                                if stats is None:
+                                    try:
+                                        stats = data_source.get_horse_statistics(matching_entry)
+                                    except Exception as exc:
+                                        row["tjk_error"] = str(exc)
+                                        stats = None
+                                if stats is not None:
+                                    row["tjk_summary"] = [
+                                        f"Kariyer kosu: {stats.career_starts}",
+                                        f"Kariyer galibiyet: {stats.career_wins}",
+                                        f"Kariyer plase: {stats.career_places}",
+                                        f"Son yil kosu: {stats.last_year_starts}",
+                                        f"Son yil galibiyet: {stats.last_year_wins}",
+                                        f"Son yil plase: {stats.last_year_places}",
+                                        f"Idman kaydi: {len(stats.workout_records)}",
+                                    ]
+                                    history_rows = []
+                                    for perf in stats.past_performances[:10]:
+                                        history_rows.append(
+                                            {
+                                                "race_date": perf.race_date.isoformat(),
+                                                "hippodrome": perf.hippodrome,
+                                                "distance_m": perf.distance_m,
+                                                "surface": perf.surface.value if hasattr(perf.surface, "value") else str(perf.surface),
+                                                "finish_position": perf.finish_position,
+                                                "race_time_seconds": perf.race_time_seconds,
+                                                "weight_kg": perf.weight_kg,
+                                                "equipment": perf.equipment,
+                                                "jockey_name": perf.jockey_name,
+                                                "field_size": perf.field_size,
+                                                "odds": perf.odds,
+                                                "group_info": perf.group_info,
+                                                "race_name": perf.race_name,
+                                                "race_class": perf.race_class,
+                                                "trainer_name": perf.trainer_name,
+                                                "owner_name": perf.owner_name,
+                                                "handicap_points": perf.handicap_points,
+                                                "prize_info": perf.prize_info,
+                                                "s20": perf.s20,
+                                                "extra1": None,
+                                                "extra2": None,
+                                            }
+                                        )
+                                    row["tjk_history"] = history_rows
+
+                                history = horse_history_map.get(str(matching_entry.horse_id), [])
+                                filtered_times = [
+                                    float(p.race_time_seconds)
+                                    for p in history
+                                    if p.race_time_seconds is not None
+                                    and p.race_date < target_date_value
+                                    and int(p.distance_m) == target_distance
+                                    and (p.surface.value if hasattr(p.surface, "value") else str(p.surface)) == target_surface
+                                ]
+                                if not filtered_times and shared_combo is not None:
+                                    shared_distance, shared_surface = shared_combo
+                                    filtered_times = [
+                                        float(p.race_time_seconds)
+                                        for p in history
+                                        if p.race_time_seconds is not None
+                                        and p.race_date < target_date_value
+                                        and int(p.distance_m) == int(shared_distance)
+                                        and (p.surface.value if hasattr(p.surface, "value") else str(p.surface)) == str(shared_surface)
+                                    ]
+                                if filtered_times:
+                                    row["avg_race_time_shared_combo"] = round(sum(filtered_times) / len(filtered_times), 2)
+
+                    horse_name_lookup: dict[str, str] = {}
+                    race_name_lookup: dict[str, str] = {}
+                    race_horse_number_lookup: dict[tuple[str, str], int] = {}
+
+                    def _upsert_horse_name(horse_key: str, horse_name: str) -> None:
+                        if not horse_key:
+                            return
+                        existing = horse_name_lookup.get(horse_key)
+                        if existing is None or (_is_placeholder_horse_name(existing) and not _is_placeholder_horse_name(horse_name)):
+                            horse_name_lookup[horse_key] = horse_name
+
+                    for row in pred.to_dict(orient="records"):
+                        rid = str(row.get("race_id", ""))
+                        hid = str(row.get("horse_id", ""))
+                        hname = str(row.get("horse_name", hid))
+                        rname = str(row.get("race_name", rid))
+
+                        if rid and rid not in race_name_lookup:
+                            race_name_lookup[rid] = rname
+                        _upsert_horse_name(hid, hname)
+
+                        number_val = row.get("number", row.get("draw"))
+                        try:
+                            num = int(number_val) if number_val is not None and not pd.isna(number_val) else None
+                        except (TypeError, ValueError):
+                            num = None
+                        if rid and hid and num is not None:
+                            race_horse_number_lookup[(rid, hid)] = num
+
+                    for row in records:
+                        rid = str(row.get("race_id", ""))
+                        hid = str(row.get("horse_id", ""))
+                        hname = str(row.get("horse_name", hid))
+                        rname = str(row.get("race_name", rid))
+                        if rid and rid not in race_name_lookup:
+                            race_name_lookup[rid] = rname
+                        _upsert_horse_name(hid, hname)
+
+                    bulletin_by_race_no_and_number: dict[tuple[int, int], str] = {}
+                    if city:
+                        try:
+                            data_source = _bulletin_source_for_ml(settings)
+                            bulletin_races = fetch_races(data_source, parsed_date, city, None)
+                            for race in bulletin_races:
+                                race_no = int(race.race_no)
+                                for entry in race.entries:
+                                    bulletin_by_race_no_and_number[(race_no, int(entry.number))] = str(entry.horse_name)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("Ticket preview bulletin overlay skipped: %s", exc)
 
                     opt = optimize_for_date(paths, parsed_date, settings, budget=settings.phase4_default_budget)
                     ticket_preview = []
+                    selected_race_id = str(race_df["race_id"].iloc[0]) if not race_df.empty else race_id
+                    allowed_combo_race_ids = set(scoped_pred["race_id"].astype(str).tolist())
+                    if requested_race_no is not None:
+                        allowed_combo_race_ids = {
+                            rid
+                            for rid in allowed_combo_race_ids
+                            if (_parse_race_no(rid) is not None and _parse_race_no(rid) >= requested_race_no)
+                        }
+
                     for c in opt.get("columns", []):
                         combo = c.get("combination", {})
-                        if race_id not in combo:
+                        combo_race_ids = {str(k) for k in combo.keys()}
+                        if selected_race_id not in combo:
                             continue
-                        combo_readable = {
-                            race_name_lookup.get(str(k), str(k)): horse_name_lookup.get(str(v), str(v))
-                            for k, v in combo.items()
-                        }
+                        if not combo_race_ids.issubset(allowed_combo_race_ids):
+                            continue
+                        combo_readable: dict[str, str] = {}
+                        for k, v in combo.items():
+                            rid = str(k)
+                            hid = str(v)
+                            readable_race = race_name_lookup.get(rid, rid)
+                            readable_horse = horse_name_lookup.get(hid, hid)
+
+                            if _is_placeholder_horse_name(readable_horse):
+                                race_no = _parse_race_no(rid)
+                                horse_no = race_horse_number_lookup.get((rid, hid))
+                                if race_no is not None and horse_no is not None:
+                                    bulletin_name = bulletin_by_race_no_and_number.get((race_no, horse_no))
+                                    if bulletin_name:
+                                        readable_horse = bulletin_name
+
+                            combo_readable[readable_race] = readable_horse
                         ticket_preview.append({**c, "combination": combo_readable})
 
                     ml_prediction = {
@@ -563,8 +1182,14 @@ def create_app() -> FastAPI:
                         },
                         "ticket_preview": ticket_preview,
                         "optimization_summary": opt.get("summary", {}),
-                        "disclaimer": "Bu tahminler istatistiksel analize dayanir, kesinlik tasimaz; sorumlu bahis oynayin.",
+                        "analysis": {
+                            **_build_ml_analysis_context(paths, pred, records),
+                            "horse_stats": horse_stats_rows,
+                        },
+                        "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
                     }
+                    if shared_combo_label:
+                        ml_prediction["analysis"].setdefault("data_summary", []).append(shared_combo_label)
 
                     for field in _ML_SORTABLE_FIELDS:
                         next_direction = "asc" if field == ml_sort_by and sort_order == "desc" else "desc"
@@ -574,16 +1199,10 @@ def create_app() -> FastAPI:
                 else:
                     # If race is from daily bulletin (e.g., TJK ids), generate ML-style table
                     # from PredictionEngine for the selected real race.
-                    data_source = _bulletin_source_for_ml(settings)
-                    if city:
-                        races = fetch_races(data_source, parsed_date, city, None)
-                    else:
-                        races = fetch_races(data_source, parsed_date, None, None)
-                    race = next((r for r in races if str(r.id) == str(race_id)), None)
-
-                    if race is None:
+                    if selected_race is None:
                         error = "Secilen kosu bulunamadi. Lutfen listeden yeniden secin."
                     else:
+                        race = selected_race
                         engine = PredictionEngine(data_source, settings)
                         race_pred = engine.predict(race)
 
@@ -603,10 +1222,23 @@ def create_app() -> FastAPI:
                                     "confidence": hp.confidence_score if hp.confidence_score is not None else 0.0,
                                     "edge": edge,
                                     "ev": ev,
+                                    "kelly_fraction": hp.value_bet.fractional_kelly_stake if hp.value_bet else 0.0,
                                     "bet_decision": decision,
                                     "race_id": str(race.id),
                                     "race_name": f"{race.hippodrome} - {race.race_no}. Kosu",
                                 }
+                            )
+
+                        p2_fallback, p3_fallback = _place_probabilities_from_records(records)
+                        for rec in records:
+                            hid = str(rec.get("horse_id", ""))
+                            rec["place2_probability"] = p2_fallback.get(hid, 0.0)
+                            rec["place3_probability"] = p3_fallback.get(hid, 0.0)
+                            rec["top3_probability"] = min(
+                                1.0,
+                                _safe_float(rec.get("calibrated_probability"), 0.0)
+                                + _safe_float(rec.get("place2_probability"), 0.0)
+                                + _safe_float(rec.get("place3_probability"), 0.0),
                             )
 
                         ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
@@ -631,8 +1263,164 @@ def create_app() -> FastAPI:
                                 "spent": 0.0,
                                 "column_count": 0,
                             },
-                            "disclaimer": "Bu tahminler istatistiksel analize dayanir, kesinlik tasimaz; sorumlu bahis oynayin.",
+                            "analysis": {
+                                "data_notes": [
+                                    "Bu ekran klasik skor motoru fallback'i ile calisiyor.",
+                                    "ML pipeline yerine secili gercek kosu verisi kullanildi.",
+                                    "Bu nedenle model katsayilari yerine kosu bazli istatistikler gosteriliyor.",
+                                ],
+                                "feature_notes": [
+                                    f"Top at sayisi: {len(records)}",
+                                    f"En yuksek P(win): {_safe_float(records[0].get('calibrated_probability'), 0.0) if records else 0.0:.3f}",
+                                    f"BET sinyali: {int(sum(1 for r in records if r.get('bet_decision') == 'BET'))}",
+                                ],
+                                "data_summary": [
+                                    f"Hipodrom: {race.hippodrome}",
+                                    f"Kosu no: {race.race_no}",
+                                    f"Mesafe: {race.distance_m}m",
+                                    f"Pist: {race.surface.value if hasattr(race.surface, 'value') else race.surface}",
+                                ],
+                                "horse_stats": [],
+                                "method_notes": [
+                                    "Fallback mod: gercek kosu verisi uzerinden klasik skor + EV/Kelly turetimi.",
+                                    "Sentetik veri ile doldurma yapilmaz.",
+                                ],
+                            },
+                            "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
                         }
+
+                        combo_counter: dict[tuple[int, str], int] = {}
+                        for hp in race_pred.ranked:
+                            try:
+                                stats = data_source.get_horse_statistics(hp.entry)
+                            except Exception:
+                                continue
+                            for perf in stats.past_performances:
+                                if perf.race_date >= parsed_date:
+                                    continue
+                                key = (int(perf.distance_m), perf.surface.value if hasattr(perf.surface, "value") else str(perf.surface))
+                                combo_counter[key] = combo_counter.get(key, 0) + 1
+
+                        shared_combo = max(combo_counter.items(), key=lambda item: item[1])[0] if combo_counter else None
+                        if shared_combo is not None:
+                            shared_distance, shared_surface = shared_combo
+                            ml_prediction["analysis"]["data_summary"].append(
+                                f"Ortak pist+mesafe kombinasyonu: {shared_distance}m / {shared_surface}"
+                            )
+
+                        for r in records:
+                            hp = next((x for x in race_pred.ranked if x.entry.horse_id == r.get("horse_id")), None)
+                            row = {
+                                "horse": r.get("horse_name", r.get("horse_id", "-")),
+                                "horse_id": r.get("horse_id", "-"),
+                                "number": r.get("number", "-"),
+                                "draw": r.get("number", "-"),
+                                "weight": getattr(hp.entry, "weight_kg", "-") if hp else "-",
+                                "distance": getattr(race, "distance_m", "-"),
+                                "field_size": len(records),
+                                "form_avg_3": getattr(hp.score, "form_score", "-") if hp else "-",
+                                "form_avg_5": "-",
+                                "form_avg_10": "-",
+                                "days_since_last_race": "-",
+                                "track_fit": getattr(hp.score, "distance_surface_score", "-") if hp else "-",
+                                "surface_fit": getattr(hp.score, "distance_surface_score", "-") if hp else "-",
+                                "distance_fit": getattr(hp.score, "distance_surface_score", "-") if hp else "-",
+                                "pace_pressure": "-",
+                                "market_probability_norm": r.get("edge", "-"),
+                                "edge": r.get("edge", "-"),
+                                "ev": r.get("ev", "-"),
+                                "kelly_fraction": r.get("kelly_fraction", "-"),
+                                "avg_race_time_shared_combo": "-",
+                                "source_horse_id": str(getattr(hp.entry, "source_horse_id", "") or "") if hp else "",
+                                "tjk_stats_url": "",
+                                "tjk_workout_url": "",
+                                "tjk_error": "",
+                                "tjk_summary": [],
+                                "tjk_history": [],
+                            }
+                            if hp and hp.entry.source_horse_id is not None:
+                                row["tjk_stats_url"] = (
+                                    "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?"
+                                    f"QueryParameter_AtId={hp.entry.source_horse_id}&&Era=past"
+                                )
+                                row["tjk_workout_url"] = (
+                                    "https://www.tjk.org/TR/YarisSever/Query/Page/IdmanIstatistikleri?"
+                                    f"QueryParameter_AtId={hp.entry.source_horse_id}"
+                                )
+                            elif hp:
+                                row["tjk_error"] = "AtKosuBilgileri icin gerekli AtId (QueryParameter_AtId) bulunamadi."
+
+                            stats = None
+                            if hp:
+                                try:
+                                    stats = data_source.get_horse_statistics(hp.entry)
+                                except Exception as exc:
+                                    row["tjk_error"] = str(exc)
+
+                            if stats is not None:
+                                row["tjk_summary"] = [
+                                    f"Kariyer kosu: {stats.career_starts}",
+                                    f"Kariyer galibiyet: {stats.career_wins}",
+                                    f"Kariyer plase: {stats.career_places}",
+                                    f"Son yil kosu: {stats.last_year_starts}",
+                                    f"Son yil galibiyet: {stats.last_year_wins}",
+                                    f"Son yil plase: {stats.last_year_places}",
+                                    f"Idman kaydi: {len(stats.workout_records)}",
+                                ]
+
+                                history_rows = []
+                                for perf in stats.past_performances[:10]:
+                                    history_rows.append(
+                                        {
+                                            "race_date": perf.race_date.isoformat(),
+                                            "hippodrome": perf.hippodrome,
+                                            "distance_m": perf.distance_m,
+                                            "surface": perf.surface.value if hasattr(perf.surface, "value") else str(perf.surface),
+                                            "finish_position": perf.finish_position,
+                                            "race_time_seconds": perf.race_time_seconds,
+                                            "weight_kg": perf.weight_kg,
+                                            "equipment": perf.equipment,
+                                            "jockey_name": perf.jockey_name,
+                                            "field_size": perf.field_size,
+                                            "odds": perf.odds,
+                                            "group_info": perf.group_info,
+                                            "race_name": perf.race_name,
+                                            "race_class": perf.race_class,
+                                            "trainer_name": perf.trainer_name,
+                                            "owner_name": perf.owner_name,
+                                            "handicap_points": perf.handicap_points,
+                                            "prize_info": perf.prize_info,
+                                            "s20": perf.s20,
+                                            "extra1": None,
+                                            "extra2": None,
+                                        }
+                                    )
+                                row["tjk_history"] = history_rows
+
+                                target_distance = int(race.distance_m)
+                                target_surface = race.surface.value if hasattr(race.surface, "value") else str(race.surface)
+                                filtered_times = [
+                                    float(p.race_time_seconds)
+                                    for p in stats.past_performances
+                                    if p.race_time_seconds is not None
+                                    and p.race_date < parsed_date
+                                    and int(p.distance_m) == target_distance
+                                    and (p.surface.value if hasattr(p.surface, "value") else str(p.surface)) == target_surface
+                                ]
+                                if not filtered_times and shared_combo is not None:
+                                    shared_distance, shared_surface = shared_combo
+                                    filtered_times = [
+                                        float(p.race_time_seconds)
+                                        for p in stats.past_performances
+                                        if p.race_time_seconds is not None
+                                        and p.race_date < parsed_date
+                                        and int(p.distance_m) == int(shared_distance)
+                                        and (p.surface.value if hasattr(p.surface, "value") else str(p.surface)) == str(shared_surface)
+                                    ]
+                                if filtered_times:
+                                    row["avg_race_time_shared_combo"] = round(sum(filtered_times) / len(filtered_times), 2)
+
+                            ml_prediction["analysis"]["horse_stats"].append(row)
 
                         for field in _ML_SORTABLE_FIELDS:
                             next_direction = "asc" if field == ml_sort_by and sort_order == "desc" else "desc"

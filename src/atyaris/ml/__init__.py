@@ -1,1 +1,1 @@
-"""Phase 1 ML pipeline package for leakage-safe probability estimation."""
+"""Benter-style horse racing probability stack (fundamental + market blend + EV/Kelly)."""

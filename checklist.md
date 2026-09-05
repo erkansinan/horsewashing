@@ -103,3 +103,61 @@ Ajan, `data_sources` katmanını bir **interface (Protocol/ABC)** üzerinden soy
 5. Temel test paketi (`pytest`)
 
 Şimdi bu gereksinimlere göre projeyi adım adım (önce veri katmanı, sonra modeller, sonra tahmin motoru, en son arayüz) geliştirmeye başla. Her adımdan sonra kısa bir özet ver ve bir sonraki adıma geç.
+
+## 7. ML yöntemi
+   Aşağıdaki akademik olarak kanıtlanmış yöntemleri temel alan bir 6'lı ganyan 
+tahmin mimarisi kur. Rastgele/keyfi bir ML yaklaşımı değil, at yarışı 
+literatüründeki en başarılı ve gerçek parayla test edilmiş yöntemleri uygula:
+
+1. ÇEKİRDEK MODEL — Benter Mimarisi (1994, Hong Kong'da 5 yıl kanıtlanmış kâr)
+   - İki aşamalı yaklaşım kur:
+     a) Aşama 1 ("Temel Model"): Koşullu lojistik regresyon (conditional 
+        logistic regression / conditional logit) ile her atın "gücünü" 
+        (strength) tahmin et. Girdi: form, dinlenme süresi, tempo, jokey/
+        antrenör istatistikleri, mesafe/zemin geçmişi.
+     b) Aşama 2 ("Piyasa Birleştirme"): Aşama 1'in çıktısını piyasa 
+        oranlarının (ganyan bahis oranı) ima ettiği olasılıkla ikinci bir 
+        koşullu logit modelinde birleştir. Bu, modelin piyasa bilgisinden 
+        de faydalanmasını sağlar (Benter'in orijinal iyileştirmesi).
+   - Veri setinde yeterli hacim varsa (Benter/Silverman-Suchard önerisi), 
+     koşullu logit yerine regularize edilmiş (L1/L2 penaltili) versiyonunu 
+     veya modern bir ensemble (LightGBM/XGBoost) ile hibrit kullan — ama 
+     çıktı mutlaka koşullu logit'in ürettiği gibi YARIŞ İÇİ göreli 
+     olasılıklar (bir yarıştaki tüm atların olasılıkları toplamı = 1) 
+     olmalı, bağımsız ikili sınıflandırma değil.
+
+2. ÇOKLU SIRALAMA OLASILIKLARI — Harville Formülü
+   - Kazanma olasılıklarından, 2. ve 3. sıra bitirme olasılıklarını türetmek 
+     için Harville formülünü uygula (plaselı/ikili/üçlü bahisler için gerekli).
+   - Gerekirse ardışık çıkarma (sequential elimination) mantığıyla genişlet.
+
+3. KALİBRASYON
+   - Ham model çıktısını gerçek frekanslarla eşleştirmek için Platt scaling 
+     veya isotonic regression uygula. Benter ve sonraki çalışmaların 
+     vurguladığı gibi, kalibrasyonsuz olasılıklar EV hesaplamasını bozar.
+
+4. EV VE BAHİS BOYUTU
+   - EV = (kalibre_olasılık × piyasa_oranı) - 1
+   - Fractional Kelly Criterion ile bahis büyüklüğü öner (tam Kelly yerine 
+     — literatürde varyans riskini azaltmak için standart pratik)
+   - Sadece piyasa oranının modelin ima ettiği olasılıktan anlamlı şekilde 
+     saptığı (value bet) durumları filtrele
+
+5. ÖZELLİK ÖNCELİKLENDİRME (Borowski ve ark. 2021 bulgularına göre)
+   - En yüksek prediktif ağırlığı geçmiş performans/kazanç metriklerine ver
+   - Jokey/antrenör özelliklerini ikincil önem sırasına koy (literatürde 
+     etkileri daha zayıf çıktı — ama tempo uyumu ve dinlenme süresi gibi 
+     BAĞLAMSAL etkileşim terimleri olarak dahil et)
+
+6. DOĞRULAMA
+   - Walk-forward (zaman bazlı) backtest kur
+   - Metrikler: log-loss, calibration curve, gerçek ROI simülasyonu, 
+     doğru bahis oranı (correct bet ratio)
+   - Modelin çıktısını ham piyasa oranlarıyla (kalibre edilmemiş favori 
+     sıralaması) karşılaştırarak gerçek bir edge (kenar/avantaj) olup 
+     olmadığını istatistiksel olarak test et (ör. bootstrap güven aralığı)
+
+Kodu modüler yaz: fundamental_model.py (Aşama 1), market_blend.py (Aşama 2), 
+harville.py, calibration.py, ev_kelly.py, backtest.py. Her modülde hangi 
+akademik kaynağa dayandığını (Benter 1994, Harville formülü vb.) yorum 
+olarak belirt.

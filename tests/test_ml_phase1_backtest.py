@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import date
 
 from atyaris.ml.backtest import walk_forward_backtest
-from atyaris.ml.provider import SyntheticRacingDataProvider
+from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
 
 
 def test_walk_forward_temporal_integrity_and_metrics() -> None:
-    provider = SyntheticRacingDataProvider()
+    provider = _FixtureRacingDataProvider()
     data = provider.get_dataset(date(2024, 1, 1), date(2025, 3, 31))
 
     result = walk_forward_backtest(data, min_train_days=60)

@@ -1,36 +1,76 @@
+# ------------------------------------------------------------
+# Data source / HTTP / cache
+# ------------------------------------------------------------
 tjk_base_url: "https://www.tjk.org"
 request_timeout_seconds: 15
 min_request_interval_seconds: 1.0
 cache_ttl_seconds: 600
 cache_path: ".cache/atyaris_cache.sqlite3"
+
+# ------------------------------------------------------------
+# Classic score engine windows (non-ML path)
+# ------------------------------------------------------------
 recent_form_window: 8
 ideal_rest_days_min: 14
 ideal_rest_days_max: 45
+
+# ------------------------------------------------------------
+# Legacy ensemble knobs (kept for backward compatibility in classic path)
+# Not used by Benter ML pipeline.
+# ------------------------------------------------------------
 ensemble_boosting_weight: 0.58
 ensemble_ranking_weight: 0.42
 calibration_temperature: 0.85
+
+# ------------------------------------------------------------
+# EV / value betting / bankroll management
+# EV = calibrated_probability * odds - 1
+# ------------------------------------------------------------
 ev_probability_threshold: 0.18
 ev_min_edge: 0.03
 ev_min_value: 0.02
 ev_fractional_kelly: 0.35
 ev_max_kelly_fraction: 0.25
+
+# ------------------------------------------------------------
+# Classic prediction backtest controls (non-ML path)
+# ------------------------------------------------------------
 backtest_lookback_days: 8
 backtest_leakage_safe_mode: true
 backtest_exclude_recent_races: 1
 backtest_optimize_calibration: true
-phase1_raw_csv_path: "data/raw/synthetic_races.csv"
+
+# ------------------------------------------------------------
+# Benter pipeline files
+# ------------------------------------------------------------
+phase1_raw_csv_path: "data/raw/tjk_real_races.csv"
 phase1_clean_csv_path: "data/processed/clean_races.csv"
 phase1_features_csv_path: "data/processed/features_phase1.csv"
 phase1_model_path: "models/phase1_logreg.joblib"
+
+# Benter walk-forward split controls
 phase1_min_train_days: 90
 phase1_holdout_days: 30
+
+# ------------------------------------------------------------
+# Feature toggles (historical naming retained)
+# ------------------------------------------------------------
 phase2_enable_advanced_features: true
 phase2_style_front_threshold: 0.6
 phase2_style_presser_threshold: 0.2
 phase2_layoff_days: 75
+
+# ------------------------------------------------------------
+# Calibration stage (after two-stage Benter probabilities)
+# `phase3_enable_ev` toggles EV/Kelly layer in prediction output
+# ------------------------------------------------------------
 phase3_calibration_method: "isotonic"
 phase3_calibration_days: 21
 phase3_enable_ev: true
+
+# ------------------------------------------------------------
+# 6'li ganyan ticket optimizer (beam search + Monte Carlo)
+# ------------------------------------------------------------
 phase4_default_budget: 500.0
 phase4_unit_cost: 1.0
 phase4_beam_width: 80
@@ -40,10 +80,18 @@ phase4_base_payout: 120000.0
 phase4_no_bet_ev_threshold: 0.0
 phase4_min_confidence: 0.35
 phase4_concentration_penalty: 0.15
+
+# ------------------------------------------------------------
+# Tracking and reporting
+# ------------------------------------------------------------
 phase5_tracking_db_path: "data/database/experiments.sqlite3"
 phase5_report_dir: "reports"
 phase5_top_feature_count: 15
 phase5_auto_promote_candidate: true
+
+# ------------------------------------------------------------
+# Classic score-engine weights (non-ML path)
+# ------------------------------------------------------------
 weights:
   form: 0.35
   jockey_trainer: 0.15

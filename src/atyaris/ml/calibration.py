@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Calibration layer using Platt scaling (Platt, 1999) or isotonic regression,
+# as commonly recommended in horse-racing probability calibration workflows.
+
 from dataclasses import dataclass
 
 import numpy as np

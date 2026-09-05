@@ -27,12 +27,68 @@ def _position_points(position: int | None, field_size: int | None) -> float:
 
 def score_form(stats: HorseStatistics, window: int) -> float:
     """Son ``window`` kosunun, yakinlik agirlikli ortalama formunu puanlar."""
+    def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+        return max(lo, min(hi, value))
+
+    def _pace_score(seconds: float, distance_m: int) -> float:
+        if seconds <= 0 or distance_m <= 0:
+            return 50.0
+        sec_per_100m = seconds / max(distance_m / 100.0, 1e-9)
+        return _clamp(120.0 - (sec_per_100m * 10.0))
+
+    workout_points: list[float] = []
+    for workout in stats.workout_records:
+        if workout.time_seconds is None or workout.distance_m is None:
+            continue
+        base = _pace_score(workout.time_seconds, workout.distance_m)
+        freshness_bonus = 0.0
+        if workout.workout_date is not None:
+            days_ago = (date.today() - workout.workout_date).days
+            if 0 <= days_ago <= 14:
+                freshness_bonus = 6.0
+            elif 15 <= days_ago <= 30:
+                freshness_bonus = 3.0
+        workout_points.append(_clamp(base + freshness_bonus))
+    workout_component = (sum(workout_points) / len(workout_points)) if workout_points else None
+
     recent = stats.recent_form(window)
     if not recent:
+        if workout_component is not None:
+            # Resmi kosusu olmayan atlarda idman verisini birincil form sinyali yap.
+            return _clamp(0.9 * workout_component + 5.0, 42.0, 85.0)
         return 40.0  # Bilinmeyen form icin notr-dusuk bir skor.
+
     weights = [window - i for i in range(len(recent))]
     points = [_position_points(p.finish_position, p.field_size) for p in recent]
-    return sum(w * p for w, p in zip(weights, points)) / sum(weights)
+    finish_component = sum(w * p for w, p in zip(weights, points)) / sum(weights)
+
+    race_time_points = [
+        _pace_score(p.race_time_seconds, p.distance_m)
+        for p in recent
+        if p.race_time_seconds is not None and p.distance_m > 0
+    ]
+    race_time_component = (sum(race_time_points) / len(race_time_points)) if race_time_points else None
+
+    hp_values = [p.handicap_points for p in recent if p.handicap_points is not None]
+    hp_component = (sum(hp_values) / len(hp_values)) if hp_values else None
+
+    odds_values = [p.odds for p in recent if p.odds is not None and p.odds > 0]
+    market_component = None
+    if odds_values:
+        market_probs = [1.0 / o for o in odds_values]
+        market_component = _clamp((sum(market_probs) / len(market_probs)) * 100.0 * 8.0)
+
+    detail_parts = [v for v in (race_time_component, hp_component, market_component) if v is not None]
+    detail_component = (sum(detail_parts) / len(detail_parts)) if detail_parts else None
+
+    components: list[tuple[float, float]] = [(finish_component, 0.55)]
+    if detail_component is not None:
+        components.append((detail_component, 0.30))
+    if workout_component is not None:
+        components.append((workout_component, 0.15))
+
+    weight_sum = sum(w for _, w in components)
+    return sum(value * weight for value, weight in components) / max(weight_sum, 1e-9)
 
 
 def score_jockey_trainer(stats: HorseStatistics, entry: RaceEntry) -> float:

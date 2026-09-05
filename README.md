@@ -102,9 +102,18 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Phase 4 ML Pipeline (Leakage-Safe + Calibration + EV + 6'li Optimizer)
+## Benter Tabanli ML Pipeline
 
-Asagidaki komutlar, sentetik veri ile Phase 1 akisini uctan uca calistirir:
+Bu repo, literaturde denenmis iki asamali Benter mimarisini uygular:
+
+- Asama 1 (fundamental_model): Yaris ici goreli kazanim olasiliklari ureten conditional logit.
+- Asama 2 (market_blend): Asama 1 olasiliklarini piyasa (ganyan) bilgisiyle ikinci bir kosullu modelde birlestirme.
+- Harville (harville.py): Kazanma olasiliklarindan 2.lik, 3.luk ve top3 olasiliklarini turetme.
+- Kalibrasyon (calibration.py): Platt veya isotonic ile olasilik duzeltmesi.
+- EV + Fractional Kelly (ev_kelly.py): Value bet filtreleme ve bahis boyutu onerisi.
+- Walk-forward backtest (backtest.py): log-loss, calibration, ROI ve market baseline karsilastirmasi.
+
+Asagidaki komutlar sentetik veriyle uctan uca Benter akisidir:
 
 ```powershell
 python main.py ingest --start-date 2024-01-01 --end-date 2025-12-31
@@ -132,23 +141,29 @@ atyaris ml report --date 2025-12-31 --budget 500
 
 Not: `calibrate`, `optimize`, `report` komutlari aktiftir.
 
-Phase 3 notlari:
-- `train` komutu artik logistic + random forest ensemble egitir ve holdout uzerinde blend agirligini secer.
-- `calibrate` komutu aktif; `phase3_calibration_method` (`isotonic`/`platt`/`none`) ayarina gore kalibratoru yeniden uretir.
-- `predict` ciktilarinda `Edge`, `EV` ve `Decision (BET/NO_BET)` kolonlari bulunur.
-- `backtest` ciktilari artik `ece`, `roi` ve `total_bets` alanlarini da raporlar.
+Benter notlari:
+- `train` komutu iki asamali conditional logit modeli egitir ve kalibratoru kaydeder.
+- `predict` ciktilarinda `P(win)`, `P(2.)`, `P(3.)`, `P(Top3)`, `Edge`, `EV`, `Kelly`, `Decision` kolonlari bulunur.
+- `backtest` ciktilari log-loss, brier, ece, roi, correct_bet_ratio ve model-vs-market ROI farki (bootstrap CI) icerir.
+- `optimize-ticket` 6 ayakli kolonlari beam search + Monte Carlo ile butce altinda secer.
+- `report` backtest + tahmin + kupon optimizasyonu + feature etkilerini tek JSON/HTML dashboardda birlestirir.
 
-Phase 4 notlari:
-- `optimize-ticket` komutu 6 ayaklik yarislari kullanarak beam search ile aday kolonlari uretir.
-- Monte Carlo simülasyon (`phase4_simulation_count`) ile her kolon icin `monte_carlo_hit_rate` hesaplanir.
-- Butce (`--budget`) ve birim maliyet (`phase4_unit_cost`) ile toplam kolon sayisi sinirlanir.
-- EV/confidence esikleri gecilemiyorsa sistem `NO_BET` sonucu dondurebilir.
+### Benter Icin Config Rehberi
 
-Phase 5 notlari:
-- `train` her calistiginda model version kaydi SQLite tracking veritabanina yazilir.
-- `report` komutu backtest + tahmin + kolon optimizasyon + explainability sonucunu birlestirir.
-- Otomatik dashboard HTML ve JSON rapor dosyasi `phase5_report_dir` altina yazilir.
-- Explainability katmani permutation importance uretir; SHAP kuruluysa opsiyonel SHAP ozeti de rapora eklenir.
+Temel ayarlar [config.yaml](config.yaml) dosyasindadir. Benter mimarisinde aktif olarak kullanilan gruplar:
+
+- Veri dosyalari: `phase1_raw_csv_path`, `phase1_clean_csv_path`, `phase1_features_csv_path`, `phase1_model_path`
+- Egitim bolme parametreleri: `phase1_min_train_days`, `phase1_holdout_days`, `phase3_calibration_days`
+- Kalibrasyon: `phase3_calibration_method` (`isotonic`, `platt`, `none`)
+- Value bet filtreleri: `ev_probability_threshold`, `ev_min_edge`, `ev_min_value`
+- Kelly risk kontrolu: `ev_fractional_kelly`, `ev_max_kelly_fraction`
+- Kupon optimizasyonu: `phase4_default_budget`, `phase4_beam_width`, `phase4_top_per_leg`, `phase4_simulation_count`
+- Raporlama/izleme: `phase5_tracking_db_path`, `phase5_report_dir`, `phase5_top_feature_count`
+
+Geriye uyumluluk notu:
+
+- `ensemble_boosting_weight`, `ensemble_ranking_weight`, `calibration_temperature` alanlari yalnizca klasik skor/legacy akista anlamlidir.
+- Benter ML boru hatti bu uc parametreyi kullanmaz.
 
 ## Kullanim
 
@@ -204,9 +219,9 @@ atyaris web
 - `--host`/`--port`/`--reload` secenekleriyle ozellestirilebilir:
   `atyaris web --port 8080 --reload`.
 
-### Web'de ML (phase3/4) ile Tahmin
+### Web'de ML (Benter) ile Tahmin
 
-Web arayuzunde `Kaynak` alaninda `ml (phase3/4)` secildiginde,
+Web arayuzunde `Kaynak` alaninda `ml (benter)` secildiginde,
 sayfa klasik skor motoru yerine ML pipeline ciktilarini gosterir.
 
 ML modu icin onerilen baslatma:
@@ -221,7 +236,7 @@ Bu durumda `.venv\Scripts\atyaris.exe web` kullanin.
 
 ML modunda kullanim adimlari:
 
-1. Ana sayfada `Kaynak = ml (phase3/4)` secin.
+1. Ana sayfada `Kaynak = ml (benter)` secin.
 2. Takvimden tarih secin.
 3. (Opsiyonel) Hipodrom filtresi secin.
 4. `Bulteni Getir` ile ML yaris listesini acin.
@@ -230,10 +245,11 @@ ML modunda kullanim adimlari:
 ML tahmin ekraninda sunulan basliklar:
 
 - `P(win)`: Kalibre edilmis kazanma olasiligi.
-- `Guven`: Modelin belirsizlikten turetilen guven skoru.
-- `Edge` ve `EV`: Piyasa oranina gore deger analizi.
-- `Karar (BET/NO_BET)`: EV/esik kurallarina gore bahis sinyali.
-- `Kupon Optimizasyon Ozet`: Phase 4 beam search + Monte Carlo sonucu.
+- `P(2.)`, `P(3.)`, `P(Top3)`: Harville formulu ile turetilen siralama olasiliklari.
+- `Guven`: Model-piyasa sapmasindan uretilen guven skoru.
+- `Edge`, `EV`, `Kelly`: Value bet analizi ve fractional Kelly bahis buyuklugu.
+- `Karar (BET/NO_BET)`: Olasilik, edge, EV ve Kelly filtrelerine gore sinyal.
+- `Kupon Optimizasyon Ozet`: 6 ayakli beam search + Monte Carlo sonucu.
 - Tablolarda teknik ID yerine okunur etiketler kullanilir:
   yaris satirinda `Hipodrom - N. Kosu`, at satirinda `At adi` gosterilir.
 
@@ -311,7 +327,7 @@ oynayin.
 sayilar `sample` kaynaginin deterministik ureteciyle sabittir ve her
 calistirmada ayni sonucu verir.)
 
-## Skorlama Modeli
+## Klasik Skorlama Modeli (Non-ML Yol)
 
 Toplam skor, `config.yaml` uzerinden ayarlanabilir agirliklarla hesaplanir:
 

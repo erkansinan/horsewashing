@@ -83,7 +83,21 @@ def generate_phase5_report(
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, default=str), encoding="utf-8")
 
-    top_table_html = top_preds[["race_id", "horse_id", "calibrated_probability", "edge", "ev", "bet_decision", "confidence"]].to_html(index=False) if not top_preds.empty else "<p>Prediction data unavailable.</p>"
+    table_cols = [
+      "race_id",
+      "horse_id",
+      "calibrated_probability",
+      "place2_probability",
+      "place3_probability",
+      "top3_probability",
+      "edge",
+      "ev",
+      "kelly_fraction",
+      "bet_decision",
+      "confidence",
+    ]
+    existing_cols = [c for c in table_cols if c in top_preds.columns]
+    top_table_html = top_preds[existing_cols].to_html(index=False) if not top_preds.empty else "<p>Prediction data unavailable.</p>"
 
     cols = optimization_result.get("columns", [])
     cols_df = pd.DataFrame(cols)

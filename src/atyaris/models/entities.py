@@ -39,6 +39,14 @@ class PastPerformance(BaseModel):
     field_size: Optional[int] = None
     jockey_name: Optional[str] = None
     trainer_name: Optional[str] = None
+    equipment: Optional[str] = None
+    group_info: Optional[str] = None
+    race_name: Optional[str] = None
+    race_class: Optional[str] = None
+    owner_name: Optional[str] = None
+    handicap_points: Optional[float] = None
+    prize_info: Optional[str] = None
+    s20: Optional[str] = None
     weight_kg: Optional[float] = None
     odds: Optional[float] = None
     race_time_seconds: Optional[float] = None
@@ -56,12 +64,28 @@ class PastPerformance(BaseModel):
         return self.finish_position is not None and self.finish_position <= 3
 
 
+class WorkoutRecord(BaseModel):
+    """Bir atin idman kaydi (TJK IdmanIstatistikleri satiri)."""
+
+    workout_date: Optional[date] = None
+    hippodrome: Optional[str] = None
+    surface: Optional[str] = None
+    workout_type: Optional[str] = None
+    workout_jockey: Optional[str] = None
+    status: Optional[str] = None
+    ranking_status: Optional[str] = None
+    detail: Optional[str] = None
+    distance_m: Optional[int] = None
+    time_seconds: Optional[float] = None
+
+
 class HorseStatistics(BaseModel):
     """Bir atin, tahmin motoruna girdi olarak sunulan toplulastirilmis istatistikleri."""
 
     horse_id: str
     horse_name: str
     past_performances: list[PastPerformance] = Field(default_factory=list)
+    workout_records: list[WorkoutRecord] = Field(default_factory=list)
     career_starts: int = 0
     career_wins: int = 0
     career_places: int = 0
