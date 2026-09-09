@@ -14,9 +14,10 @@ from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import FeatureBuildResult, build_leakage_safe_features
 from atyaris.ml.harville import add_harville_columns
 from atyaris.ml.market_blend import (
+    blend_form_market_probability,
     extract_market_reference_probability,
     fit_two_stage_benter,
-    predict_two_stage_probability,
+    predict_form_probability,
 )
 from atyaris.ml.modeling import evaluate_predictions
 
@@ -168,16 +169,24 @@ def walk_forward_backtest(
             calibration_df = train_df.tail(min(500, len(train_df))).copy()
 
         artifact = fit_two_stage_benter(core_train_df, calibration_df, features.feature_columns)
-        raw_cal = predict_two_stage_probability(artifact, calibration_df)
+        calibration_form_probability = predict_form_probability(artifact, calibration_df)
         calibrator = fit_calibrator(
             y_true=calibration_df["is_winner"].to_numpy(),
-            raw_prob=raw_cal,
+            raw_prob=calibration_form_probability,
             method=calibration_method,
         )
 
         pred = test_df.copy()
-        pred["raw_probability"] = predict_two_stage_probability(artifact, pred)
-        pred["calibrated_probability"] = apply_calibrator(calibrator, pred["raw_probability"].to_numpy())
+        pred_form_probability = apply_calibrator(
+            calibrator,
+            predict_form_probability(artifact, pred),
+        )
+        pred["raw_probability"] = blend_form_market_probability(
+            artifact,
+            pred,
+            pred_form_probability,
+        )
+        pred["calibrated_probability"] = pred["raw_probability"]
         denom = pred.groupby("race_id")["calibrated_probability"].transform("sum").replace(0.0, 1.0)
         pred["calibrated_probability"] = pred["calibrated_probability"] / denom
         pred["market_probability_used"] = extract_market_reference_probability(pred)

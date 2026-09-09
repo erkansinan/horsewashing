@@ -7,18 +7,21 @@ ile paylasir; boylece iki arayuz arasinda is mantigi tekrarlanmaz.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
+from threading import Lock
 from pathlib import Path
 import re
 from types import SimpleNamespace
 from urllib.parse import urlencode
+from uuid import uuid4
 from xml.sax.saxutils import escape
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from atyaris.config import get_settings
@@ -31,10 +34,12 @@ from atyaris.ml.pipeline import (
     paths_from_settings,
     predict_for_date,
     preprocess_raw,
+    run_phase1_backtest,
     train_phase1_model,
 )
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
+from atyaris.ml.phase5 import register_training_run
 from atyaris.prediction.engine import PredictionEngine
 from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
 from atyaris.utils.logging_config import configure_logging
@@ -69,6 +74,7 @@ _ML_SORTABLE_FIELDS = {
     "edge": "Edge",
     "ev": "EV",
     "kelly_fraction": "Kelly",
+    "form_strength": "Form Gucu",
 }
 
 _TRACK_DISPLAY_MAP = {
@@ -96,6 +102,9 @@ _TR_ASCII_MAP = str.maketrans(
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+_TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atyaris-train")
+_TRAINING_LOCK = Lock()
+_TRAINING_JOBS: dict[str, dict[str, object]] = {}
 
 
 @dataclass
@@ -135,6 +144,109 @@ def _is_placeholder_horse_name(value: object) -> bool:
     if re.fullmatch(r"HORSE[_-]?\d+", text):
         return True
     return False
+
+
+def _position_points(position: int | None, field_size: int | None) -> float:
+    if position is None:
+        return 30.0
+    if position in {1: 100, 2: 80, 3: 65}:
+        return {1: 100, 2: 80, 3: 65}[position]
+    size = field_size or 10
+    return max(5.0, 30.0 * (1 - (position - 3) / max(size - 3, 1)))
+
+
+def _derive_horse_stats_metrics(stats, race_distance: int | None = None, race_surface: str | None = None, race_track: str | None = None):
+    if stats is None:
+        return {
+            "form_avg_3": "-",
+            "form_avg_5": "-",
+            "form_avg_10": "-",
+            "days_since_last_race": "-",
+            "track_fit": "-",
+            "surface_fit": "-",
+            "distance_fit": "-",
+            "pace_pressure": "-",
+            "weight": "-",
+        }
+
+    performances = sorted(stats.past_performances, key=lambda p: p.race_date, reverse=True)
+    recent_3 = performances[:3]
+    recent_5 = performances[:5]
+    recent_10 = performances[:10]
+
+    def _average_position_score(items):
+        if not items:
+            return 0.0
+        score = sum(_position_points(p.finish_position, p.field_size) for p in items)
+        return round(score / len(items), 2)
+
+    form_avg_3 = _average_position_score(recent_3)
+    form_avg_5 = _average_position_score(recent_5)
+    form_avg_10 = _average_position_score(recent_10)
+    days_since_last_race = stats.days_since_last_race if stats.days_since_last_race is not None else "-"
+
+    valid_weights = [float(p.weight_kg) for p in performances if p.weight_kg is not None]
+    weight = round(sum(valid_weights) / len(valid_weights), 1) if valid_weights else "-"
+
+    def _matching_score(items):
+        if not items:
+            return 0.0
+        points = [_position_points(p.finish_position, p.field_size) for p in items]
+        wins = sum(1 for p in items if p.finish_position == 1)
+        return round((sum(points) / len(points)) * 0.7 + (wins / len(items)) * 100.0 * 0.3, 2)
+
+    track_fit = 0.0
+    if race_track:
+        same_track = [
+            p for p in performances
+            if str(p.hippodrome).strip().lower() == str(race_track).strip().lower()
+        ]
+        track_fit = _matching_score(same_track)
+    surface_fit = 0.0
+    if race_surface:
+        same_surface = [
+            p for p in performances
+            if str(p.surface.value if hasattr(p.surface, "value") else str(p.surface)).strip().lower()
+            == str(race_surface).strip().lower()
+        ]
+        surface_fit = _matching_score(same_surface)
+    distance_fit = 0.0
+    if race_distance is not None:
+        similar_distance = [
+            p for p in performances
+            if abs(int(p.distance_m) - int(race_distance)) <= 200
+        ]
+        distance_fit = _matching_score(similar_distance)
+
+    pace_values = [
+        float(p.early_pace_index)
+        for p in performances[:10]
+        if p.early_pace_index is not None
+    ]
+    if pace_values:
+        front_share = sum(1 for value in pace_values if value >= 0.6) / len(pace_values)
+        presser_share = sum(1 for value in pace_values if 0.2 <= value < 0.6) / len(pace_values)
+        pace_pressure = max(0.0, min(1.0, front_share + 0.7 * presser_share))
+    else:
+        workout_pace = []
+        for workout in sorted(stats.workout_records, key=lambda w: (w.workout_date or date.min), reverse=True)[:5]:
+            if workout.distance_m and workout.time_seconds and workout.distance_m > 0:
+                sec_per_100 = workout.time_seconds / max(workout.distance_m / 100.0, 1.0)
+                # ivme/tempo sinyali: daha hizli idman daha yuksek pace pressure olarak yorumlanir
+                workout_pace.append(max(0.0, min(1.0, 1.0 - ((sec_per_100 - 55.0) / 45.0))))
+        pace_pressure = round(sum(workout_pace) / len(workout_pace), 3) if workout_pace else 0.0
+
+    return {
+        "form_avg_3": round(form_avg_3, 2),
+        "form_avg_5": round(form_avg_5, 2),
+        "form_avg_10": round(form_avg_10, 2),
+        "days_since_last_race": days_since_last_race,
+        "weight": round(weight, 1) if isinstance(weight, float) else weight,
+        "track_fit": round(track_fit, 2),
+        "surface_fit": round(surface_fit, 2),
+        "distance_fit": round(distance_fit, 2),
+        "pace_pressure": round(pace_pressure, 3),
+    }
 
 
 def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
@@ -205,6 +317,23 @@ def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
         return _safe_float(row.get("ev"), -9999.0)
     if sort_by == "kelly_fraction":
         return _safe_float(row.get("kelly_fraction"), -9999.0)
+    if sort_by == "form_strength":
+        form_3 = _safe_float(row.get("form_avg_3"), 0.0)
+        form_5 = _safe_float(row.get("form_avg_5"), 0.0)
+        form_10 = _safe_float(row.get("form_avg_10"), 0.0)
+        track_fit = _safe_float(row.get("track_fit"), 0.0)
+        surface_fit = _safe_float(row.get("surface_fit"), 0.0)
+        distance_fit = _safe_float(row.get("distance_fit"), 0.0)
+        pace_pressure = _safe_float(row.get("pace_pressure"), 0.0)
+        return (
+            0.40 * form_5
+            + 0.25 * form_10
+            + 0.15 * form_3
+            + 0.10 * track_fit
+            + 0.06 * surface_fit
+            + 0.04 * distance_fit
+            + 0.02 * pace_pressure
+        )
     return _safe_float(row.get("calibrated_probability"), -1.0)
 
 
@@ -657,10 +786,110 @@ def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFr
         return _attach_ml_labels(paths, target_date, pred)
 
 
+def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+
+    def progress(message: str) -> None:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            if job is not None:
+                job["message"] = message
+
+    try:
+        progress("1/5 Veri cekme basladi")
+        data = ingest_real_data(start_date, end_date, paths, progress_callback=progress)
+        progress(f"1/5 tamamlandi: {len(data)} satir")
+        progress("2/5 Preprocess basladi")
+        cleaned = preprocess_raw(paths)
+        progress(f"2/5 tamamlandi: {len(cleaned)} satir")
+        progress("3/5 Feature uretimi basladi")
+        built = build_features(paths)
+        progress(f"3/5 tamamlandi: {len(built.frame)} satir")
+        progress("4/5 Model egitimi basladi")
+        holdout_days = settings.phase1_holdout_days
+        artifact = train_phase1_model(
+            paths,
+            holdout_days=holdout_days,
+            calibration_days=settings.phase3_calibration_days,
+            calibration_method=settings.phase3_calibration_method,
+        )
+        model_version = register_training_run(
+            settings,
+            paths,
+            holdout_days=holdout_days,
+            calibration_method=settings.phase3_calibration_method,
+            blend_weight=float(artifact.logistic_weight),
+            feature_frame=built.frame,
+        )
+        progress(f"4/5 tamamlandi: {model_version}")
+        progress("5/5 Walk-forward backtest basladi")
+        backtest = run_phase1_backtest(
+            paths,
+            min_train_days=settings.phase1_min_train_days,
+            calibration_days=settings.phase3_calibration_days,
+            calibration_method=settings.phase3_calibration_method,
+            ev_probability_threshold=settings.ev_probability_threshold,
+            ev_min_edge=settings.ev_min_edge,
+            ev_min_value=settings.ev_min_value,
+        )
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id] = {
+                "status": "completed",
+                "message": "Egitim tamamlandi",
+                "model_version": model_version,
+                "backtest": backtest,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Web training job failed")
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id] = {
+                "status": "failed",
+                "message": str(exc),
+            }
 def create_app() -> FastAPI:
     """FastAPI uygulamasini olusturur (uvicorn factory olarak kullanilir)."""
     configure_logging()
     app = FastAPI(title="Turkiye At Yarisi Tahmin Araci", docs_url="/api/docs")
+
+    @app.get("/train", response_class=RedirectResponse)
+    def start_training(
+        start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ) -> RedirectResponse:
+        try:
+            parsed_start = date.fromisoformat(start_date)
+            parsed_end = date.fromisoformat(end_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Tarih YYYY-AA-GG formatinda olmali.") from exc
+        if parsed_start > parsed_end:
+            raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
+
+        with _TRAINING_LOCK:
+            active = next(
+                (job_id for job_id, job in _TRAINING_JOBS.items() if job.get("status") == "running"),
+                None,
+            )
+            if active is not None:
+                job_id = active
+            else:
+                job_id = uuid4().hex
+                _TRAINING_JOBS[job_id] = {
+                    "status": "running",
+                    "message": "Egitim siraya alindi",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+                _TRAINING_EXECUTOR.submit(_run_training_job, job_id, parsed_start, parsed_end)
+        return RedirectResponse(url=f"/?train_job={job_id}", status_code=303)
+
+    @app.get("/train/status/{job_id}")
+    def training_status(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            return JSONResponse(dict(job))
 
     @app.get("/", response_class=HTMLResponse)
     def index(
@@ -668,6 +897,7 @@ def create_app() -> FastAPI:
         source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
+        train_job: str = Query(""),
     ) -> HTMLResponse:
         settings = get_settings()
         error = None
@@ -717,6 +947,7 @@ def create_app() -> FastAPI:
                         "date": resolved_date,
                         "city": city,
                         "hippodromes": hippodromes,
+                        "train_job": train_job,
                     },
                 )
 
@@ -760,6 +991,7 @@ def create_app() -> FastAPI:
                 "date": resolved_date,
                 "city": city,
                 "hippodromes": hippodromes,
+                "train_job": train_job,
             },
         )
 
@@ -771,8 +1003,8 @@ def create_app() -> FastAPI:
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
         sort_by: str = Query(
-            "strategy",
-            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|edge|kelly_fraction)$",
+            "form_strength",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|edge|kelly_fraction|form_strength)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
@@ -863,7 +1095,7 @@ def create_app() -> FastAPI:
                         race_df = pd.DataFrame()
 
                 if not race_df.empty:
-                    ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
+                    ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "form_strength"
                     reverse = sort_order == "desc"
                     records = race_df.to_dict(orient="records")
                     for rec in records:
@@ -1025,6 +1257,19 @@ def create_app() -> FastAPI:
                                         row["tjk_error"] = str(exc)
                                         stats = None
                                 if stats is not None:
+                                    row.update(
+                                        _derive_horse_stats_metrics(
+                                            stats,
+                                            race_distance=int(selected_race.distance_m),
+                                            race_surface=(selected_race.surface.value if hasattr(selected_race.surface, "value") else str(selected_race.surface)),
+                                            race_track=(selected_race.hippodrome or ""),
+                                        )
+                                    )
+                                    row["weight"] = row.get("weight", "-") if row.get("weight", "-") not in ("-", None) else (
+                                        round(sum(float(p.weight_kg) for p in stats.past_performances if p.weight_kg is not None) / max(1, len([p for p in stats.past_performances if p.weight_kg is not None])), 1)
+                                        if any(p.weight_kg is not None for p in stats.past_performances)
+                                        else "-"
+                                    )
                                     row["tjk_summary"] = [
                                         f"Kariyer kosu: {stats.career_starts}",
                                         f"Kariyer galibiyet: {stats.career_wins}",
@@ -1241,7 +1486,7 @@ def create_app() -> FastAPI:
                                 + _safe_float(rec.get("place3_probability"), 0.0),
                             )
 
-                        ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
+                        ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "form_strength"
                         reverse = sort_order == "desc"
                         records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
                         for idx, rec in enumerate(records, start=1):
@@ -1358,6 +1603,19 @@ def create_app() -> FastAPI:
                                     row["tjk_error"] = str(exc)
 
                             if stats is not None:
+                                row.update(
+                                    _derive_horse_stats_metrics(
+                                        stats,
+                                        race_distance=int(race.distance_m),
+                                        race_surface=(race.surface.value if hasattr(race.surface, "value") else str(race.surface)),
+                                        race_track=(race.hippodrome or ""),
+                                    )
+                                )
+                                row["weight"] = row.get("weight", "-") if row.get("weight", "-") not in ("-", None) else (
+                                    round(sum(float(p.weight_kg) for p in stats.past_performances if p.weight_kg is not None) / max(1, len([p for p in stats.past_performances if p.weight_kg is not None])), 1)
+                                    if any(p.weight_kg is not None for p in stats.past_performances)
+                                    else "-"
+                                )
                                 row["tjk_summary"] = [
                                     f"Kariyer kosu: {stats.career_starts}",
                                     f"Kariyer galibiyet: {stats.career_wins}",

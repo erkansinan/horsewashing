@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.table import Table
 
 from atyaris.config import get_settings
+from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.ml.feedback import compare_predictions
 from atyaris.ml.phase5 import register_training_run, run_phase5_report
 from atyaris.ml.pipeline import (
     build_features,
@@ -25,6 +27,16 @@ app = typer.Typer(add_completion=False, help="Phase 5 ML pipeline commands")
 console = Console()
 
 
+def _tjk_source(settings: object) -> TJKHtmlDataSource:
+    return TJKHtmlDataSource(
+        base_url=settings.tjk_base_url,  # type: ignore[attr-defined]
+        user_agent=settings.user_agent,  # type: ignore[attr-defined]
+        request_timeout=settings.request_timeout_seconds,  # type: ignore[attr-defined]
+        min_request_interval=settings.min_request_interval_seconds,  # type: ignore[attr-defined]
+        cache_ttl_seconds=settings.cache_ttl_seconds,  # type: ignore[attr-defined]
+    )
+
+
 @app.command("ingest")
 def ingest_cmd(
     start_date: str = typer.Option("2024-01-01", "--start-date"),
@@ -32,8 +44,111 @@ def ingest_cmd(
 ) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
-    data = ingest_real_data(date.fromisoformat(start_date), date.fromisoformat(end_date), paths)
+    data = ingest_real_data(
+        date.fromisoformat(start_date),
+        date.fromisoformat(end_date),
+        paths,
+        progress_callback=console.print,
+    )
     console.print(f"Ingest tamam: {len(data)} satir -> {paths.raw_csv}")
+
+
+@app.command("learn")
+def learn_cmd(
+    start_date: str = typer.Option(..., "--start-date", help="YYYY-MM-DD"),
+    end_date: str = typer.Option(..., "--end-date", help="YYYY-MM-DD"),
+    holdout_days: int = typer.Option(None, "--holdout-days"),
+) -> None:
+    """Gercek TJK sonuclarini cekip modeli yeniden egitir ve backtest yapar."""
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    console.print("[bold]1/5 Veri cekme basladi[/bold]")
+    data = ingest_real_data(
+        date.fromisoformat(start_date),
+        date.fromisoformat(end_date),
+        paths,
+        progress_callback=console.print,
+    )
+    console.print(f"[green]1/5 tamamlandi:[/green] {len(data)} satir -> {paths.raw_csv}")
+    console.print("[bold]2/5 Preprocess basladi[/bold]")
+    preprocess_raw(paths)
+    console.print(f"[green]2/5 tamamlandi:[/green] {paths.clean_csv}")
+    console.print("[bold]3/5 Feature uretimi basladi[/bold]")
+    built = build_features(paths)
+    console.print(f"[green]3/5 tamamlandi:[/green] {len(built.frame)} satir -> {paths.features_csv}")
+    chosen_holdout = holdout_days if holdout_days is not None else settings.phase1_holdout_days
+    console.print("[bold]4/5 Model egitimi basladi[/bold]")
+    artifact = train_phase1_model(
+        paths,
+        holdout_days=chosen_holdout,
+        calibration_days=settings.phase3_calibration_days,
+        calibration_method=settings.phase3_calibration_method,
+    )
+    model_version = register_training_run(
+        settings,
+        paths,
+        holdout_days=chosen_holdout,
+        calibration_method=settings.phase3_calibration_method,
+        blend_weight=float(artifact.logistic_weight),
+        feature_frame=built.frame,
+    )
+    console.print(f"[green]4/5 tamamlandi:[/green] model={model_version}")
+    console.print("[bold]5/5 Walk-forward backtest basladi[/bold]")
+    backtest = run_phase1_backtest(
+        paths,
+        min_train_days=settings.phase1_min_train_days,
+        calibration_days=settings.phase3_calibration_days,
+        calibration_method=settings.phase3_calibration_method,
+        ev_probability_threshold=settings.ev_probability_threshold,
+        ev_min_edge=settings.ev_min_edge,
+        ev_min_value=settings.ev_min_value,
+    )
+    console.print("[green]5/5 tamamlandi[/green]")
+    console.print_json(json.dumps({"model_version": model_version, "backtest": backtest}, ensure_ascii=True))
+
+
+@app.command("results")
+def results_cmd(
+    target_date: str = typer.Option(..., "--date", help="YYYY-MM-DD"),
+    city: str = typer.Option("İstanbul", "--city", help="Hipodrom"),
+    compare: bool = typer.Option(True, "--compare/--no-compare"),
+) -> None:
+    """TJK gunluk sonuc ozetini ceker ve varsa ML tahminleriyle karsilastirir."""
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    dt = date.fromisoformat(target_date)
+    source = _tjk_source(settings)
+    try:
+        results = source.get_daily_race_results(dt, city)
+    finally:
+        source.close()
+
+    table = Table(title=f"TJK Sonuclari - {city} - {dt.isoformat()}")
+    table.add_column("Kosu")
+    table.add_column("At sayisi")
+    table.add_column("Kazanan No")
+    for race_no, race_results in sorted(results.items()):
+        winners = [str(number) for number, position in race_results.items() if position == 1]
+        table.add_row(str(race_no), str(len(race_results)), ", ".join(winners) or "-")
+    console.print(table)
+
+    if not compare or not paths.features_csv.exists() or not paths.model_path.exists():
+        return
+    predictions = predict_for_date(
+        paths,
+        dt,
+        enable_ev=True,
+        ev_probability_threshold=settings.ev_probability_threshold,
+        ev_min_edge=settings.ev_min_edge,
+        ev_min_value=settings.ev_min_value,
+    )
+    comparison = compare_predictions(predictions, results)
+    console.print_json(
+        json.dumps(
+            {key: value for key, value in comparison.items() if key != "rows"},
+            ensure_ascii=True,
+        )
+    )
 
 
 @app.command("preprocess")

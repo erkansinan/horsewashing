@@ -20,6 +20,8 @@ class BenterTwoStageArtifact:
     stage2_model: ConditionalLogitModel
     feature_columns: list[str]
     logistic_weight_hint: float = 0.0
+    form_weight: float = 0.75
+    market_weight: float = 0.25
 
     @property
     def logistic_weight(self) -> float:
@@ -92,15 +94,37 @@ def predict_two_stage_probability(artifact: BenterTwoStageArtifact, frame: pd.Da
     if frame.empty:
         return np.array([], dtype=float)
 
-    out = frame.copy()
-    stage1_prob = predict_conditional_logit_probability(artifact.stage1_model, out)
-    market_prob = _normalized_market_probability(out)
+    return blend_form_market_probability(
+        artifact,
+        frame,
+        predict_form_probability(artifact, frame),
+    )
 
-    out["stage1_logit"] = _safe_logit(stage1_prob)
-    out["market_logit"] = _safe_logit(market_prob)
-    out["interaction"] = out["stage1_logit"] * out["market_logit"]
 
-    return predict_conditional_logit_probability(artifact.stage2_model, out)
+def blend_form_market_probability(
+    artifact: BenterTwoStageArtifact,
+    frame: pd.DataFrame,
+    form_probability: np.ndarray,
+) -> np.ndarray:
+    if frame.empty:
+        return np.array([], dtype=float)
+
+    market_prob = _normalized_market_probability(frame)
+
+    form_weight = float(getattr(artifact, "form_weight", 0.75))
+    market_weight = float(getattr(artifact, "market_weight", 0.25))
+    total_weight = form_weight + market_weight
+    if total_weight <= 0.0:
+        form_weight, market_weight, total_weight = 0.75, 0.25, 1.0
+
+    return (form_weight * form_probability + market_weight * market_prob) / total_weight
+
+
+def predict_form_probability(artifact: BenterTwoStageArtifact, frame: pd.DataFrame) -> np.ndarray:
+    """Return the form-only conditional probability before market blending."""
+    if frame.empty:
+        return np.array([], dtype=float)
+    return predict_conditional_logit_probability(artifact.stage1_model, frame)
 
 
 def extract_market_reference_probability(frame: pd.DataFrame) -> np.ndarray:

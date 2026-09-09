@@ -43,6 +43,8 @@ def save_phase3_artifact(artifact: BenterTwoStageArtifact, calibrator_payload: d
             "stage2_model": artifact.stage2_model,
             "feature_columns": artifact.feature_columns,
             "logistic_weight": artifact.logistic_weight,
+            "form_weight": artifact.form_weight,
+            "market_weight": artifact.market_weight,
             "calibrator": calibrator_payload,
         },
         path,
@@ -58,6 +60,8 @@ def load_phase3_artifact(path: str) -> tuple[BenterTwoStageArtifact, dict[str, o
             stage2_model=payload["stage2_model"],
             feature_columns=list(payload["feature_columns"]),
             logistic_weight_hint=float(payload.get("logistic_weight", 0.0) or 0.0),
+            form_weight=float(payload.get("form_weight", 0.75) or 0.75),
+            market_weight=float(payload.get("market_weight", 0.25) or 0.25),
         )
     else:
         # Keep a clear failure mode for obsolete artifacts from the removed ensemble stack.

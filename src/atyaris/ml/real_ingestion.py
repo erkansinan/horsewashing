@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 
+from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.models.entities import HorseStatistics
 from atyaris.services import build_data_source
 
 
@@ -20,7 +23,12 @@ def _market_probability_from_odds(odds: float | None, default: float) -> float:
     return 1.0 / odds
 
 
-def ingest_real_tjk_data(start_date: date, end_date: date, paths) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+def ingest_real_tjk_data(
+    start_date: date,
+    end_date: date,
+    paths,
+    progress_callback: Callable[[str], None] | None = None,
+) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Build the ML raw frame strictly from live TJK pages (no synthetic fallback)."""
     source = build_data_source("tjk", __import__("atyaris.config", fromlist=["get_settings"]).get_settings())
     if not isinstance(source, TJKHtmlDataSource):
@@ -29,7 +37,11 @@ def ingest_real_tjk_data(start_date: date, end_date: date, paths) -> pd.DataFram
     rows: list[dict[str, object]] = []
     current = start_date
     while current <= end_date:
+        if progress_callback is not None:
+            progress_callback(f"Veri cekiliyor: {current.isoformat()} (toplam satir: {len(rows)})")
         for hippodrome in source.get_available_hippodromes(current):
+            if progress_callback is not None:
+                progress_callback(f"  Hipodrom: {hippodrome}")
             races = source.get_daily_races(current, hippodrome)
             if not races:
                 continue
@@ -50,7 +62,21 @@ def ingest_real_tjk_data(start_date: date, end_date: date, paths) -> pd.DataFram
                         # academic training/evaluation without inventing labels.
                         continue
 
-                    stats = source.get_horse_statistics(entry)
+                    try:
+                        stats = source.get_horse_statistics(entry)
+                    except DataSourceError as exc:
+                        # TJK may omit an individual horse history while still
+                        # exposing the race and its official result. Keep the
+                        # labelled row and let feature defaults represent the
+                        # missing history instead of aborting the whole run.
+                        stats = HorseStatistics(
+                            horse_id=str(entry.horse_id),
+                            horse_name=str(entry.horse_name),
+                        )
+                        if progress_callback is not None:
+                            progress_callback(
+                                f"    Uyari: {entry.horse_name} gecmisi alinamadi; varsayilan istatistik kullaniliyor ({exc})"
+                            )
                     history = [
                         p
                         for p in stats.past_performances

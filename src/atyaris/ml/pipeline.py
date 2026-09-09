@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -15,9 +16,10 @@ from atyaris.ml.features import FeatureBuildResult, assert_no_leakage_columns, b
 from atyaris.ml.harville import add_harville_columns
 from atyaris.ml.market_blend import (
     BenterTwoStageArtifact,
+    blend_form_market_probability,
     extract_market_reference_probability,
     fit_two_stage_benter,
-    predict_two_stage_probability,
+    predict_form_probability,
 )
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
@@ -45,8 +47,13 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def ingest_real_data(start_date: date, end_date: date, paths: Phase1Paths) -> pd.DataFrame:
-    data = ingest_real_tjk_data(start_date, end_date, paths)
+def ingest_real_data(
+    start_date: date,
+    end_date: date,
+    paths: Phase1Paths,
+    progress_callback: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    data = ingest_real_tjk_data(start_date, end_date, paths, progress_callback=progress_callback)
     _ensure_parent(paths.raw_csv)
     data.to_csv(paths.raw_csv, index=False)
     return data
@@ -88,6 +95,10 @@ def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
         "ev",
         "kelly_fraction",
         "confidence",
+        # Market information is blended explicitly at 25% after the form model.
+        "market_probability",
+        "implied_probability",
+        "market_probability_norm",
     }
     return [c for c in frame.columns if c not in drop_cols]
 
@@ -123,7 +134,7 @@ def train_phase1_model(
         stage2_regularization=0.02,
     )
 
-    raw_cal = predict_two_stage_probability(artifact, calibration_df)
+    raw_cal = predict_form_probability(artifact, calibration_df)
     calibrator = fit_calibrator(
         y_true=calibration_df["is_winner"].to_numpy(),
         raw_prob=raw_cal,
@@ -175,13 +186,28 @@ def predict_for_date(
     calibrator = from_payload(calibrator_payload)
 
     out = day_df.copy()
-    out["raw_probability"] = predict_two_stage_probability(artifact, out)
-    out["calibrated_probability"] = apply_calibrator(calibrator, out["raw_probability"].to_numpy())
+    form_probability = apply_calibrator(
+        calibrator,
+        predict_form_probability(artifact, out),
+    )
+    market_probability = extract_market_reference_probability(out)
+    form_weight = float(getattr(artifact, "form_weight", 0.75))
+    market_weight = float(getattr(artifact, "market_weight", 0.25))
+    total_weight = form_weight + market_weight
+    if total_weight <= 0.0:
+        form_weight, market_weight, total_weight = 0.75, 0.25, 1.0
+    out["form_probability"] = form_probability
+    out["raw_probability"] = blend_form_market_probability(
+        artifact,
+        out,
+        form_probability,
+    )
+    out["calibrated_probability"] = out["raw_probability"]
 
     # Race-level normalization.
     denom = out.groupby("race_id")["calibrated_probability"].transform("sum").replace(0.0, 1.0)
     out["calibrated_probability"] = out["calibrated_probability"] / denom
-    out["market_probability_used"] = extract_market_reference_probability(out)
+    out["market_probability_used"] = market_probability
     out["rank"] = out.groupby("race_id")["calibrated_probability"].rank(ascending=False, method="dense")
     out = add_harville_columns(out, win_col="calibrated_probability")
 

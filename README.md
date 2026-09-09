@@ -141,6 +141,29 @@ atyaris ml report --date 2025-12-31 --budget 500
 
 Not: `calibrate`, `optimize`, `report` komutlari aktiftir.
 
+### TJK Sonuclariyla Karsilastirma ve Yeniden Egitim
+
+Gecmis bir gunun hipodrom sonuclarini resmi TJK sayfasindan ozetlemek ve
+mevcut ML tahminleriyle karsilastirmak icin:
+
+```powershell
+atyaris ml results --date 2026-09-06 --city İstanbul
+```
+
+`main.py` dogrudan kullaniliyorsa ayni komut `python main.py results ...`
+seklindedir. Sonuclar, TJK'nin resmi start numaralariyla `draw` alanini
+eslestirir; eksik/bitmemis kosular egitim etiketi olarak kullanilmaz.
+
+Sonuc etiketleriyle gercek TJK verisini yeniden cekip modeli egitmek ve
+walk-forward backtest almak icin:
+
+```powershell
+atyaris ml learn --start-date 2026-08-01 --end-date 2026-09-06
+```
+
+Bu komut `raw -> preprocess -> features -> train -> backtest` akisinin tamamini
+calistirir ve yeni model versiyonunu deney takip veritabanina kaydeder.
+
 Benter notlari:
 - `train` komutu iki asamali conditional logit modeli egitir ve kalibratoru kaydeder.
 - `predict` ciktilarinda `P(win)`, `P(2.)`, `P(3.)`, `P(Top3)`, `Edge`, `EV`, `Kelly`, `Decision` kolonlari bulunur.

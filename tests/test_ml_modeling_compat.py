@@ -49,3 +49,16 @@ def test_safe_joblib_load_reraises_other_module_errors(monkeypatch, tmp_path: Pa
         assert exc.name == "x.y"
     else:
         raise AssertionError("Expected ModuleNotFoundError to be raised")
+
+
+def test_form_and_market_weights_default_to_seventy_five_twenty_five() -> None:
+    from atyaris.ml.market_blend import BenterTwoStageArtifact
+
+    artifact = BenterTwoStageArtifact(
+        stage1_model=object(),
+        stage2_model=object(),
+        feature_columns=[],
+    )
+
+    assert artifact.form_weight == 0.75
+    assert artifact.market_weight == 0.25

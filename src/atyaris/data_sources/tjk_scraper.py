@@ -257,14 +257,21 @@ class TJKHtmlDataSource(RaceDataSource):
                 cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
                 if len(cells) < 2:
                     continue
-                pos_match = re.search(r"^\d+", cells[0] or "")
-                if not pos_match:
+                finish_position = None
+                horse_number = None
+                for index, cell in enumerate(cells):
+                    if finish_position is None:
+                        position_match = re.fullmatch(r"\d+", cell)
+                        if position_match:
+                            finish_position = int(position_match.group(0))
+                            continue
+                    if finish_position is not None and index > 0:
+                        horse_number_match = re.search(r"\((\d+)\)", cell)
+                        if horse_number_match:
+                            horse_number = int(horse_number_match.group(1))
+                            break
+                if finish_position is None or horse_number is None:
                     continue
-                finish_position = int(pos_match.group(0))
-                horse_number_match = re.search(r"\((\d+)\)", cells[1] or "")
-                if not horse_number_match:
-                    continue
-                horse_number = int(horse_number_match.group(1))
                 race_map[horse_number] = finish_position
 
         return results

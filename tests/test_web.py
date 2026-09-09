@@ -3,8 +3,7 @@ kullanir; canli TJK sitesine bagimli degildir.
 """
 from __future__ import annotations
 
-from datetime import date
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
@@ -14,7 +13,16 @@ import pandas as pd
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.sample_source import SampleDataSource
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
-from atyaris.models.entities import Jockey, Race, RaceEntry, Trainer, TrackSurface
+from atyaris.models.entities import (
+    HorseStatistics,
+    Jockey,
+    PastPerformance,
+    Race,
+    RaceEntry,
+    Trainer,
+    TrackSurface,
+    WorkoutRecord,
+)
 from atyaris.web.app import create_app
 
 
@@ -143,6 +151,116 @@ def test_index_ml_mode_lists_ml_races(monkeypatch) -> None:
     assert "ML Yarislari" in response.text
     assert "ML Tahmin Gor" in response.text
     assert "Ankara" in response.text
+
+
+def test_derive_horse_stats_metrics_uses_tjk_and_workout_data() -> None:
+    stats = HorseStatistics(
+        horse_id="H1",
+        horse_name="Test Horse",
+        past_performances=[
+            PastPerformance(
+                race_date=date.today() - timedelta(days=12),
+                hippodrome="Ankara",
+                distance_m=1400,
+                surface=TrackSurface.KUM,
+                finish_position=1,
+                field_size=8,
+                race_time_seconds=82.0,
+                early_pace_index=0.75,
+                weight_kg=56.5,
+            ),
+            PastPerformance(
+                race_date=date.today() - timedelta(days=23),
+                hippodrome="Ankara",
+                distance_m=1400,
+                surface=TrackSurface.KUM,
+                finish_position=2,
+                field_size=8,
+                race_time_seconds=84.0,
+                early_pace_index=0.65,
+                weight_kg=56.0,
+            ),
+            PastPerformance(
+                race_date=date.today() - timedelta(days=70),
+                hippodrome="Istanbul (Veliefendi)",
+                distance_m=1600,
+                surface=TrackSurface.CIM,
+                finish_position=5,
+                field_size=9,
+                race_time_seconds=88.0,
+                early_pace_index=0.45,
+                weight_kg=57.0,
+            ),
+        ],
+        workout_records=[
+            WorkoutRecord(
+                workout_date=date.today() - timedelta(days=9),
+                hippodrome="Ankara",
+                surface="Kum",
+                distance_m=1200,
+                time_seconds=72.0,
+            )
+        ],
+    )
+
+    metrics = web_app_module._derive_horse_stats_metrics(
+        stats,
+        race_distance=1400,
+        race_surface="Kum",
+        race_track="Ankara",
+    )
+
+    assert metrics["form_avg_5"] > 0
+    assert metrics["form_avg_10"] > 0
+    assert metrics["days_since_last_race"] == 12
+    assert metrics["track_fit"] > 0
+    assert metrics["surface_fit"] > 0
+    assert metrics["distance_fit"] > 0
+    assert 0.0 <= metrics["pace_pressure"] <= 1.0
+
+
+def test_form_strength_sort_prioritizes_form_metrics_over_ev() -> None:
+    rows = [
+        {
+            "horse_id": "DEJAME",
+            "form_avg_3": 25.0,
+            "form_avg_5": 17.0,
+            "form_avg_10": 22.9,
+            "track_fit": 24.72,
+            "surface_fit": 33.33,
+            "distance_fit": 18.29,
+            "pace_pressure": 1.0,
+            "ev": 0.94,
+        },
+        {
+            "horse_id": "KALI_STRATA",
+            "form_avg_3": 60.0,
+            "form_avg_5": 59.0,
+            "form_avg_10": 56.9,
+            "track_fit": 41.54,
+            "surface_fit": 48.83,
+            "distance_fit": 56.79,
+            "pace_pressure": 1.0,
+            "ev": -0.635,
+        },
+        {
+            "horse_id": "SCHATZ",
+            "form_avg_3": 49.05,
+            "form_avg_5": 58.43,
+            "form_avg_10": 41.21,
+            "track_fit": 48.12,
+            "surface_fit": 33.73,
+            "distance_fit": 27.45,
+            "pace_pressure": 1.0,
+            "ev": 0.166,
+        },
+    ]
+
+    ordered = sorted(rows, key=lambda r: web_app_module._ml_sort_value(r, "form_strength"), reverse=True)
+
+    assert ordered[0]["horse_id"] == "KALI_STRATA"
+    assert ordered[1]["horse_id"] == "SCHATZ"
+    assert ordered[2]["horse_id"] == "DEJAME"
 
 
 def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
