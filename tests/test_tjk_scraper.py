@@ -10,7 +10,7 @@ from datetime import date
 from bs4 import BeautifulSoup
 
 from atyaris.data_sources.base import DataSourceError
-from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource, _era_for_date
 from atyaris.models.entities import Jockey, RaceEntry, Trainer
 
 _SAMPLE_HTML = """
@@ -55,8 +55,6 @@ def test_parse_daily_program_extracts_race_and_entries() -> None:
 
     scratched = race.entries[1]
     assert scratched.is_scratched is True
-
-
 def test_get_horse_statistics_raises_not_implemented() -> None:
     source = TJKHtmlDataSource()
     races = source._parse_daily_program(_SAMPLE_HTML, "Ankara", date(2026, 8, 18))
@@ -65,7 +63,12 @@ def test_get_horse_statistics_raises_not_implemented() -> None:
         source.get_horse_statistics(entry)
         assert False, "DataSourceError bekleniyordu"
     except DataSourceError:
-        pass
+      pass
+
+
+def test_historical_dates_use_tjk_past_era() -> None:
+    assert _era_for_date(date(2020, 1, 1)) == "past"
+    assert _era_for_date(date.today()) == "today"
 
 
 def test_get_horse_statistics_parses_era_past_summary_and_history() -> None:

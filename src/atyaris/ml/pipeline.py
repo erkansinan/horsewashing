@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from collections.abc import Callable
+import json
 from pathlib import Path
+import re
+from statistics import median
+from time import monotonic
 
 import numpy as np
 import pandas as pd
@@ -21,6 +25,7 @@ from atyaris.ml.market_blend import (
     fit_two_stage_benter,
     predict_form_probability,
 )
+from atyaris.ml.model_health import run_model_health_checks
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
 from atyaris.ml.real_ingestion import ingest_real_tjk_data
@@ -31,6 +36,7 @@ class Phase1Paths:
     raw_csv: Path = Path("data/raw/tjk_real_races.csv")
     clean_csv: Path = Path("data/processed/clean_races.csv")
     features_csv: Path = Path("data/processed/features_phase1.csv")
+    prediction_features_csv: Path = Path("data/processed/prediction_features_phase1.csv")
     model_path: Path = Path("models/phase1_logreg.joblib")
 
 
@@ -39,6 +45,7 @@ def paths_from_settings(settings: Settings) -> Phase1Paths:
         raw_csv=Path(settings.phase1_raw_csv_path),
         clean_csv=Path(settings.phase1_clean_csv_path),
         features_csv=Path(settings.phase1_features_csv_path),
+        prediction_features_csv=Path(settings.phase1_prediction_features_csv_path),
         model_path=Path(settings.phase1_model_path),
     )
 
@@ -47,33 +54,209 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _training_checkpoint_path(paths: Phase1Paths) -> Path:
+    return paths.raw_csv.with_suffix(".progress.json")
+
+
+_TRAINING_COLLECTION_VERSION = 2
+
+
+def _write_csv_atomically(frame: pd.DataFrame, path: Path) -> None:
+    _ensure_parent(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(temporary, index=False)
+    temporary.replace(path)
+
+
+def _write_training_checkpoint(path: Path, start_date: date, end_date: date, completed_dates: set[date]) -> None:
+    _ensure_parent(path)
+    payload = {
+        "collection_version": _TRAINING_COLLECTION_VERSION,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "completed_dates": sorted(day.isoformat() for day in completed_dates),
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _load_training_checkpoint(path: Path, start_date: date, end_date: date) -> set[date]:
+    if not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("collection_version") != _TRAINING_COLLECTION_VERSION:
+            return set()
+        if payload.get("start_date") != start_date.isoformat() or payload.get("end_date") != end_date.isoformat():
+            return set()
+        return {date.fromisoformat(value) for value in payload.get("completed_dates", [])}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return set()
+
+
+def _require_rows(frame: pd.DataFrame, stage: str) -> pd.DataFrame:
+    if frame.empty:
+        raise ValueError(
+            f"{stage} bos veri uretti. Secilen tarih araliginda etiketli TJK yarisi bulunamadi."
+        )
+    return frame
+
+
+def _format_training_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "hesaplaniyor"
+    rounded = max(0, int(seconds))
+    minutes, remaining_seconds = divmod(rounded, 60)
+    if minutes:
+        return f"{minutes} dk {remaining_seconds} sn"
+    return f"{remaining_seconds} sn"
+
+
+_DAILY_PROGRESS_RE = re.compile(r"gunluk at:\s*(\d+)\s*/\s*(\d+)")
+
+
 def ingest_real_data(
     start_date: date,
     end_date: date,
     paths: Phase1Paths,
     progress_callback: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
-    data = ingest_real_tjk_data(start_date, end_date, paths, progress_callback=progress_callback)
-    _ensure_parent(paths.raw_csv)
-    data.to_csv(paths.raw_csv, index=False)
-    return data
+    checkpoint_path = _training_checkpoint_path(paths)
+    completed_dates = _load_training_checkpoint(checkpoint_path, start_date, end_date)
+    existing = pd.DataFrame()
+    if completed_dates and paths.raw_csv.exists():
+        existing = pd.read_csv(paths.raw_csv)
+    else:
+        completed_dates = set()
+
+    current = start_date
+    total_days = max((end_date - start_date).days + 1, 1)
+    completed_day_durations: list[float] = []
+    active_day_started_at: float | None = None
+    active_fraction = 0.0
+
+    def report(message: str, active_day: bool = False) -> None:
+        nonlocal active_fraction
+        if progress_callback is None:
+            return
+        progress_match = _DAILY_PROGRESS_RE.search(message)
+        if progress_match is not None:
+            completed_entries = int(progress_match.group(1))
+            total_entries = int(progress_match.group(2))
+            active_fraction = completed_entries / max(total_entries, 1)
+        completed_count = len(completed_dates)
+        remaining_days = max(total_days - completed_count - (1 if active_day else 0), 0)
+        typical_day_seconds = median(completed_day_durations[-5:]) if completed_day_durations else None
+        active_day_seconds = None
+        if active_day and active_day_started_at is not None:
+            elapsed_active_day = max(monotonic() - active_day_started_at, 0.0)
+            if active_fraction >= 0.10:
+                active_day_seconds = elapsed_active_day / active_fraction
+        projected_day_seconds = active_day_seconds or typical_day_seconds
+        if projected_day_seconds is None:
+            estimate = None
+        else:
+            active_remaining = 0.0
+            if active_day:
+                if active_day_seconds is not None:
+                    active_remaining = max(active_day_seconds * (1.0 - active_fraction), 0.0)
+                elif typical_day_seconds is not None:
+                    active_remaining = typical_day_seconds
+            estimate = active_remaining + (remaining_days * projected_day_seconds)
+        progress_callback(
+            f"{message} | tum egitim tahmini kalan: {_format_training_duration(estimate)}"
+        )
+
+    while current <= end_date:
+        if current in completed_dates:
+            report(f"Atlandi, daha once tamamlandi: {current.isoformat()}")
+            current += timedelta(days=1)
+            continue
+
+        report(
+            f"Gunluk veri checkpoint: {current.isoformat()} "
+            f"({len(completed_dates) + 1}/{total_days})",
+            active_day=True,
+        )
+        active_day_started_at = monotonic()
+        active_fraction = 0.0
+        day_progress = None
+        if progress_callback is not None:
+            day_progress = lambda message, day=current: report(  # noqa: E731
+                f"{day.isoformat()} | {message}",
+                active_day=True,
+            )
+        if progress_callback is None:
+            day_data = ingest_real_tjk_data(current, current, paths)
+        else:
+            day_data = ingest_real_tjk_data(
+                current,
+                current,
+                paths,
+                progress_callback=day_progress,
+            )
+        _require_rows(day_data, f"TJK veri cekme ({current.isoformat()})")
+        day_duration = max(monotonic() - active_day_started_at, 0.0)
+        existing = pd.concat([existing, day_data], ignore_index=True, sort=False)
+        dedupe_columns = [column for column in ["date", "race_id", "horse_id", "draw"] if column in existing.columns]
+        if dedupe_columns:
+            existing = existing.drop_duplicates(subset=dedupe_columns, keep="last")
+        _write_csv_atomically(existing, paths.raw_csv)
+        completed_dates.add(current)
+        completed_day_durations.append(day_duration)
+        active_day_started_at = None
+        active_fraction = 0.0
+        _write_training_checkpoint(checkpoint_path, start_date, end_date, completed_dates)
+        report(
+            f"Gun tamamlandi: {current.isoformat()} | "
+            f"bu gun {len(day_data)} at | toplam biriken {len(existing)} at"
+        )
+        current += timedelta(days=1)
+
+    _require_rows(existing, "TJK veri cekme")
+    return existing
 
 
 def preprocess_raw(paths: Phase1Paths) -> pd.DataFrame:
     frame = pd.read_csv(paths.raw_csv)
+    _require_rows(frame, "Ham veri")
     cleaned = preprocess_dataset(frame)
-    _ensure_parent(paths.clean_csv)
-    cleaned.to_csv(paths.clean_csv, index=False)
+    _require_rows(cleaned, "Veri temizleme")
+    _write_csv_atomically(cleaned, paths.clean_csv)
     return cleaned
 
 
 def build_features(paths: Phase1Paths) -> FeatureBuildResult:
     frame = pd.read_csv(paths.clean_csv)
+    _require_rows(frame, "Temiz veri")
     built = build_leakage_safe_features(frame)
+    _require_rows(built.frame, "Feature uretimi")
     assert_no_leakage_columns(built.feature_columns)
-    _ensure_parent(paths.features_csv)
-    built.frame.to_csv(paths.features_csv, index=False)
+    _write_csv_atomically(built.frame, paths.features_csv)
     return built
+
+
+def prepare_prediction_features(
+    target_date: date,
+    paths: Phase1Paths,
+    progress_callback: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    """Create target-day features without adding unlabelled rows to training data."""
+    raw = ingest_real_tjk_data(
+        target_date,
+        target_date,
+        paths,
+        progress_callback=progress_callback,
+        require_results=False,
+    )
+    historical = pd.read_csv(paths.clean_csv) if paths.clean_csv.exists() else pd.DataFrame()
+    combined = pd.concat([historical, raw], ignore_index=True, sort=False)
+    built = build_leakage_safe_features(combined, as_of_date=target_date)
+    prediction = built.frame[pd.to_datetime(built.frame["date"]).dt.date == target_date].copy()
+    _require_rows(prediction, "Tahmin feature uretimi")
+    _write_csv_atomically(prediction, paths.prediction_features_csv)
+    return prediction
 
 
 def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
@@ -110,6 +293,7 @@ def train_phase1_model(
     calibration_method: str = "isotonic",
 ) -> BenterTwoStageArtifact:
     frame = pd.read_csv(paths.features_csv)
+    _require_rows(frame, "Feature verisi")
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     feature_columns = _benter_feature_columns(frame)
 
@@ -121,8 +305,18 @@ def train_phase1_model(
 
     if train_df.empty:
         train_df = frame[frame["date"] < split_date].copy()
+    if train_df.empty:
+        # A short window (for example one race day) has no historical side of
+        # the temporal split. Keep the labelled rows usable instead of failing
+        # before the model can be fitted.
+        train_df = frame.copy()
     if calibration_df.empty:
         calibration_df = frame[frame["date"] >= split_date].copy()
+    if calibration_df.empty:
+        calibration_df = train_df.copy()
+
+    _require_rows(train_df, "Model egitimi")
+    _require_rows(calibration_df, "Kalibrasyon")
 
     artifact = fit_two_stage_benter(
         train_df,
@@ -132,6 +326,7 @@ def train_phase1_model(
         stage1_regularization=0.05,
         stage2_penalty="l2",
         stage2_regularization=0.02,
+        checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",
     )
 
     raw_cal = predict_form_probability(artifact, calibration_df)
@@ -143,6 +338,22 @@ def train_phase1_model(
 
     _ensure_parent(paths.model_path)
     save_phase3_artifact(artifact, to_payload(calibrator), str(paths.model_path))
+    test_df = frame[frame["date"] >= split_date].copy()
+    run_model_health_checks(
+        artifact,
+        train_df,
+        calibration_df,
+        test_df,
+        feature_columns,
+        output_path=paths.model_path.with_suffix(".health.json"),
+    )
+    checkpoint_dir = paths.model_path.parent / f"{paths.model_path.stem}_checkpoint"
+    for checkpoint_file in checkpoint_dir.glob("*.npz"):
+        checkpoint_file.unlink(missing_ok=True)
+    try:
+        checkpoint_dir.rmdir()
+    except OSError:
+        pass
     return artifact
 
 
@@ -154,7 +365,10 @@ def predict_for_date(
     ev_min_edge: float = 0.03,
     ev_min_value: float = 0.02,
 ) -> pd.DataFrame:
-    frame = pd.read_csv(paths.features_csv)
+    frames = [pd.read_csv(paths.features_csv)]
+    if paths.prediction_features_csv.exists():
+        frames.append(pd.read_csv(paths.prediction_features_csv))
+    frame = pd.concat(frames, ignore_index=True, sort=False)
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     day_df = frame[frame["date"] == target_date].copy()
 

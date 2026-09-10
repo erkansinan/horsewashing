@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ def register_training_run(
     calibration_method: str,
     blend_weight: float,
     feature_frame: pd.DataFrame,
+    feature_columns: list[str] | None = None,
 ) -> str:
     db_path = settings.phase5_tracking_db_path
     init_tracking_db(db_path)
@@ -44,6 +46,10 @@ def register_training_run(
     train_start = str(min(feature_frame["date"])) if not feature_frame.empty else None
     train_end = str(max(feature_frame["date"])) if not feature_frame.empty else None
 
+    tracked_features = feature_columns or [
+        column for column in feature_frame.columns
+        if column not in {"date", "race_id", "horse_id", "is_winner"}
+    ]
     register_model_run(
         db_path,
         model_version=model_version,
@@ -53,7 +59,12 @@ def register_training_run(
         holdout_days=holdout_days,
         calibration_method=calibration_method,
         blend_weight=blend_weight,
-        metrics={"note": "phase5 training registration"},
+        metrics={
+            "note": "phase5 training registration",
+            "training_rows": int(len(feature_frame)),
+            "feature_count": len(tracked_features),
+            "feature_columns": tracked_features,
+        },
         status="candidate",
     )
 
@@ -111,6 +122,12 @@ def run_phase5_report(
         "shap": shap_summary,
     }
 
+    health_path = paths.model_path.with_suffix(".health.json")
+    try:
+        health_report = json.loads(health_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        health_report = {"passed": False, "checks": [], "reason": "model health report unavailable"}
+
     tracking_snapshot = load_recent_runs(db_path, limit=10)
     report_paths = generate_phase5_report(
         settings.phase5_report_dir,
@@ -121,6 +138,7 @@ def run_phase5_report(
         optimization_result=opt,
         explainability=explainability,
         tracking_snapshot=tracking_snapshot,
+        health_report=health_report,
     )
 
     return {
@@ -129,4 +147,5 @@ def run_phase5_report(
         "optimization_summary": opt.get("summary", {}),
         "report_paths": report_paths,
         "explainability": explainability,
+        "model_health": health_report,
     }

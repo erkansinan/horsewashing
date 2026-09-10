@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     phase1_raw_csv_path: str = "data/raw/tjk_real_races.csv"
     phase1_clean_csv_path: str = "data/processed/clean_races.csv"
     phase1_features_csv_path: str = "data/processed/features_phase1.csv"
+    phase1_prediction_features_csv_path: str = "data/processed/prediction_features_phase1.csv"
     phase1_model_path: str = "models/phase1_logreg.joblib"
     phase1_min_train_days: int = 90
     phase1_holdout_days: int = 30

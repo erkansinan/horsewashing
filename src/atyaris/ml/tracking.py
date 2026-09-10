@@ -205,3 +205,113 @@ def load_recent_runs(db_path: str, limit: int = 10) -> dict[str, Any]:
             for r in tk_rows
         ]
     return out
+
+
+def load_training_history(
+    db_path: str,
+    *,
+    limit: int = 10,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    """Return training history and changes relative to the previous run."""
+    init_tracking_db(db_path)
+    safe_limit = max(1, min(int(limit), 100))
+    conditions = []
+    params: list[Any] = []
+    if start_date:
+        conditions.append("train_end_date >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("train_start_date <= ?")
+        params.append(end_date)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, model_version, created_at, artifact_path,
+                   train_start_date, train_end_date, holdout_days,
+                   calibration_method, blend_weight, metrics_json, status
+            FROM model_runs
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            [*params, safe_limit],
+        ).fetchall()
+        all_rows = conn.execute(
+            """
+            SELECT id, model_version, created_at, artifact_path,
+                   train_start_date, train_end_date, holdout_days,
+                   calibration_method, blend_weight, metrics_json, status
+            FROM model_runs
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    def _load_health_report(artifact_path: str) -> dict[str, Any]:
+        health_path = Path(artifact_path).with_suffix(".health.json")
+        try:
+            payload = json.loads(health_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _row_to_run(row: tuple[Any, ...]) -> dict[str, Any]:
+        try:
+            metrics = json.loads(row[9] or "{}")
+        except json.JSONDecodeError:
+            metrics = {}
+        return {
+            "id": row[0],
+            "model_version": row[1],
+            "trained_at": row[2],
+            "artifact_path": row[3],
+            "train_start_date": row[4],
+            "train_end_date": row[5],
+            "training_interval": {"start": row[4], "end": row[5]},
+            "holdout_days": row[6],
+            "calibration_method": row[7],
+            "blend_weight": row[8],
+            "status": row[10],
+            "metrics": metrics,
+            "model_health": _load_health_report(row[3]),
+        }
+
+    runs: list[dict[str, Any]] = []
+    newer_first = [_row_to_run(row) for row in rows]
+    all_runs = [_row_to_run(row) for row in all_rows]
+    previous_by_id = {
+        run["id"]: all_runs[index + 1]
+        for index, run in enumerate(all_runs[:-1])
+    }
+
+    for run in newer_first:
+        previous = previous_by_id.get(run["id"])
+        current_features = set(run["metrics"].get("feature_columns", []))
+        previous_features = set(previous["metrics"].get("feature_columns", [])) if previous else set()
+        run["changes_from_previous"] = {
+            "previous_model_version": previous["model_version"] if previous else None,
+            "added_features": sorted(current_features - previous_features) if previous else [],
+            "removed_features": sorted(previous_features - current_features) if previous else [],
+            "feature_count_change": (
+                len(current_features) - len(previous_features) if previous else None
+            ),
+            "blend_weight_change": (
+                run["blend_weight"] - previous["blend_weight"]
+                if previous and run["blend_weight"] is not None and previous["blend_weight"] is not None
+                else None
+            ),
+            "calibration_changed": (
+                run["calibration_method"] != previous["calibration_method"] if previous else None
+            ),
+        }
+        runs.append(run)
+
+    return {
+        "query": {"limit": safe_limit, "start_date": start_date, "end_date": end_date},
+        "latest_training": runs[0] if runs else None,
+        "runs": runs,
+        "count": len(runs),
+    }

@@ -34,3 +34,52 @@ def test_features_do_not_include_known_leakage_columns() -> None:
     built = build_leakage_safe_features(_dataset())
     forbidden = {"finish_position", "is_winner", "latent_true_win_probability"}
     assert forbidden.intersection(set(built.feature_columns)) == set()
+
+
+def test_features_use_only_previous_races_for_same_day_target() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "race_id": "R1",
+                "date": date(2025, 1, 1),
+                "race_datetime": "2025-01-01 12:00:00",
+                "horse_id": "H1",
+                "draw": 1,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 2,
+                "odds": 2.0,
+                "market_probability": 0.5,
+                "finish_position": 1,
+                "is_winner": 1,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+            {
+                "race_id": "R2",
+                "date": date(2025, 1, 1),
+                "race_datetime": "2025-01-01 13:00:00",
+                "horse_id": "H1",
+                "draw": 1,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 2,
+                "odds": 2.0,
+                "market_probability": 0.5,
+                "finish_position": 2,
+                "is_winner": 0,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+        ]
+    )
+
+    built = build_leakage_safe_features(frame)
+    first, second = built.frame.sort_values("race_datetime").itertuples(index=False)
+
+    assert first.form_avg_3 == 0.45
+    assert second.form_avg_3 > first.form_avg_3

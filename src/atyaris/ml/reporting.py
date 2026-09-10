@@ -56,6 +56,7 @@ def generate_phase5_report(
     optimization_result: dict[str, Any],
     explainability: dict[str, Any],
     tracking_snapshot: dict[str, Any],
+    health_report: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     out_dir = Path(report_dir)
     _ensure_dir(out_dir)
@@ -80,6 +81,7 @@ def generate_phase5_report(
         "top_predictions": top_preds.to_dict(orient="records") if not top_preds.empty else [],
         "explainability": explainability,
         "tracking_snapshot": tracking_snapshot,
+        "model_health": health_report or {},
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, default=str), encoding="utf-8")
 
@@ -116,6 +118,10 @@ def generate_phase5_report(
     chart_log_loss = _sparkline_svg(fold_log_loss, color="#0b3a6e")
     chart_brier = _sparkline_svg(fold_brier, color="#0f766e")
     chart_roi = _sparkline_svg(fold_roi, color="#9a3412")
+    health = health_report or {}
+    learning_curve = health.get("learning_curve", {})
+    chart_train_loss = _sparkline_svg([float(x) for x in learning_curve.get("train_loss", [])], color="#7c3aed")
+    chart_validation_loss = _sparkline_svg([float(x) for x in learning_curve.get("validation_loss", [])], color="#be123c")
 
     html = f"""
 <!DOCTYPE html>
@@ -148,6 +154,11 @@ def generate_phase5_report(
   <div class=\"card\"><strong>Log Loss (by fold)</strong><br>{chart_log_loss}</div>
   <div class=\"card\"><strong>Brier Score (by fold)</strong><br>{chart_brier}</div>
   <div class=\"card\"><strong>ROI (by fold)</strong><br>{chart_roi}</div>
+
+  <h2>Training Health</h2>
+  <div class=\"card\"><pre>{json.dumps(health, ensure_ascii=True, indent=2, default=str)}</pre></div>
+  <div class=\"card\"><strong>Train Loss</strong><br>{chart_train_loss}</div>
+  <div class=\"card\"><strong>Validation Loss</strong><br>{chart_validation_loss}</div>
 
   <h2>Top Predictions (Top-3 per Race)</h2>
   <div class=\"card\">{top_table_html}</div>

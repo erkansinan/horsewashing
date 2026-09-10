@@ -193,7 +193,7 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "market_probability": mprob,
                 "implied_probability": implied_prob,
                 "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
-                "is_winner": int(getattr(row, "is_winner", 0)),
+                "is_winner": int(getattr(row, "is_winner", 0)) if pd.notnull(getattr(row, "is_winner", 0)) else 0,
             }
         )
 

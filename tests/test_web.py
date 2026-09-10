@@ -23,6 +23,8 @@ from atyaris.models.entities import (
     TrackSurface,
     WorkoutRecord,
 )
+from atyaris.ml.tracking import register_model_run
+from atyaris.config import Settings
 from atyaris.web.app import create_app
 
 
@@ -36,6 +38,211 @@ def test_index_lists_sample_races() -> None:
     assert response.status_code == 200
     assert "Gunun Yarislari" in response.text
     assert "Tahmin Uret" in response.text
+
+
+def test_training_history_api_and_html_show_model_changes(monkeypatch, tmp_path) -> None:
+    tracking_db = tmp_path / "training-history.sqlite3"
+    health_path = tmp_path / "new.health.json"
+    health_path.write_text(
+        '{"passed": true, "metrics": {"train": {"log_loss": 0.2, "top1": 0.5}, '
+        '"validation": {"log_loss": 0.3, "top1": 0.4}, "test": {"log_loss": 0.4, "top1": 0.3}}, '
+        '"checks": [{"name": "test_beats_baseline", "details": {"full_log_loss": 0.4, '
+        '"market_only_log_loss": 0.5, "full_top1": 0.3, "market_only_top1": 0.2, "favorite_top1": 0.1}}], '
+        '"calibration_curve": [{"bin_low": 0.0, "bin_high": 0.1, "predicted": 0.05, "observed": 0.04}], '
+        '"feature_importance": [{"feature": "speed", "importance": 0.8, "coefficient": 0.8}]}',
+        encoding="utf-8",
+    )
+    register_model_run(
+        str(tracking_db),
+        model_version="model_old",
+        artifact_path="old.joblib",
+        train_start_date="2025-01-01",
+        train_end_date="2025-03-31",
+        holdout_days=20,
+        calibration_method="isotonic",
+        blend_weight=0.5,
+        metrics={"feature_count": 2, "feature_columns": ["speed", "form"]},
+    )
+    register_model_run(
+        str(tracking_db),
+        model_version="model_new",
+        artifact_path=str(tmp_path / "new.joblib"),
+        train_start_date="2025-02-01",
+        train_end_date="2025-04-30",
+        holdout_days=30,
+        calibration_method="platt",
+        blend_weight=0.7,
+        metrics={"feature_count": 2, "feature_columns": ["speed", "pace"]},
+    )
+    settings = Settings(phase5_tracking_db_path=str(tracking_db))
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+
+    client = _client()
+    api_response = client.get("/api/training/history", params={"start_date": "2025-04-01"})
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["count"] == 1
+    assert payload["latest_training"]["model_version"] == "model_new"
+    assert payload["latest_training"]["changes_from_previous"]["added_features"] == ["pace"]
+    assert payload["latest_training"]["changes_from_previous"]["removed_features"] == ["form"]
+    assert payload["latest_training"]["changes_from_previous"]["calibration_changed"] is True
+    assert payload["latest_training"]["model_health"]["metrics"]["test"]["top1"] == 0.3
+
+    html_response = client.get("/training-history")
+    assert html_response.status_code == 200
+    assert html_response.url.path == "/training"
+    assert "Son eğitim tarihi" in html_response.text
+    assert "model_new" in html_response.text
+    assert "pace" in html_response.text
+    assert "Model sağlık raporu" in html_response.text
+    assert "Baseline karşılaştırması" in html_response.text
+    assert "Kalibrasyon eğrisi" in html_response.text
+    assert "speed" in html_response.text
+
+
+def test_training_page_contains_start_form_and_active_jobs(monkeypatch) -> None:
+    web_app_module._TRAINING_JOBS["active-training"] = {
+        "status": "running",
+        "message": "Gunluk veri checkpoint",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    try:
+        response = _client().get("/training")
+        assert response.status_code == 200
+        assert 'action="/train"' in response.text
+        assert "Yeni eğitim başlat" in response.text
+        assert "Gunluk veri checkpoint" in response.text
+        assert "active-training" in response.text
+        assert "ML Eğitim" in response.text
+    finally:
+        web_app_module._TRAINING_JOBS.pop("active-training", None)
+
+
+def test_training_page_exposes_pause_and_resume_controls() -> None:
+    web_app_module._TRAINING_JOBS["running-training"] = {
+        "status": "running",
+        "message": "Egitim",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    web_app_module._TRAINING_JOBS["paused-training"] = {
+        "status": "paused",
+        "message": "Egitim duraklatildi; checkpoint korundu",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    try:
+        response = _client().get("/training")
+        assert response.status_code == 200
+        assert 'data-job-id="running-training"' in response.text
+        assert 'data-job-id="paused-training"' in response.text
+        assert 'class="pause-training"' in response.text
+        assert 'class="resume-training"' in response.text
+        assert "Eğitimi duraklat" in response.text
+        assert "Kaldığı yerden devam et" in response.text
+    finally:
+        web_app_module._TRAINING_JOBS.pop("running-training", None)
+        web_app_module._TRAINING_JOBS.pop("paused-training", None)
+
+
+def test_pause_and_resume_training_job(monkeypatch) -> None:
+    job_id = "pause-route-job"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "running",
+        "message": "Egitim",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    web_app_module._TRAINING_CANCEL_EVENTS[job_id] = __import__("threading").Event()
+    try:
+        client = _client()
+        pause_response = client.post(f"/train/pause/{job_id}")
+        assert pause_response.status_code == 200
+        assert pause_response.json()["status"] == "running"
+        assert pause_response.json()["message"] == "Egitim duraklatiliyor..."
+        assert job_id in web_app_module._TRAINING_PAUSE_REQUESTS
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+        web_app_module._TRAINING_CANCEL_EVENTS.pop(job_id, None)
+        web_app_module._TRAINING_PAUSE_REQUESTS.discard(job_id)
+
+
+def test_interrupted_training_job_is_restored_as_paused(monkeypatch, tmp_path) -> None:
+    settings = Settings(phase1_raw_csv_path=str(tmp_path / "tjk_real_races.csv"))
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+    job_id = "restartable-training"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "running",
+        "message": "Gunluk veri checkpoint",
+        "start_date": "2026-09-01",
+        "end_date": "2026-09-10",
+    }
+    try:
+        web_app_module._persist_training_jobs()
+        web_app_module._TRAINING_JOBS.clear()
+
+        _client()
+
+        restored = web_app_module._TRAINING_JOBS[job_id]
+        assert restored["status"] == "paused"
+        assert restored["start_date"] == "2026-09-01"
+        assert restored["end_date"] == "2026-09-10"
+        assert "checkpointten devam" in str(restored["message"])
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
+def test_training_status_page_contains_interruption_confirmation(monkeypatch) -> None:
+    web_app_module._TRAINING_JOBS["active-job"] = {"status": "running", "message": "Egitim"}
+    try:
+        response = _client().get("/", params={"source": "sample"})
+        assert response.status_code == 200
+        assert "devam eden eğitim durdurulacaktır" in response.text
+        assert "/train/cancel/" in response.text
+    finally:
+        web_app_module._TRAINING_JOBS.pop("active-job", None)
+        web_app_module._TRAINING_CANCEL_EVENTS.pop("active-job", None)
+
+
+def test_ml_prediction_does_not_start_hidden_refresh_for_missing_date(monkeypatch) -> None:
+    settings = Settings()
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(web_app_module, "_ml_model_loadable", lambda paths: True)
+    monkeypatch.setattr(web_app_module, "_ml_has_date", lambda paths, target_date: False)
+    monkeypatch.setattr(
+        web_app_module,
+        "prepare_prediction_features",
+        lambda target_date, paths: (_ for _ in ()).throw(RuntimeError("test TJK hatasi")),
+    )
+
+    response = _client().get(
+        "/predict",
+        params={"race_id": "Ankara-1", "source": "ml", "date": "2026-09-10", "city": "Ankara"},
+    )
+
+    assert response.status_code == 200
+    assert "2026-09-10 icin labelsiz tahmin feature verisi hazirlanamadi" in response.text
+
+
+def test_ml_prediction_on_next_day_after_0909_0910_training_is_rejected(monkeypatch) -> None:
+    settings = Settings()
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(web_app_module, "_ml_model_loadable", lambda paths: True)
+    monkeypatch.setattr(web_app_module, "_ml_has_date", lambda paths, target_date: target_date.isoformat() == "2026-09-10")
+    monkeypatch.setattr(
+        web_app_module,
+        "prepare_prediction_features",
+        lambda target_date, paths: (_ for _ in ()).throw(RuntimeError("test TJK hatasi")),
+    )
+
+    response = _client().get(
+        "/predict",
+        params={"race_id": "Ankara-1", "source": "ml", "date": "2026-09-11", "city": "Ankara"},
+    )
+
+    assert response.status_code == 200
+    assert "2026-09-11 icin labelsiz tahmin feature verisi hazirlanamadi" in response.text
 
 
 def test_index_with_invalid_date_shows_error() -> None:

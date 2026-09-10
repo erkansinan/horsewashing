@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -37,6 +38,9 @@ def evaluate_predictions(frame: pd.DataFrame) -> dict[str, float]:
 
 
 def save_phase3_artifact(artifact: BenterTwoStageArtifact, calibrator_payload: dict[str, object], path: str) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
     joblib.dump(
         {
             "stage1_model": artifact.stage1_model,
@@ -47,8 +51,9 @@ def save_phase3_artifact(artifact: BenterTwoStageArtifact, calibrator_payload: d
             "market_weight": artifact.market_weight,
             "calibrator": calibrator_payload,
         },
-        path,
+        temporary_path,
     )
+    temporary_path.replace(output_path)
 
 
 def load_phase3_artifact(path: str) -> tuple[BenterTwoStageArtifact, dict[str, object]]:

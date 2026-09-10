@@ -38,6 +38,7 @@ import logging
 import re
 from datetime import date, datetime
 
+import httpx
 from bs4 import BeautifulSoup
 
 from atyaris.cache.sqlite_cache import SqliteTTLCache
@@ -133,6 +134,11 @@ _RACE_HEADER_RE = re.compile(r"(\d+)\.\s*Ko[sş]u\s+(\d{1,2}[:.]\d{2})", re.IGNO
 _DISTANCE_SURFACE_RE = re.compile(r"(\d{3,4})\s*(Kum|Cim|Çim|Sentetik)", re.IGNORECASE)
 
 
+def _era_for_date(target_date: date) -> str:
+    """Use TJK's historical view for dates before the current day."""
+    return "today" if target_date >= date.today() else "past"
+
+
 class TJKHtmlDataSource(RaceDataSource):
     """tjk.org'un herkese acik gunluk program sayfalarini kazir (scrape)."""
 
@@ -159,7 +165,10 @@ class TJKHtmlDataSource(RaceDataSource):
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
-        response = self._client.get(url, params=params)
+        try:
+            response = self._client.get(url, params=params)
+        except (httpx.HTTPError, OSError) as exc:
+            raise DataSourceError(f"TJK sayfasi alinamadi: {url}: {exc}") from exc
         html = response.text
         if self._cache is not None:
             self._cache.set(cache_key, html, self._cache_ttl)
@@ -171,7 +180,7 @@ class TJKHtmlDataSource(RaceDataSource):
         url = f"{self._base_url}{_DAILY_PROGRAM_DATA_PATH}"
         params = {
             "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
-            "Era": "today",
+            "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
         soup = BeautifulSoup(html, "lxml")
@@ -195,7 +204,7 @@ class TJKHtmlDataSource(RaceDataSource):
         url = f"{self._base_url}{_DAILY_RESULTS_DATA_PATH}"
         params = {
             "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
-            "Era": "today",
+            "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
         soup = BeautifulSoup(html, "lxml")
@@ -237,7 +246,7 @@ class TJKHtmlDataSource(RaceDataSource):
             "SehirId": sehir_id,
             "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
             "SehirAdi": matched,
-            "Era": "today",
+            "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
         soup = BeautifulSoup(html, "lxml")
@@ -343,6 +352,7 @@ class TJKHtmlDataSource(RaceDataSource):
             params = {
                 "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
                 "SehirAdi": name,
+                "Era": _era_for_date(target_date),
             }
             try:
                 html = self._get_html(url, params)

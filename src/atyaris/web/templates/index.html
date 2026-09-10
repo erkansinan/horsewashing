@@ -22,46 +22,6 @@
   <button type="submit">Bulteni Getir</button>
 </form>
 
-<section class="training-panel" aria-labelledby="training-title">
-  <h2 id="training-title">Model Egitimi</h2>
-  <p>TJK sonuclarini cekip modeli yeniden egitir ve walk-forward backtest calistirir.</p>
-  <form class="filters" method="get" action="/train">
-    <label>Baslangic tarihi
-      <input type="date" name="start_date" value="{{ train_start_date or date }}" required>
-    </label>
-    <label>Bitis tarihi
-      <input type="date" name="end_date" value="{{ train_end_date or date }}" required>
-    </label>
-    <button type="submit">Egitimi Baslat</button>
-  </form>
-  {% if train_job %}
-  <div id="training-status" class="training-status" data-job-id="{{ train_job }}">Egitim durumu kontrol ediliyor...</div>
-  <script>
-    (function () {
-      const status = document.getElementById("training-status");
-      if (!status) return;
-      const jobId = status.dataset.jobId;
-      const poll = async () => {
-        try {
-          const response = await fetch("/train/status/" + encodeURIComponent(jobId));
-          const job = await response.json();
-          status.textContent = job.message || job.status;
-          status.dataset.state = job.status;
-          if (job.status === "running") {
-            window.setTimeout(poll, 1500);
-          } else if (job.status === "completed") {
-            status.textContent = job.message + " | Model: " + job.model_version;
-          }
-        } catch (error) {
-          status.textContent = "Egitim durumu alinamadi; sayfayi yenileyin.";
-        }
-      };
-      poll();
-    })();
-  </script>
-  {% endif %}
-</section>
-
 {% if error %}
   <p class="error">{{ error }}</p>
 {% endif %}

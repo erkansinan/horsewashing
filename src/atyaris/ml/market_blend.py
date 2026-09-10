@@ -3,6 +3,7 @@ from __future__ import annotations
 # Stage-2 market blend inspired by Benter (1994): combine model signal + market signal
 # with race-conditional logit so probabilities remain relative within each race.
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -63,12 +64,15 @@ def fit_two_stage_benter(
     stage1_regularization: float = 0.05,
     stage2_penalty: str = "l2",
     stage2_regularization: float = 0.02,
+    checkpoint_dir: str | Path | None = None,
 ) -> BenterTwoStageArtifact:
     stage1 = fit_conditional_logit(
         train_df,
         feature_columns,
         penalty=stage1_penalty,
         regularization_strength=stage1_regularization,
+        validation_frame=calibration_df,
+        checkpoint_path=(Path(checkpoint_dir) / "stage1.npz") if checkpoint_dir is not None else None,
     )
 
     blend_df = calibration_df.copy()

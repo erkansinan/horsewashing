@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}ML Eğitim{% endblock %}
+{% block content %}
+<h2>ML Eğitim</h2>
+<p>Etiketli TJK sonuçlarıyla modeli yeniden eğitin. Uzun işlemler gün gün checkpoint alınarak sürdürülür.</p>
+
+<section class="training-panel" aria-labelledby="training-start-title">
+  <h2 id="training-start-title">Yeni eğitim başlat</h2>
+  <form class="filters" method="get" action="/train">
+    <label>Başlangıç tarihi
+      <input type="date" name="start_date" value="{{ start_date }}" required>
+    </label>
+    <label>Bitiş tarihi
+      <input type="date" name="end_date" value="{{ end_date }}" required>
+    </label>
+    <button type="submit">Eğitimi başlat</button>
+  </form>
+</section>
+
+{% if training_jobs %}
+<section class="training-panel" aria-labelledby="active-training-title">
+  <h2 id="active-training-title">Eğitim işlemleri</h2>
+  {% for job in training_jobs %}
+  <div class="training-status" data-state="{{ job.status }}" data-job-id="{{ job.job_id }}">
+    <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
+    <span class="training-message">{{ job.message }}</span>
+    {% if job.status == 'running' %}
+    <button type="button" class="pause-training" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi duraklat</button>
+    {% elif job.status == 'paused' %}
+    <button type="button" class="resume-training" data-training-control="true" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+<script>
+  (function () {
+    const statuses = document.querySelectorAll(".training-status[data-job-id]");
+    const poll = async (status) => {
+      const jobId = status.dataset.jobId;
+      try {
+        const response = await fetch("/train/status/" + encodeURIComponent(jobId));
+        const job = await response.json();
+        status.dataset.state = job.status;
+        status.querySelector("strong").textContent = job.status;
+        status.querySelector(".training-message").textContent = job.message || "";
+        if (job.status === "running") {
+          window.setTimeout(() => poll(status), 1500);
+        } else {
+          const pause = status.querySelector(".pause-training");
+          if (pause) pause.remove();
+        }
+      } catch (error) {
+        status.querySelector(".training-message").textContent = "Durum alınamadı; sayfayı yenileyin.";
+      }
+    };
+    statuses.forEach((status) => {
+      if (status.dataset.state === "running") poll(status);
+    });
+    document.querySelectorAll(".pause-training").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!window.confirm("Bu eğitim duraklatılsın mı? Tamamlanan günler korunur.")) return;
+        await fetch("/train/pause/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
+        window.location.reload();
+      });
+    });
+    document.querySelectorAll(".resume-training").forEach((button) => {
+      button.addEventListener("click", async () => {
+        await fetch("/train/resume/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
+        window.location.reload();
+      });
+    });
+  })();
+</script>
+{% endif %}
+
+<h2>Model eğitim geçmişi</h2>
+<form class="filters" method="get" action="/training-history">
+  <label>Başlangıç tarihi
+    <input type="date" name="start_date" value="{{ start_date }}">
+  </label>
+  <label>Bitiş tarihi
+    <input type="date" name="end_date" value="{{ end_date }}">
+  </label>
+  <label>Kayıt sayısı
+    <input type="number" name="limit" min="1" max="100" value="{{ limit }}">
+  </label>
+  <button type="submit">Sorgula</button>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% elif history.latest_training %}
+{% set latest = history.latest_training %}
+<section class="training-panel">
+  <h2>Son eğitim</h2>
+  <table>
+    <tr><th>Model</th><td>{{ latest.model_version }}</td></tr>
+    <tr><th>Son eğitim tarihi</th><td>{{ latest.trained_at }}</td></tr>
+    <tr><th>Eğitim veri aralığı</th><td>{{ latest.train_start_date or '-' }} - {{ latest.train_end_date or '-' }}</td></tr>
+    <tr><th>Holdout günü</th><td>{{ latest.holdout_days }}</td></tr>
+    <tr><th>Kalibrasyon</th><td>{{ latest.calibration_method }}</td></tr>
+    <tr><th>Feature sayısı</th><td>{{ latest.metrics.get('feature_count', '-') }}</td></tr>
+    <tr><th>Eğitim satırı</th><td>{{ latest.metrics.get('training_rows', '-') }}</td></tr>
+  </table>
+</section>
+
+{% set health = latest.model_health %}
+{% if health %}
+<section class="training-panel">
+  <h2>Model sağlık raporu</h2>
+  <p>Genel durum: <strong>{{ 'Başarılı' if health.passed else 'İnceleme gerekli' }}</strong></p>
+
+  <h3>Train / validation / test metrikleri</h3>
+  {% if health.metrics %}
+  <table>
+    <thead><tr><th>Split</th><th>Log loss</th><th>Top-1</th></tr></thead>
+    <tbody>
+    {% for split, metrics in health.metrics.items() %}
+      <tr><td>{{ split }}</td><td>{{ "%.4f"|format(metrics.log_loss) }}</td><td>{{ "%.4f"|format(metrics.top1) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% set baseline = namespace(details=none) %}
+  {% for check in health.checks or [] %}
+    {% if check.name == 'test_beats_baseline' %}{% set baseline.details = check.details %}{% endif %}
+  {% endfor %}
+  {% if baseline.details %}
+  <h3>Baseline karşılaştırması</h3>
+  <table>
+    <thead><tr><th>Model</th><th>Log loss</th><th>Top-1</th></tr></thead>
+    <tbody>
+      <tr><td>Full model</td><td>{{ "%.4f"|format(baseline.details.full_log_loss) }}</td><td>{{ "%.4f"|format(baseline.details.full_top1) }}</td></tr>
+      <tr><td>Market-only</td><td>{{ "%.4f"|format(baseline.details.market_only_log_loss) }}</td><td>{{ "%.4f"|format(baseline.details.market_only_top1) }}</td></tr>
+      <tr><td>Always favorite</td><td>-</td><td>{{ "%.4f"|format(baseline.details.favorite_top1) }}</td></tr>
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h3>Kalibrasyon eğrisi</h3>
+  {% if health.calibration_curve %}
+  <table>
+    <thead><tr><th>Olasılık aralığı</th><th>Tahmin edilen</th><th>Gözlenen</th></tr></thead>
+    <tbody>
+    {% for bin in health.calibration_curve %}
+      <tr><td>{{ "%.2f"|format(bin.bin_low) }} - {{ "%.2f"|format(bin.bin_high) }}</td><td>{{ "%.4f"|format(bin.predicted) }}</td><td>{{ "%.4f"|format(bin.observed) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>Kalibrasyon eğrisi verisi bulunamadı.</p>{% endif %}
+
+  <h3>Feature importance</h3>
+  {% if health.feature_importance %}
+  <table>
+    <thead><tr><th>Feature</th><th>Importance</th><th>Katsayı</th></tr></thead>
+    <tbody>
+    {% for feature in health.feature_importance %}
+      <tr><td>{{ feature.feature }}</td><td>{{ "%.6f"|format(feature.importance) }}</td><td>{{ "%.6f"|format(feature.coefficient) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>Feature importance verisi bulunamadı.</p>{% endif %}
+</section>
+{% endif %}
+
+<h2>Modeller ve eğitim sonrası değişiklikler</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Model</th><th>Eğitim tarihi</th><th>Veri aralığı</th><th>Durum</th>
+      <th>Önceki model</th><th>Eklenen feature</th><th>Çıkan feature</th><th>Kalibrasyon değişti</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for run in history.runs %}
+    <tr>
+      <td>{{ run.model_version }}</td>
+      <td>{{ run.trained_at }}</td>
+      <td>{{ run.train_start_date or '-' }} - {{ run.train_end_date or '-' }}</td>
+      <td>{{ run.status }}</td>
+      <td>{{ run.changes_from_previous.previous_model_version or '-' }}</td>
+      <td>{{ run.changes_from_previous.added_features | join(', ') or '-' }}</td>
+      <td>{{ run.changes_from_previous.removed_features | join(', ') or '-' }}</td>
+      <td>{{ 'Evet' if run.changes_from_previous.calibration_changed else 'Hayır' if run.changes_from_previous.calibration_changed is not none else '-' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>Seçilen aralıkta eğitim kaydı bulunamadı.</p>
+{% endif %}
+{% endblock %}

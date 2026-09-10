@@ -91,6 +91,7 @@ def learn_cmd(
         calibration_method=settings.phase3_calibration_method,
         blend_weight=float(artifact.logistic_weight),
         feature_frame=built.frame,
+        feature_columns=artifact.feature_columns,
     )
     console.print(f"[green]4/5 tamamlandi:[/green] model={model_version}")
     console.print("[bold]5/5 Walk-forward backtest basladi[/bold]")
@@ -188,6 +189,7 @@ def train_cmd(
         calibration_method=settings.phase3_calibration_method,
         blend_weight=float(artifact.logistic_weight),
         feature_frame=feat,
+        feature_columns=artifact.feature_columns,
     )
     console.print(f"Train tamam -> {paths.model_path} (version={model_version})")
 

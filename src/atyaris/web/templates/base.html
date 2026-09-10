@@ -30,6 +30,56 @@
 </head>
 <body>
   <h1><a href="/" style="color:inherit; text-decoration:none;">Turkiye At Yarisi Tahmin Araci</a></h1>
+  <p><a class="button" href="/training">ML Eğitim</a></p>
   {% block content %}{% endblock %}
+  <script>
+    (function () {
+      const trainingJobId = {{ active_training_job_id()|tojson }};
+      if (!trainingJobId) return;
+
+      const warning = "Model eğitimi sürüyor. Bu işlemi onaylarsanız devam eden eğitim durdurulacaktır. Devam etmek istiyor musunuz?";
+      let cancellationRequested = false;
+
+      const cancelTraining = async () => {
+        if (cancellationRequested) return;
+        cancellationRequested = true;
+        try {
+          await fetch("/train/cancel/" + encodeURIComponent(trainingJobId), { method: "POST" });
+        } catch (error) {
+          cancellationRequested = false;
+          throw error;
+        }
+      };
+
+      document.addEventListener("click", async (event) => {
+        const target = event.target.closest("a, button");
+        if (!target || target.dataset.trainingConfirmed === "true") return;
+        if (target.tagName === "BUTTON" && target.type !== "button") return;
+        if (target.dataset.trainingControl === "true") return;
+        if (!window.confirm(warning)) {
+          event.preventDefault();
+          return;
+        }
+        event.preventDefault();
+        target.dataset.trainingConfirmed = "true";
+        await cancelTraining();
+        if (target.tagName === "A") window.location.assign(target.href);
+        else target.click();
+      });
+
+      document.addEventListener("submit", async (event) => {
+        const form = event.target;
+        if (form.dataset.trainingConfirmed === "true") return;
+        if (!window.confirm(warning)) {
+          event.preventDefault();
+          return;
+        }
+        event.preventDefault();
+        form.dataset.trainingConfirmed = "true";
+        await cancelTraining();
+        form.submit();
+      });
+    })();
+  </script>
 </body>
 </html>

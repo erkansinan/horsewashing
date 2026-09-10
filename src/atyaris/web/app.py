@@ -7,10 +7,10 @@ ile paylasir; boylece iki arayuz arasinda is mantigi tekrarlanmaz.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
-from threading import Lock
+import json
+from threading import Event, RLock, Thread
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -32,6 +32,7 @@ from atyaris.ml.pipeline import (
     ingest_real_data,
     optimize_for_date,
     paths_from_settings,
+    prepare_prediction_features,
     predict_for_date,
     preprocess_raw,
     run_phase1_backtest,
@@ -40,6 +41,7 @@ from atyaris.ml.pipeline import (
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.phase5 import register_training_run
+from atyaris.ml.tracking import load_training_history
 from atyaris.prediction.engine import PredictionEngine
 from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
 from atyaris.utils.logging_config import configure_logging
@@ -102,9 +104,89 @@ _TR_ASCII_MAP = str.maketrans(
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-_TRAINING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atyaris-train")
-_TRAINING_LOCK = Lock()
+_TRAINING_LOCK = RLock()
 _TRAINING_JOBS: dict[str, dict[str, object]] = {}
+_TRAINING_CANCEL_EVENTS: dict[str, Event] = {}
+_TRAINING_PAUSE_REQUESTS: set[str] = set()
+
+
+class _TrainingCancelled(Exception):
+    pass
+
+
+class _TrainingPaused(Exception):
+    pass
+
+
+def _training_jobs_manifest_path() -> Path:
+    settings = get_settings()
+    return paths_from_settings(settings).raw_csv.with_suffix(".jobs.json")
+
+
+def _persist_training_jobs() -> None:
+    """Persist resumable jobs without serializing transient thread state."""
+    path = _training_jobs_manifest_path()
+    with _TRAINING_LOCK:
+        jobs = [
+            {
+                "job_id": job_id,
+                "status": str(job.get("status")),
+                "message": str(job.get("message", "")),
+                "start_date": str(job.get("start_date", "")),
+                "end_date": str(job.get("end_date", "")),
+            }
+            for job_id, job in _TRAINING_JOBS.items()
+            if job.get("status") in {"running", "paused"}
+        ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _restore_training_jobs() -> None:
+    """Recover interrupted jobs as paused so the user can resume them safely."""
+    path = _training_jobs_manifest_path()
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Training job manifest could not be read: %s", path)
+        return
+    if not isinstance(payload, list):
+        return
+    with _TRAINING_LOCK:
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            job_id = str(item.get("job_id", "")).strip()
+            start_date = str(item.get("start_date", "")).strip()
+            end_date = str(item.get("end_date", "")).strip()
+            if not job_id or not start_date or not end_date:
+                continue
+            try:
+                date.fromisoformat(start_date)
+                date.fromisoformat(end_date)
+            except ValueError:
+                continue
+            _TRAINING_JOBS.setdefault(
+                job_id,
+                {
+                    "status": "paused",
+                    "message": "Sunucu yeniden baslatildi; checkpointten devam edilebilir",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+            )
+
+
+def _active_training_job_id() -> str:
+    with _TRAINING_LOCK:
+        return next(
+            (job_id for job_id, job in _TRAINING_JOBS.items() if job.get("status") == "running"),
+            "",
+        )
 
 
 @dataclass
@@ -700,14 +782,17 @@ def _overlay_bulletin_horse_names(
 
 
 def _ml_has_date(paths, target_date: date) -> bool:  # type: ignore[no-untyped-def]
-    if not paths.features_csv.exists():
-        return False
-    try:
-        dates = pd.read_csv(paths.features_csv, usecols=["date"])
-    except Exception:  # noqa: BLE001
-        return False
-    parsed = pd.to_datetime(dates["date"], errors="coerce").dt.date
-    return bool((parsed == target_date).any())
+    for feature_path in (paths.features_csv, paths.prediction_features_csv):
+        if not feature_path.exists():
+            continue
+        try:
+            dates = pd.read_csv(feature_path, usecols=["date"])
+        except Exception:  # noqa: BLE001
+            continue
+        parsed = pd.to_datetime(dates["date"], errors="coerce").dt.date
+        if bool((parsed == target_date).any()):
+            return True
+    return False
 
 
 def _ml_model_loadable(paths) -> bool:  # type: ignore[no-untyped-def]
@@ -733,20 +818,23 @@ def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> 
 
 def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
-    needs_refresh = (not _ml_model_loadable(paths)) or (not _ml_has_date(paths, target_date))
-    if not needs_refresh:
-        return
+    if not _ml_model_loadable(paths):
+        raise RuntimeError(
+            "ML modeli hazir degil. Once Model Egitimi bolumunden egitimi tamamlayin."
+        )
+    if not _ml_has_date(paths, target_date):
+        try:
+            prepare_prediction_features(target_date, paths)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"{target_date.isoformat()} icin labelsiz tahmin feature verisi hazirlanamadi: {exc}"
+            ) from exc
+        if not _ml_has_date(paths, target_date):
+            raise RuntimeError(
+                f"{target_date.isoformat()} icin tahmin feature verisi olusmadi. "
+                "TJK gunluk programi kontrol edilmeli."
+            )
 
-    start_date = target_date - timedelta(days=420)
-    ingest_real_data(start_date, target_date, paths)
-    preprocess_raw(paths)
-    build_features(paths)
-    train_phase1_model(
-        paths,
-        holdout_days=settings.phase1_holdout_days,
-        calibration_days=settings.phase3_calibration_days,
-        calibration_method=settings.phase3_calibration_method,
-    )
 
 
 def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFrame:  # type: ignore[no-untyped-def]
@@ -763,34 +851,22 @@ def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFr
         )
         return _attach_ml_labels(paths, target_date, pred)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ML predict failed, rebuilding artifacts once: %s", exc)
-        # Force-refresh artifacts once in case persisted files are from an incompatible runtime.
-        start_date = target_date - timedelta(days=420)
-        ingest_real_data(start_date, target_date, paths)
-        preprocess_raw(paths)
-        build_features(paths)
-        train_phase1_model(
-            paths,
-            holdout_days=settings.phase1_holdout_days,
-            calibration_days=settings.phase3_calibration_days,
-            calibration_method=settings.phase3_calibration_method,
-        )
-        pred = predict_for_date(
-            paths,
-            target_date,
-            enable_ev=settings.phase3_enable_ev,
-            ev_probability_threshold=settings.ev_probability_threshold,
-            ev_min_edge=settings.ev_min_edge,
-            ev_min_value=settings.ev_min_value,
-        )
-        return _attach_ml_labels(paths, target_date, pred)
+        logger.exception("ML prediction failed")
+        raise RuntimeError(f"ML tahmini uretilemedi: {exc}") from exc
 
 
 def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
 
+    cancel_event = _TRAINING_CANCEL_EVENTS[job_id]
+
     def progress(message: str) -> None:
+        if cancel_event.is_set():
+            with _TRAINING_LOCK:
+                if job_id in _TRAINING_PAUSE_REQUESTS:
+                    raise _TrainingPaused()
+            raise _TrainingCancelled()
         with _TRAINING_LOCK:
             job = _TRAINING_JOBS.get(job_id)
             if job is not None:
@@ -799,6 +875,7 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
     try:
         progress("1/5 Veri cekme basladi")
         data = ingest_real_data(start_date, end_date, paths, progress_callback=progress)
+        progress("Veri cekme tamamlandi")
         progress(f"1/5 tamamlandi: {len(data)} satir")
         progress("2/5 Preprocess basladi")
         cleaned = preprocess_raw(paths)
@@ -814,6 +891,7 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
             calibration_days=settings.phase3_calibration_days,
             calibration_method=settings.phase3_calibration_method,
         )
+        progress("Model egitimi tamamlandi")
         model_version = register_training_run(
             settings,
             paths,
@@ -821,6 +899,7 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
             calibration_method=settings.phase3_calibration_method,
             blend_weight=float(artifact.logistic_weight),
             feature_frame=built.frame,
+            feature_columns=artifact.feature_columns,
         )
         progress(f"4/5 tamamlandi: {model_version}")
         progress("5/5 Walk-forward backtest basladi")
@@ -833,24 +912,54 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
             ev_min_edge=settings.ev_min_edge,
             ev_min_value=settings.ev_min_value,
         )
+        progress("Walk-forward backtest tamamlandi")
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "completed",
                 "message": "Egitim tamamlandi",
                 "model_version": model_version,
                 "backtest": backtest,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
             }
+            _persist_training_jobs()
+    except _TrainingPaused:
+        with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
+            _TRAINING_JOBS[job_id] = {
+                "status": "paused",
+                "message": "Egitim duraklatildi; checkpoint korundu",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            }
+            _persist_training_jobs()
+    except _TrainingCancelled:
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id] = {
+                "status": "cancelled",
+                "message": "Egitim kullanici istegiyle durduruldu",
+            }
+            _persist_training_jobs()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Web training job failed")
+        message = str(exc)
+        if "bos veri uretti" in message:
+            message = (
+                f"{message} TJK sonuclarinin erisilebilir oldugu bir tarih araligi secin "
+                "veya canli veri kaynagini kontrol edin."
+            )
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "failed",
-                "message": str(exc),
+                "message": message,
             }
+        _persist_training_jobs()
 def create_app() -> FastAPI:
     """FastAPI uygulamasini olusturur (uvicorn factory olarak kullanilir)."""
     configure_logging()
+    _restore_training_jobs()
     app = FastAPI(title="Turkiye At Yarisi Tahmin Araci", docs_url="/api/docs")
+    templates.env.globals["active_training_job_id"] = _active_training_job_id
 
     @app.get("/train", response_class=RedirectResponse)
     def start_training(
@@ -873,6 +982,29 @@ def create_app() -> FastAPI:
             if active is not None:
                 job_id = active
             else:
+                resumable = next(
+                    (
+                        job_id
+                        for job_id, job in _TRAINING_JOBS.items()
+                        if job.get("status") == "paused"
+                        and job.get("start_date") == start_date
+                        and job.get("end_date") == end_date
+                    ),
+                    None,
+                )
+                if resumable is not None:
+                    job_id = resumable
+                    _TRAINING_JOBS[job_id]["status"] = "running"
+                    _TRAINING_JOBS[job_id]["message"] = "Egitim checkpointten devam ediyor"
+                    _TRAINING_CANCEL_EVENTS[job_id] = Event()
+                    Thread(
+                        target=_run_training_job,
+                        args=(job_id, parsed_start, parsed_end),
+                        name=f"atyaris-train-{job_id[:8]}",
+                        daemon=True,
+                    ).start()
+                    _persist_training_jobs()
+                    return RedirectResponse(url=f"/training?train_job={job_id}", status_code=303)
                 job_id = uuid4().hex
                 _TRAINING_JOBS[job_id] = {
                     "status": "running",
@@ -880,8 +1012,15 @@ def create_app() -> FastAPI:
                     "start_date": start_date,
                     "end_date": end_date,
                 }
-                _TRAINING_EXECUTOR.submit(_run_training_job, job_id, parsed_start, parsed_end)
-        return RedirectResponse(url=f"/?train_job={job_id}", status_code=303)
+                _TRAINING_CANCEL_EVENTS[job_id] = Event()
+                Thread(
+                    target=_run_training_job,
+                    args=(job_id, parsed_start, parsed_end),
+                    name=f"atyaris-train-{job_id[:8]}",
+                    daemon=True,
+                ).start()
+                _persist_training_jobs()
+        return RedirectResponse(url=f"/training?train_job={job_id}", status_code=303)
 
     @app.get("/train/status/{job_id}")
     def training_status(job_id: str) -> JSONResponse:
@@ -891,13 +1030,132 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
             return JSONResponse(dict(job))
 
+    @app.post("/train/cancel/{job_id}")
+    def cancel_training(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            cancel_event = _TRAINING_CANCEL_EVENTS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            if job.get("status") == "running" and cancel_event is not None:
+                cancel_event.set()
+                job["message"] = "Egitim durduruluyor..."
+            return JSONResponse(dict(job))
+
+    @app.post("/train/pause/{job_id}")
+    def pause_training(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            pause_event = _TRAINING_CANCEL_EVENTS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            if job.get("status") == "running" and pause_event is not None:
+                _TRAINING_PAUSE_REQUESTS.add(job_id)
+                pause_event.set()
+                job["message"] = "Egitim duraklatiliyor..."
+                _persist_training_jobs()
+            return JSONResponse(dict(job))
+
+    @app.post("/train/resume/{job_id}")
+    def resume_training(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            if job.get("status") != "paused":
+                return JSONResponse(dict(job))
+            job["status"] = "running"
+            job["message"] = "Egitim checkpointten devam ediyor"
+            _TRAINING_CANCEL_EVENTS[job_id] = Event()
+            Thread(
+                target=_run_training_job,
+                args=(job_id, date.fromisoformat(str(job["start_date"])), date.fromisoformat(str(job["end_date"]))),
+                name=f"atyaris-train-{job_id[:8]}",
+                daemon=True,
+            ).start()
+            _persist_training_jobs()
+            return JSONResponse(dict(job))
+
+    @app.get("/api/training/history")
+    def training_history_api(
+        limit: int = Query(10, ge=1, le=100),
+        start_date: str = Query("", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+        end_date: str = Query("", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+    ) -> JSONResponse:
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
+        settings = get_settings()
+        return JSONResponse(
+            load_training_history(
+                settings.phase5_tracking_db_path,
+                limit=limit,
+                start_date=start_date or None,
+                end_date=end_date or None,
+            )
+        )
+
+    @app.get("/training", response_class=HTMLResponse)
+    def training_page(
+        request: Request,
+        start_date: str = Query("", alias="start_date"),
+        end_date: str = Query("", alias="end_date"),
+        limit: int = Query(10, ge=1, le=100),
+        train_job: str = Query(""),
+    ) -> HTMLResponse:
+        error = None
+        history = {"latest_training": None, "runs": [], "count": 0}
+        try:
+            if start_date:
+                date.fromisoformat(start_date)
+            if end_date:
+                date.fromisoformat(end_date)
+            if start_date and end_date and start_date > end_date:
+                raise ValueError("Baslangic tarihi bitis tarihinden sonra olamaz.")
+            settings = get_settings()
+            history = load_training_history(
+                settings.phase5_tracking_db_path,
+                limit=limit,
+                start_date=start_date or None,
+                end_date=end_date or None,
+            )
+        except ValueError as exc:
+            error = f"Gecersiz istek: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Training history page failure")
+            error = f"Egitim gecmisi okunamadi: {exc}"
+
+        return templates.TemplateResponse(
+            request,
+            "training_history.html",
+            {
+                "history": history,
+                "error": error,
+                "start_date": start_date,
+                "end_date": end_date,
+                "limit": limit,
+                "train_job": train_job,
+                "training_jobs": [
+                    {"job_id": job_id, **job}
+                    for job_id, job in reversed(list(_TRAINING_JOBS.items()))
+                ],
+            },
+        )
+
+    @app.get("/training-history", response_class=RedirectResponse)
+    def training_history_redirect(
+        start_date: str = Query(""),
+        end_date: str = Query(""),
+        limit: int = Query(10, ge=1, le=100),
+    ) -> RedirectResponse:
+        query = urlencode({"start_date": start_date, "end_date": end_date, "limit": limit})
+        return RedirectResponse(url=f"/training?{query}", status_code=307)
+
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
         source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
-        train_job: str = Query(""),
     ) -> HTMLResponse:
         settings = get_settings()
         error = None
@@ -947,7 +1205,6 @@ def create_app() -> FastAPI:
                         "date": resolved_date,
                         "city": city,
                         "hippodromes": hippodromes,
-                        "train_job": train_job,
                     },
                 )
 
@@ -991,7 +1248,6 @@ def create_app() -> FastAPI:
                 "date": resolved_date,
                 "city": city,
                 "hippodromes": hippodromes,
-                "train_job": train_job,
             },
         )
 

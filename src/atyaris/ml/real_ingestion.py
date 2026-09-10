@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from collections.abc import Callable
+from time import monotonic
 
 import numpy as np
 import pandas as pd
@@ -23,30 +24,114 @@ def _market_probability_from_odds(odds: float | None, default: float) -> float:
     return 1.0 / odds
 
 
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "hesaplaniyor"
+    rounded = max(0, int(seconds))
+    minutes, remaining_seconds = divmod(rounded, 60)
+    if minutes:
+        return f"{minutes} dk {remaining_seconds} sn"
+    return f"{remaining_seconds} sn"
+
+
+def _estimate_remaining(started_at: float, completed: int, total: int) -> str:
+    if completed <= 0 or total <= completed:
+        return _format_duration(0.0 if total <= completed else None)
+    elapsed = monotonic() - started_at
+    return _format_duration((elapsed / completed) * (total - completed))
+
+
 def ingest_real_tjk_data(
     start_date: date,
     end_date: date,
     paths,
     progress_callback: Callable[[str], None] | None = None,
+    require_results: bool = True,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
-    """Build the ML raw frame strictly from live TJK pages (no synthetic fallback)."""
+    """Build labelled training or unlabelled prediction rows from live TJK pages."""
     source = build_data_source("tjk", __import__("atyaris.config", fromlist=["get_settings"]).get_settings())
     if not isinstance(source, TJKHtmlDataSource):
         raise RuntimeError("ML egitimi icin gercek TJK kaynagi bekleniyor.")
 
     rows: list[dict[str, object]] = []
+    daily_races: list[tuple[date, object, list[object], dict[int, dict[int, int]]]] = []
+    unavailable_days: list[str] = []
+    unavailable_result_sets: list[str] = []
+    started_at = monotonic()
+    total_days = max((end_date - start_date).days + 1, 1)
+    completed_days = 0
+
+    # Collect the complete labelled window before reading horse histories. This
+    # keeps result acquisition separate from the historical replay phase.
     current = start_date
     while current <= end_date:
         if progress_callback is not None:
-            progress_callback(f"Veri cekiliyor: {current.isoformat()} (toplam satir: {len(rows)})")
-        for hippodrome in source.get_available_hippodromes(current):
+            progress_callback(
+                f"Sonuclar aliniyor: {current.isoformat()} "
+                f"({completed_days + 1}/{total_days} gun) | "
+                f"tahmini kalan: {_estimate_remaining(started_at, completed_days, total_days)}"
+            )
+        try:
+            hippodromes = source.get_available_hippodromes(current)
+        except DataSourceError as exc:
+            unavailable_days.append(f"{current.isoformat()}: {exc}")
             if progress_callback is not None:
-                progress_callback(f"  Hipodrom: {hippodrome}")
-            races = source.get_daily_races(current, hippodrome)
+                progress_callback(
+                    f"    Uyari: {current.isoformat()} icin hipodrom listesi alinamadi; "
+                    f"gun atlanacak ({exc})"
+                )
+            completed_days += 1
+            current += timedelta(days=1)
+            continue
+
+        for hippodrome in hippodromes:
+            if progress_callback is not None:
+                progress_callback(
+                    f"Sonuc sayfasi okunuyor: {current.isoformat()} / {hippodrome} | "
+                    f"toplanan yarislari: {len(daily_races)} | "
+                    f"tahmini kalan: {_estimate_remaining(started_at, completed_days, total_days)}"
+                )
+            try:
+                races = source.get_daily_races(current, hippodrome)
+            except DataSourceError as exc:
+                if progress_callback is not None:
+                    progress_callback(
+                        f"    Uyari: {current.isoformat()} / {hippodrome} bulteni alinamadi; "
+                        f"hipodrom atlanacak ({exc})"
+                    )
+                continue
             if not races:
                 continue
-            results = source.get_daily_race_results(current, hippodrome)
+            if require_results:
+                try:
+                    results = source.get_daily_race_results(current, hippodrome)
+                except DataSourceError as exc:
+                    unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: {exc}")
+                    if progress_callback is not None:
+                        progress_callback(
+                            f"    Uyari: {current.isoformat()} / {hippodrome} sonuclari alinamadi; "
+                            f"hipodrom atlanacak ({exc})"
+                        )
+                    continue
+                if not results:
+                    unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: bos sonuc")
+                    if progress_callback is not None:
+                        progress_callback(
+                            f"    Uyari: {current.isoformat()} / {hippodrome} icin sonuc tablosu bos; "
+                            "hipodrom atlanacak"
+                        )
+                    continue
+            else:
+                results = {}
+            daily_races.append((current, hippodrome, races, results))
+        completed_days += 1
+        current += timedelta(days=1)
 
+    total_entries = sum(len(race.entries) for _, _, races, _ in daily_races for race in races)
+    completed_entries = 0
+    replay_started_at = monotonic()
+
+    for current, hippodrome, races, results in daily_races:
             for race in races:
                 race_result = results.get(race.race_no, {})
                 field_size = len(race.entries)
@@ -54,10 +139,19 @@ def ingest_real_tjk_data(
                     continue
 
                 for entry in race.entries:
-                    finish_position = entry.actual_finish_position
-                    if finish_position is None:
+                    completed_entries += 1
+                    if progress_callback is not None:
+                        progress_callback(
+                            f"Tarihsel istatistik hesaplaniyor: {current.isoformat()} / "
+                            f"{hippodrome} / {race.race_no}. kosu / {entry.horse_name} | "
+                            f"gunluk at: {completed_entries}/{total_entries} | "
+                            f"gunluk uretilen satir: {len(rows)} | "
+                            f"tahmini kalan: {_estimate_remaining(replay_started_at, completed_entries, total_entries)}"
+                        )
+                    finish_position = None if not require_results else entry.actual_finish_position
+                    if finish_position is None and require_results:
                         finish_position = race_result.get(entry.number)
-                    if finish_position is None:
+                    if require_results and finish_position is None:
                         # Without a real race result, this row cannot be used for
                         # academic training/evaluation without inventing labels.
                         continue
@@ -251,13 +345,18 @@ def ingest_real_tjk_data(
                         }
                     )
 
-        current += timedelta(days=1)
-
     frame = pd.DataFrame(rows)
     if frame.empty:
+        details = []
+        if unavailable_days:
+            details.append(f"veri alinamayan gun sayisi: {len(unavailable_days)}")
+        if unavailable_result_sets:
+            details.append(f"sonuc alinamayan hipodrom sayisi: {len(unavailable_result_sets)}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        purpose = "ML egitimi" if require_results else "ML tahmini"
         raise RuntimeError(
-            "Gercek TJK verisiyle ML egitimi icin kullanilabilir satir bulunamadi. "
-            "Bulten/sonuc/at gecmisi scraping dogrulanmali."
+            f"Gercek TJK verisiyle {purpose} icin kullanilabilir satir bulunamadi. "
+            f"Bulten/sonuc/at gecmisi scraping dogrulanmali{suffix}."
         )
 
     required_columns = {
