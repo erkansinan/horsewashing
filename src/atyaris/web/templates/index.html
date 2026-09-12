@@ -52,7 +52,7 @@
         <td>{{ "%.2f"|format(race.top_probability * 100) }}%</td>
         <td>{{ race.value_bet_count }}</td>
         <td>
-          <a class="button" href="/predict?race_id={{ race.race_id }}&source=ml&date={{ date }}&city={{ city }}&sort_by=form_strength&sort_order=desc">ML Tahmin Gor</a>
+          <a class="button" href="/predict?race_id={{ race.race_id }}&source=ml&date={{ date }}&city={{ city }}&sort_by=calibrated_probability&sort_order=desc">ML Tahmin Gor</a>
         </td>
       </tr>
       {% endfor %}

@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 
 from atyaris.ml.features import build_leakage_safe_features, preprocess_dataset
+from atyaris.ml.market_blend import _normalized_market_probability
 from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
 
 
@@ -28,6 +29,19 @@ def test_probability_sums_to_one_per_race_after_normalization() -> None:
     built = build_leakage_safe_features(_dataset())
     race_probs = built.frame.groupby("race_id")["market_probability_norm"].sum().round(6)
     assert (race_probs == 1.0).all()
+
+
+def test_market_probability_ignores_zero_and_missing_odds_without_warning() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["R1", "R1", "R1"],
+            "odds": [0.0, None, 2.0],
+        }
+    )
+
+    probabilities = _normalized_market_probability(frame)
+
+    assert probabilities.tolist() == [0.0, 0.0, 1.0]
 
 
 def test_features_do_not_include_known_leakage_columns() -> None:

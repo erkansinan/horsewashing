@@ -56,6 +56,7 @@
         if (!target || target.dataset.trainingConfirmed === "true") return;
         if (target.tagName === "BUTTON" && target.type !== "button") return;
         if (target.dataset.trainingControl === "true") return;
+        if (target.tagName === "A" && new URL(target.href, window.location.href).pathname === window.location.pathname) return;
         if (!window.confirm(warning)) {
           event.preventDefault();
           return;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from collections.abc import Callable
+import logging
 from time import monotonic
 
 import numpy as np
@@ -11,6 +12,9 @@ from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
 from atyaris.models.entities import HorseStatistics
 from atyaris.services import build_data_source
+
+
+logger = logging.getLogger(__name__)
 
 
 def _track_label(hippodrome: str) -> str:
@@ -47,6 +51,7 @@ def ingest_real_tjk_data(
     paths,
     progress_callback: Callable[[str], None] | None = None,
     require_results: bool = True,
+    hippodrome: str | None = None,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Build labelled training or unlabelled prediction rows from live TJK pages."""
     source = build_data_source("tjk", __import__("atyaris.config", fromlist=["get_settings"]).get_settings())
@@ -72,9 +77,18 @@ def ingest_real_tjk_data(
                 f"tahmini kalan: {_estimate_remaining(started_at, completed_days, total_days)}"
             )
         try:
-            hippodromes = source.get_available_hippodromes(current)
+            hippodromes = (
+                [hippodrome]
+                if hippodrome
+                else source.get_available_hippodromes(current)
+            )
         except DataSourceError as exc:
             unavailable_days.append(f"{current.isoformat()}: {exc}")
+            logger.warning(
+                "TJK egitim hatasi | tarih=%s | hipodrom-listesi | hata=%s",
+                current.isoformat(),
+                exc,
+            )
             if progress_callback is not None:
                 progress_callback(
                     f"    Uyari: {current.isoformat()} icin hipodrom listesi alinamadi; "
@@ -94,6 +108,13 @@ def ingest_real_tjk_data(
             try:
                 races = source.get_daily_races(current, hippodrome)
             except DataSourceError as exc:
+                unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: bulten: {exc}")
+                logger.warning(
+                    "TJK egitim hatasi | tarih=%s | hipodrom=%s | bulten | hata=%s",
+                    current.isoformat(),
+                    hippodrome,
+                    exc,
+                )
                 if progress_callback is not None:
                     progress_callback(
                         f"    Uyari: {current.isoformat()} / {hippodrome} bulteni alinamadi; "
@@ -107,6 +128,12 @@ def ingest_real_tjk_data(
                     results = source.get_daily_race_results(current, hippodrome)
                 except DataSourceError as exc:
                     unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: {exc}")
+                    logger.warning(
+                        "TJK egitim hatasi | tarih=%s | hipodrom=%s | sonuclar | hata=%s",
+                        current.isoformat(),
+                        hippodrome,
+                        exc,
+                    )
                     if progress_callback is not None:
                         progress_callback(
                             f"    Uyari: {current.isoformat()} / {hippodrome} sonuclari alinamadi; "
@@ -115,12 +142,35 @@ def ingest_real_tjk_data(
                     continue
                 if not results:
                     unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: bos sonuc")
+                    logger.warning(
+                        "TJK egitim hatasi | tarih=%s | hipodrom=%s | sonuclar bos",
+                        current.isoformat(),
+                        hippodrome,
+                    )
                     if progress_callback is not None:
                         progress_callback(
                             f"    Uyari: {current.isoformat()} / {hippodrome} icin sonuc tablosu bos; "
                             "hipodrom atlanacak"
                         )
                     continue
+                missing_races = sorted(
+                    {race.race_no for race in races}.difference(results)
+                )
+                if missing_races:
+                    unavailable_result_sets.append(
+                        f"{current.isoformat()} / {hippodrome}: eksik kosular {missing_races}"
+                    )
+                    logger.warning(
+                        "TJK egitim uyarisi | tarih=%s | hipodrom=%s | eksik-kosular=%s",
+                        current.isoformat(),
+                        hippodrome,
+                        missing_races,
+                    )
+                    if progress_callback is not None:
+                        progress_callback(
+                            f"    Uyari: {current.isoformat()} / {hippodrome} icin "
+                            f"eksik kosular atlandi: {missing_races}; tekrar denenecek"
+                        )
             else:
                 results = {}
             daily_races.append((current, hippodrome, races, results))
@@ -157,7 +207,7 @@ def ingest_real_tjk_data(
                         continue
 
                     try:
-                        stats = source.get_horse_statistics(entry)
+                        stats = source.get_horse_statistics(entry, include_workouts=False)
                     except DataSourceError as exc:
                         # TJK may omit an individual horse history while still
                         # exposing the race and its official result. Keep the
@@ -166,6 +216,13 @@ def ingest_real_tjk_data(
                         stats = HorseStatistics(
                             horse_id=str(entry.horse_id),
                             horse_name=str(entry.horse_name),
+                        )
+                        logger.warning(
+                            "TJK egitim uyarisi | tarih=%s | hipodrom=%s | at=%s | gecmis yok | hata=%s",
+                            current.isoformat(),
+                            hippodrome,
+                            entry.horse_name,
+                            exc,
                         )
                         if progress_callback is not None:
                             progress_callback(
@@ -354,6 +411,9 @@ def ingest_real_tjk_data(
             details.append(f"sonuc alinamayan hipodrom sayisi: {len(unavailable_result_sets)}")
         suffix = f" ({'; '.join(details)})" if details else ""
         purpose = "ML egitimi" if require_results else "ML tahmini"
+        if require_results and (unavailable_days or unavailable_result_sets):
+            frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
+            return frame
         raise RuntimeError(
             f"Gercek TJK verisiyle {purpose} icin kullanilabilir satir bulunamadi. "
             f"Bulten/sonuc/at gecmisi scraping dogrulanmali{suffix}."
@@ -377,4 +437,6 @@ def ingest_real_tjk_data(
     if missing:
         raise RuntimeError(f"Gercek TJK veri cercevesinde eksik zorunlu kolonlar var: {missing}")
 
+    if unavailable_days or unavailable_result_sets:
+        frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
     return frame

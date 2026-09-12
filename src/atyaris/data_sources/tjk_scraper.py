@@ -34,6 +34,8 @@ kullanilarak TJK sunucularina gereksiz yuk bindirilmemesi hedeflenir.
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import re
 from datetime import date, datetime
@@ -131,6 +133,7 @@ _SURFACE_MAP = {
 }
 
 _RACE_HEADER_RE = re.compile(r"(\d+)\.\s*Ko[sş]u\s+(\d{1,2}[:.]\d{2})", re.IGNORECASE)
+_CSV_RACE_HEADER_RE = re.compile(r"^\s*(\d+)\.\s*Ko[sş]u\b", re.IGNORECASE)
 _DISTANCE_SURFACE_RE = re.compile(r"(\d{3,4})\s*(Kum|Cim|Çim|Sentetik)", re.IGNORECASE)
 
 
@@ -207,6 +210,14 @@ class TJKHtmlDataSource(RaceDataSource):
             "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
+        csv_link = BeautifulSoup(html, "lxml").select_one("a#CSVBulten[href]")
+        if csv_link is not None:
+            csv_url = csv_link.get("href")
+            if csv_url:
+                csv_results = self._parse_csv_results(self._get_html(str(csv_url), {}))
+                if csv_results:
+                    return csv_results
+
         soup = BeautifulSoup(html, "lxml")
         mapping: dict[str, int] = {}
         for link in soup.select("ul.gunluk-tabs li a"):
@@ -249,6 +260,14 @@ class TJKHtmlDataSource(RaceDataSource):
             "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
+        csv_link = BeautifulSoup(html, "lxml").select_one("a#CSVBulten[href]")
+        if csv_link is not None:
+            csv_url = csv_link.get("href")
+            if csv_url:
+                csv_results = self._parse_csv_results(self._get_html(str(csv_url), {}))
+                if csv_results:
+                    return csv_results
+
         soup = BeautifulSoup(html, "lxml")
 
         results: dict[int, dict[int, int]] = {}
@@ -284,6 +303,29 @@ class TJKHtmlDataSource(RaceDataSource):
                 race_map[horse_number] = finish_position
 
         return results
+
+    @staticmethod
+    def _parse_csv_results(csv_text: str) -> dict[int, dict[int, int]]:
+        results: dict[int, dict[int, int]] = {}
+        current_race_no: int | None = None
+        in_entries = False
+        for row in csv.reader(io.StringIO(csv_text.lstrip("\ufeff")), delimiter=";"):
+            first_cell = row[0].strip() if row else ""
+            race_match = _CSV_RACE_HEADER_RE.match(first_cell)
+            if race_match:
+                current_race_no = int(race_match.group(1))
+                results.setdefault(current_race_no, {})
+                in_entries = False
+                continue
+            if first_cell.casefold() == "at no":
+                in_entries = True
+                continue
+            if not in_entries or current_race_no is None or not first_cell.isdigit():
+                continue
+            horse_number = int(first_cell)
+            race_results = results[current_race_no]
+            race_results.setdefault(horse_number, len(race_results) + 1)
+        return {race_no: race_results for race_no, race_results in results.items() if race_results}
 
     def get_available_hippodromes(self, target_date: date) -> list[str]:
         """Verilen tarihte TJK gunluk programinda listelenen hipodromlari dondurur.
@@ -327,7 +369,7 @@ class TJKHtmlDataSource(RaceDataSource):
                 "SehirId": sehir_id,
                 "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
                 "SehirAdi": matched,
-                "Era": "today",
+                "Era": _era_for_date(target_date),
             }
             try:
                 html = self._get_html(url, params)
@@ -550,7 +592,11 @@ class TJKHtmlDataSource(RaceDataSource):
             is_scratched=is_scratched,
         )
 
-    def get_horse_statistics(self, entry: RaceEntry) -> HorseStatistics:
+    def get_horse_statistics(
+        self,
+        entry: RaceEntry,
+        include_workouts: bool = True,
+    ) -> HorseStatistics:
         if entry.source_horse_id is None:
             raise DataSourceError(
                 "At istatistikleri icin gerekli QueryParameter_AtId bulunamadi."
@@ -793,6 +839,22 @@ class TJKHtmlDataSource(RaceDataSource):
             career_wins = sum(1 for p in past_performances if p.finish_position == 1)
         if not career_places:
             career_places = sum(1 for p in past_performances if p.finish_position and p.finish_position <= 3)
+
+        if not include_workouts:
+            return HorseStatistics(
+                horse_id=entry.horse_id,
+                horse_name=entry.horse_name,
+                past_performances=past_performances,
+                workout_records=[],
+                career_starts=career_starts,
+                career_wins=career_wins,
+                career_places=career_places,
+                last_year_starts=last_year_starts or min(len(past_performances), 10),
+                last_year_wins=last_year_wins,
+                last_year_places=last_year_places,
+                jockey_horse_combo_starts=combo_starts,
+                jockey_horse_combo_wins=combo_wins,
+            )
 
         workout_records: list[WorkoutRecord] = []
         workout_url = f"{self._base_url}{_HORSE_WORKOUT_PATH}"

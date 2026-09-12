@@ -43,7 +43,12 @@ def _safe_logit(p: np.ndarray) -> np.ndarray:
 def _normalized_market_probability(frame: pd.DataFrame) -> np.ndarray:
     if "odds" in frame.columns:
         odds = pd.to_numeric(frame["odds"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-        implied = np.where(odds > 1.0, 1.0 / odds, 0.0)
+        implied = np.divide(
+            1.0,
+            odds,
+            out=np.zeros_like(odds),
+            where=odds > 1.0,
+        )
     elif "market_probability" in frame.columns:
         implied = pd.to_numeric(frame["market_probability"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     else:

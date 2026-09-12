@@ -201,3 +201,21 @@ def test_get_daily_race_results_parses_positions() -> None:
     assert results[1][4] == 1
     assert results[1][7] == 2
     assert results[2][2] == 1
+
+
+def test_parse_csv_results_parses_finish_order() -> None:
+    csv_text = """\ufeffAnkara;(61. Yarış Günü);08/09/2026
+1. Kosu :   14.00;Maiden/DHÖ
+At No;At İsmi;Yaş
+7;BİRİNCİ;4y
+4;İKİNCİ;5y
+2;ÜÇÜNCÜ;4y
+GANYAN(1) :23,75 TL
+2. Kosu :   14.30;Handikap
+At No;At İsmi;Yaş
+3;DÖRDÜNCÜ;4y
+"""
+
+    results = TJKHtmlDataSource._parse_csv_results(csv_text)
+
+    assert results == {1: {7: 1, 4: 2, 2: 3}, 2: {3: 1}}

@@ -135,6 +135,8 @@ def ingest_real_data(
     completed_day_durations: list[float] = []
     active_day_started_at: float | None = None
     active_fraction = 0.0
+    skipped_dates: set[date] = set()
+    retry_targets: list[str] = []
 
     def report(message: str, active_day: bool = False) -> None:
         nonlocal active_fraction
@@ -196,24 +198,40 @@ def ingest_real_data(
                 paths,
                 progress_callback=day_progress,
             )
-        _require_rows(day_data, f"TJK veri cekme ({current.isoformat()})")
+        day_retry_targets = [str(target) for target in day_data.attrs.get("retry_targets", [])]
+        retry_targets.extend(day_retry_targets)
+        if day_data.empty:
+            skipped_dates.add(current)
+            retry_targets.append(current.isoformat())
+            report(
+                f"Gun atlandi: {current.isoformat()} | kullanilabilir sonuc yok; "
+                "checkpoint acik tutuldu, daha sonra tekrar denenebilir"
+            )
+            current += timedelta(days=1)
+            continue
         day_duration = max(monotonic() - active_day_started_at, 0.0)
         existing = pd.concat([existing, day_data], ignore_index=True, sort=False)
         dedupe_columns = [column for column in ["date", "race_id", "horse_id", "draw"] if column in existing.columns]
         if dedupe_columns:
             existing = existing.drop_duplicates(subset=dedupe_columns, keep="last")
         _write_csv_atomically(existing, paths.raw_csv)
-        completed_dates.add(current)
-        completed_day_durations.append(day_duration)
+        if not day_retry_targets:
+            completed_dates.add(current)
+            completed_day_durations.append(day_duration)
         active_day_started_at = None
         active_fraction = 0.0
         _write_training_checkpoint(checkpoint_path, start_date, end_date, completed_dates)
+        completion_label = "Gun tamamlandi" if not day_retry_targets else "Gun kismen tamamlandi"
         report(
-            f"Gun tamamlandi: {current.isoformat()} | "
+            f"{completion_label}: {current.isoformat()} | "
             f"bu gun {len(day_data)} at | toplam biriken {len(existing)} at"
         )
         current += timedelta(days=1)
 
+    existing.attrs["skipped_dates"] = sorted(day.isoformat() for day in skipped_dates)
+    existing.attrs["retry_targets"] = retry_targets
+    if existing.empty and retry_targets:
+        return existing
     _require_rows(existing, "TJK veri cekme")
     return existing
 
@@ -241,15 +259,16 @@ def prepare_prediction_features(
     target_date: date,
     paths: Phase1Paths,
     progress_callback: Callable[[str], None] | None = None,
+    hippodrome: str | None = None,
 ) -> pd.DataFrame:
     """Create target-day features without adding unlabelled rows to training data."""
-    raw = ingest_real_tjk_data(
-        target_date,
-        target_date,
-        paths,
-        progress_callback=progress_callback,
-        require_results=False,
-    )
+    ingestion_kwargs = {
+        "progress_callback": progress_callback,
+        "require_results": False,
+    }
+    if hippodrome:
+        ingestion_kwargs["hippodrome"] = hippodrome
+    raw = ingest_real_tjk_data(target_date, target_date, paths, **ingestion_kwargs)
     historical = pd.read_csv(paths.clean_csv) if paths.clean_csv.exists() else pd.DataFrame()
     combined = pd.concat([historical, raw], ignore_index=True, sort=False)
     built = build_leakage_safe_features(combined, as_of_date=target_date)
@@ -470,8 +489,14 @@ def run_phase1_backtest(
     return payload
 
 
-def optimize_for_date(paths: Phase1Paths, target_date: date, settings: Settings, budget: float | None = None) -> dict[str, object]:
-    pred = predict_for_date(
+def optimize_for_date(
+    paths: Phase1Paths,
+    target_date: date,
+    settings: Settings,
+    budget: float | None = None,
+    prediction: pd.DataFrame | None = None,
+) -> dict[str, object]:
+    pred = prediction if prediction is not None else predict_for_date(
         paths,
         target_date,
         enable_ev=True,

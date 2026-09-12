@@ -119,6 +119,23 @@ def test_training_page_contains_start_form_and_active_jobs(monkeypatch) -> None:
         web_app_module._TRAINING_JOBS.pop("active-training", None)
 
 
+def test_training_page_hides_cancelled_jobs() -> None:
+    job_id = "cancelled-training"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "cancelled",
+        "message": "Egitim kullanici istegiyle iptal edildi",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    try:
+        response = _client().get("/training")
+        assert response.status_code == 200
+        assert job_id not in response.text
+        assert "Egitim kullanici istegiyle iptal edildi" not in response.text
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
 def test_training_page_exposes_pause_and_resume_controls() -> None:
     web_app_module._TRAINING_JOBS["running-training"] = {
         "status": "running",
@@ -166,6 +183,145 @@ def test_pause_and_resume_training_job(monkeypatch) -> None:
         web_app_module._TRAINING_JOBS.pop(job_id, None)
         web_app_module._TRAINING_CANCEL_EVENTS.pop(job_id, None)
         web_app_module._TRAINING_PAUSE_REQUESTS.discard(job_id)
+
+
+def test_cancel_paused_training_job(monkeypatch, tmp_path) -> None:
+    settings = Settings(phase1_raw_csv_path=str(tmp_path / "tjk_real_races.csv"))
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+    job_id = "cancel-paused-job"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "paused",
+        "message": "Egitim duraklatildi; checkpoint korundu",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    try:
+        response = _client().post(f"/train/cancel/{job_id}")
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelled"
+        assert "iptal edildi" in response.json()["message"]
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
+def test_warning_training_is_retried_automatically_after_timer(monkeypatch) -> None:
+    job_id = "automatic-retry-job"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "completed_with_warnings",
+        "message": "Egitim tamamlandi; bazi veri parcalari atlandi.",
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-10",
+    }
+    callbacks = []
+    started = []
+
+    class FakeTimer:
+        def __init__(self, delay, callback):
+            assert delay == 30.0
+            callbacks.append(callback)
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            started.append(kwargs)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(web_app_module, "Timer", FakeTimer)
+    monkeypatch.setattr(web_app_module, "Thread", FakeThread)
+    monkeypatch.setattr(web_app_module, "_persist_training_jobs", lambda: None)
+    web_app_module._TRAINING_RETRY_TIMERS.pop(job_id, None)
+    try:
+        web_app_module._schedule_skipped_training_retry(job_id)
+        assert len(callbacks) == 1
+        callbacks[0]()
+        assert web_app_module._TRAINING_JOBS[job_id]["status"] == "running"
+        assert web_app_module._TRAINING_JOBS[job_id]["message"] == "Atlanan veri parcalari tekrar deneniyor"
+        assert len(started) == 1
+    finally:
+        web_app_module._TRAINING_RETRY_TIMERS.pop(job_id, None)
+        web_app_module._TRAINING_CANCEL_EVENTS.pop(job_id, None)
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
+def test_awaiting_training_is_retried_automatically_after_timer(monkeypatch) -> None:
+    job_id = "automatic-awaiting-retry-job"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "awaiting_decision",
+        "message": "6 veri parcasi alinamadi",
+        "start_date": "2026-08-26",
+        "end_date": "2026-09-11",
+    }
+    callbacks = []
+    started = []
+
+    class FakeTimer:
+        def __init__(self, delay, callback):
+            assert delay == 30.0
+            callbacks.append(callback)
+
+        def start(self):
+            return None
+
+        def cancel(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            started.append(kwargs)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(web_app_module, "Timer", FakeTimer)
+    monkeypatch.setattr(web_app_module, "Thread", FakeThread)
+    monkeypatch.setattr(web_app_module, "_persist_training_jobs", lambda: None)
+    web_app_module._TRAINING_RETRY_TIMERS.pop(job_id, None)
+    try:
+        web_app_module._schedule_skipped_training_retry(job_id)
+        callbacks[0]()
+        assert web_app_module._TRAINING_JOBS[job_id]["status"] == "running"
+        assert len(started) == 1
+    finally:
+        web_app_module._TRAINING_RETRY_TIMERS.pop(job_id, None)
+        web_app_module._TRAINING_CANCEL_EVENTS.pop(job_id, None)
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
+def test_training_history_shows_training_details(monkeypatch, tmp_path) -> None:
+    tracking_db = tmp_path / "history.sqlite3"
+    health_path = tmp_path / "model.health.json"
+    health_path.write_text(
+        '{"metrics": {"test": {"log_loss": 0.42, "top1": 0.31}}}',
+        encoding="utf-8",
+    )
+    register_model_run(
+        str(tracking_db),
+        model_version="model_details",
+        artifact_path=str(tmp_path / "model.joblib"),
+        train_start_date="2026-09-01",
+        train_end_date="2026-09-10",
+        holdout_days=3,
+        calibration_method="isotonic",
+        blend_weight=0.75,
+        metrics={"training_rows": 120, "feature_count": 18, "feature_columns": ["form"]},
+    )
+    settings = Settings(phase5_tracking_db_path=str(tracking_db))
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+
+    response = _client().get("/training")
+
+    assert response.status_code == 200
+    assert "Eğitim satırı" in response.text
+    assert "120" in response.text
+    assert "Test log loss" in response.text
+    assert "0.4200" in response.text
 
 
 def test_interrupted_training_job_is_restored_as_paused(monkeypatch, tmp_path) -> None:

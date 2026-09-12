@@ -1,9 +1,11 @@
 [
   {
-    "job_id": "5ea5a03f82d04f319b9354d7653f7889",
-    "status": "running",
-    "message": "Egitim checkpointten devam ediyor",
-    "start_date": "2026-09-02",
-    "end_date": "2026-09-09"
+    "job_id": "409e497beefc46d38ebb0aef53e993b1",
+    "status": "paused",
+    "message": "Egitim duraklatildi; checkpoint korundu",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-08-14",
+    "end_date": "2026-09-11"
   }
 ]

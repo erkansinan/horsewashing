@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 import json
-from threading import Event, RLock, Thread
+from threading import Event, RLock, Thread, Timer
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -108,6 +108,7 @@ _TRAINING_LOCK = RLock()
 _TRAINING_JOBS: dict[str, dict[str, object]] = {}
 _TRAINING_CANCEL_EVENTS: dict[str, Event] = {}
 _TRAINING_PAUSE_REQUESTS: set[str] = set()
+_TRAINING_RETRY_TIMERS: dict[str, Timer] = {}
 
 
 class _TrainingCancelled(Exception):
@@ -132,11 +133,13 @@ def _persist_training_jobs() -> None:
                 "job_id": job_id,
                 "status": str(job.get("status")),
                 "message": str(job.get("message", "")),
+                "retry_targets": list(job.get("retry_targets", [])),
+                "can_accept_partial": bool(job.get("can_accept_partial", False)),
                 "start_date": str(job.get("start_date", "")),
                 "end_date": str(job.get("end_date", "")),
             }
             for job_id, job in _TRAINING_JOBS.items()
-            if job.get("status") in {"running", "paused"}
+            if job.get("status") in {"running", "paused", "awaiting_decision", "retrying", "completed_with_warnings"}
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -156,6 +159,7 @@ def _restore_training_jobs() -> None:
         return
     if not isinstance(payload, list):
         return
+    restored_warning_jobs: list[str] = []
     with _TRAINING_LOCK:
         for item in payload:
             if not isinstance(item, dict):
@@ -173,12 +177,34 @@ def _restore_training_jobs() -> None:
             _TRAINING_JOBS.setdefault(
                 job_id,
                 {
-                    "status": "paused",
-                    "message": "Sunucu yeniden baslatildi; checkpointten devam edilebilir",
+                    "status": (
+                        "retrying"
+                        if item.get("status") == "running" and item.get("retry_targets")
+                        else "paused"
+                        if item.get("status") == "running"
+                        else "retrying"
+                        if item.get("status") == "awaiting_decision"
+                        else str(item.get("status", "paused"))
+                    ),
+                    "message": (
+                        "Atlanan veri parcalari icin otomatik tekrar denemesi bekleniyor"
+                        if item.get("status") == "running" and item.get("retry_targets")
+                        else "Sunucu yeniden baslatildi; checkpointten devam edilebilir"
+                        if item.get("status") == "running"
+                        else "Atlanan veri parcalari icin otomatik tekrar denemesi bekleniyor"
+                        if item.get("status") == "awaiting_decision"
+                        else str(item.get("message", ""))
+                    ),
+                    "retry_targets": list(item.get("retry_targets", [])),
+                    "can_accept_partial": bool(item.get("can_accept_partial", False)),
                     "start_date": start_date,
                     "end_date": end_date,
                 },
             )
+            if item.get("status") in {"running", "awaiting_decision", "retrying", "completed_with_warnings"}:
+                restored_warning_jobs.append(job_id)
+    for job_id in restored_warning_jobs:
+        _schedule_skipped_training_retry(job_id)
 
 
 def _active_training_job_id() -> str:
@@ -187,6 +213,47 @@ def _active_training_job_id() -> str:
             (job_id for job_id, job in _TRAINING_JOBS.items() if job.get("status") == "running"),
             "",
         )
+
+
+def _start_retry_skipped_training_locked(job_id: str) -> None:
+    """Start another skipped-data attempt; caller must hold _TRAINING_LOCK."""
+    job = _TRAINING_JOBS.get(job_id)
+    if job is None or job.get("status") not in {"awaiting_decision", "retrying", "completed_with_warnings"}:
+        return
+    timer = _TRAINING_RETRY_TIMERS.pop(job_id, None)
+    if timer is not None:
+        timer.cancel()
+    job["status"] = "running"
+    job["message"] = "Atlanan veri parcalari tekrar deneniyor"
+    _TRAINING_CANCEL_EVENTS[job_id] = Event()
+    Thread(
+        target=_run_training_job,
+        args=(
+            job_id,
+            date.fromisoformat(str(job["start_date"])),
+            date.fromisoformat(str(job["end_date"])),
+        ),
+        name=f"atyaris-train-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    _persist_training_jobs()
+
+
+def _schedule_skipped_training_retry(job_id: str) -> None:
+    """Retry warning-completed training in 30 seconds unless it was cancelled."""
+    def retry() -> None:
+        with _TRAINING_LOCK:
+            _TRAINING_RETRY_TIMERS.pop(job_id, None)
+            _start_retry_skipped_training_locked(job_id)
+
+    with _TRAINING_LOCK:
+        existing = _TRAINING_RETRY_TIMERS.pop(job_id, None)
+        if existing is not None:
+            existing.cancel()
+        timer = Timer(30.0, retry)
+        timer.daemon = True
+        _TRAINING_RETRY_TIMERS[job_id] = timer
+        timer.start()
 
 
 @dataclass
@@ -781,16 +848,19 @@ def _overlay_bulletin_horse_names(
     return records
 
 
-def _ml_has_date(paths, target_date: date) -> bool:  # type: ignore[no-untyped-def]
+def _ml_has_date(paths, target_date: date, city: str = "") -> bool:  # type: ignore[no-untyped-def]
     for feature_path in (paths.features_csv, paths.prediction_features_csv):
         if not feature_path.exists():
             continue
         try:
-            dates = pd.read_csv(feature_path, usecols=["date"])
+            dates = pd.read_csv(feature_path, usecols=lambda column: column in {"date", "track"})
         except Exception:  # noqa: BLE001
             continue
         parsed = pd.to_datetime(dates["date"], errors="coerce").dt.date
-        if bool((parsed == target_date).any()):
+        matching = parsed == target_date
+        if city and "track" in dates.columns:
+            matching &= dates["track"].astype(str).map(_normalize_track_key) == _normalize_track_key(city)
+        if bool(matching.any()):
             return True
     return False
 
@@ -816,15 +886,25 @@ def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> 
         )
 
 
-def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ignore[no-untyped-def]
+def _ensure_ml_ready_for_date(
+    settings,
+    target_date: date,
+    city: str = "",
+) -> None:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
     if not _ml_model_loadable(paths):
         raise RuntimeError(
             "ML modeli hazir degil. Once Model Egitimi bolumunden egitimi tamamlayin."
         )
-    if not _ml_has_date(paths, target_date):
+    try:
+        has_date = _ml_has_date(paths, target_date, city=city)
+    except TypeError as exc:
+        if "unexpected keyword argument 'city'" not in str(exc):
+            raise
+        has_date = _ml_has_date(paths, target_date)
+    if not has_date:
         try:
-            prepare_prediction_features(target_date, paths)
+                prepare_prediction_features(target_date, paths, hippodrome=city or None)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 f"{target_date.isoformat()} icin labelsiz tahmin feature verisi hazirlanamadi: {exc}"
@@ -837,9 +917,21 @@ def _ensure_ml_ready_for_date(settings, target_date: date) -> None:  # type: ign
 
 
 
-def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFrame:  # type: ignore[no-untyped-def]
+def _predict_ml_for_date_with_recovery(
+    settings,
+    target_date: date,
+    city: str = "",
+) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
-    _ensure_ml_ready_for_date(settings, target_date)
+    if city:
+        try:
+            _ensure_ml_ready_for_date(settings, target_date, city=city)
+        except TypeError as exc:
+            if "unexpected keyword argument 'city'" not in str(exc):
+                raise
+            _ensure_ml_ready_for_date(settings, target_date)
+    else:
+        _ensure_ml_ready_for_date(settings, target_date)
     try:
         pred = predict_for_date(
             paths,
@@ -855,7 +947,12 @@ def _predict_ml_for_date_with_recovery(settings, target_date: date) -> pd.DataFr
         raise RuntimeError(f"ML tahmini uretilemedi: {exc}") from exc
 
 
-def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
+def _run_training_job(
+    job_id: str,
+    start_date: date,
+    end_date: date,
+    allow_partial: bool = False,
+) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
 
@@ -875,6 +972,23 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
     try:
         progress("1/5 Veri cekme basladi")
         data = ingest_real_data(start_date, end_date, paths, progress_callback=progress)
+        retry_targets = list(data.attrs.get("retry_targets", []))
+        if retry_targets and not allow_partial:
+            with _TRAINING_LOCK:
+                _TRAINING_JOBS[job_id] = {
+                    "status": "retrying",
+                    "message": (
+                        f"{len(retry_targets)} veri parcasi alinamadi. "
+                        "Otomatik olarak 30 saniye sonra tekrar denenecek."
+                    ),
+                    "retry_targets": retry_targets,
+                    "can_accept_partial": not data.empty,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                }
+                _persist_training_jobs()
+            _schedule_skipped_training_retry(job_id)
+            return
         progress("Veri cekme tamamlandi")
         progress(f"1/5 tamamlandi: {len(data)} satir")
         progress("2/5 Preprocess basladi")
@@ -915,14 +1029,21 @@ def _run_training_job(job_id: str, start_date: date, end_date: date) -> None:
         progress("Walk-forward backtest tamamlandi")
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
-                "status": "completed",
-                "message": "Egitim tamamlandi",
+                "status": "completed_with_warnings" if retry_targets else "completed",
+                "message": (
+                    "Egitim tamamlandi; bazi veri parcalari atlandi."
+                    if retry_targets else "Egitim tamamlandi"
+                ),
                 "model_version": model_version,
                 "backtest": backtest,
+                "retry_targets": retry_targets,
+                "can_accept_partial": not data.empty,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
             }
             _persist_training_jobs()
+            if retry_targets:
+                _schedule_skipped_training_retry(job_id)
     except _TrainingPaused:
         with _TRAINING_LOCK:
             _TRAINING_PAUSE_REQUESTS.discard(job_id)
@@ -1040,6 +1161,15 @@ def create_app() -> FastAPI:
             if job.get("status") == "running" and cancel_event is not None:
                 cancel_event.set()
                 job["message"] = "Egitim durduruluyor..."
+            elif job.get("status") in {"paused", "awaiting_decision", "retrying", "completed_with_warnings"}:
+                job["status"] = "cancelled"
+                job["message"] = "Egitim kullanici istegiyle iptal edildi"
+                _TRAINING_PAUSE_REQUESTS.discard(job_id)
+                _TRAINING_CANCEL_EVENTS.pop(job_id, None)
+                retry_timer = _TRAINING_RETRY_TIMERS.pop(job_id, None)
+                if retry_timer is not None:
+                    retry_timer.cancel()
+                _persist_training_jobs()
             return JSONResponse(dict(job))
 
     @app.post("/train/pause/{job_id}")
@@ -1074,6 +1204,44 @@ def create_app() -> FastAPI:
                 daemon=True,
             ).start()
             _persist_training_jobs()
+            return JSONResponse(dict(job))
+
+    @app.post("/train/accept-partial/{job_id}")
+    def accept_partial_training(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            if job.get("status") != "awaiting_decision":
+                return JSONResponse(dict(job))
+            job["status"] = "running"
+            job["message"] = "Mevcut verilerle egitim devam ediyor"
+            _TRAINING_CANCEL_EVENTS[job_id] = Event()
+            Thread(
+                target=_run_training_job,
+                args=(
+                    job_id,
+                    date.fromisoformat(str(job["start_date"])),
+                    date.fromisoformat(str(job["end_date"])),
+                    True,
+                ),
+                name=f"atyaris-train-{job_id[:8]}",
+                daemon=True,
+            ).start()
+            _persist_training_jobs()
+            return JSONResponse(dict(job))
+
+    @app.post("/train/retry-skipped/{job_id}")
+    def retry_skipped_training(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _TRAINING_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
+            if job.get("status") not in {"awaiting_decision", "retrying", "completed_with_warnings"}:
+                return JSONResponse(dict(job))
+            if job.get("status") == "awaiting_decision":
+                job["status"] = "completed_with_warnings"
+            _start_retry_skipped_training_locked(job_id)
             return JSONResponse(dict(job))
 
     @app.get("/api/training/history")
@@ -1137,6 +1305,7 @@ def create_app() -> FastAPI:
                 "training_jobs": [
                     {"job_id": job_id, **job}
                     for job_id, job in reversed(list(_TRAINING_JOBS.items()))
+                    if job.get("status") != "cancelled"
                 ],
             },
         )
@@ -1259,7 +1428,7 @@ def create_app() -> FastAPI:
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
         sort_by: str = Query(
-            "form_strength",
+            "calibrated_probability",
             pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|edge|kelly_fraction|form_strength)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -1299,7 +1468,7 @@ def create_app() -> FastAPI:
 
             if source == "ml":
                 paths = paths_from_settings(settings)
-                pred = _predict_ml_for_date_with_recovery(settings, parsed_date)
+                pred = _predict_ml_for_date_with_recovery(settings, parsed_date, city=city)
                 requested_race_no = _parse_race_no(str(race_id))
                 target_track_key = _normalize_track_key(city) if city else ""
 
@@ -1351,7 +1520,7 @@ def create_app() -> FastAPI:
                         race_df = pd.DataFrame()
 
                 if not race_df.empty:
-                    ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "form_strength"
+                    ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                     reverse = sort_order == "desc"
                     records = race_df.to_dict(orient="records")
                     for rec in records:
@@ -1636,7 +1805,13 @@ def create_app() -> FastAPI:
                         except Exception as exc:  # noqa: BLE001
                             logger.debug("Ticket preview bulletin overlay skipped: %s", exc)
 
-                    opt = optimize_for_date(paths, parsed_date, settings, budget=settings.phase4_default_budget)
+                    opt = optimize_for_date(
+                        paths,
+                        parsed_date,
+                        settings,
+                        budget=settings.phase4_default_budget,
+                        prediction=pred,
+                    )
                     ticket_preview = []
                     selected_race_id = str(race_df["race_id"].iloc[0]) if not race_df.empty else race_id
                     allowed_combo_race_ids = set(scoped_pred["race_id"].astype(str).tolist())
@@ -1742,7 +1917,7 @@ def create_app() -> FastAPI:
                                 + _safe_float(rec.get("place3_probability"), 0.0),
                             )
 
-                        ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "form_strength"
+                        ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                         reverse = sort_order == "desc"
                         records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
                         for idx, rec in enumerate(records, start=1):

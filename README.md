@@ -164,6 +164,52 @@ atyaris ml learn --start-date 2026-08-01 --end-date 2026-09-06
 Bu komut `raw -> preprocess -> features -> train -> backtest` akisinin tamamini
 calistirir ve yeni model versiyonunu deney takip veritabanina kaydeder.
 
+### Gercek TJK egitiminde checkpoint ve devam etme
+
+Web arayuzundeki `/training` sayfasi, secilen tarih araligini gun gun isler.
+Her gun tamamlandiktan sonra su dosyalar atomik olarak guncellenir:
+
+- `data/raw/tjk_real_races.csv`: tamamlanan gunlerin ham etiketli verisi
+- `data/raw/tjk_real_races.progress.json`: tamamlanan gunlerin checkpoint'i
+- `data/raw/tjk_real_races.jobs.json`: duraklatilabilir web egitim isinin durumu
+
+Bu sayede ag kesintisi, uygulama kapanmasi veya kullanicinin duraklatmasi
+sonrasinda egitim ayni tarih araliginda tamamlanan gunleri tekrar cekmeden
+devam eder. Sunucu yeniden baslatildiginda yarim kalmis `running` isler
+guvenli olarak `paused` durumuna alinir; `/training` sayfasindaki **Kaldigi
+yerden devam et** dugmesiyle ayni job ve checkpoint kullanilarak surdurulur.
+
+Bir gun veya hipodrom icin bulten/sonuc alinamazsa bu durum egitimi otomatik
+olarak `failed` yapmaz. Ulasilabilen veriler korunur, basarisiz tarih ve
+kosular tamamlanmis checkpoint olarak isaretlenmez ve daha sonra tekrar
+denenebilir. Web sayfasi kullanilabilir veri varsa **Mevcut verilerle devam
+et** veya **Atlananlari tekrar dene** seceneklerini gosterir. Hic kullanilabilir
+veri yoksa yalnizca tekrar deneme onerilir; boylece bos veriyle model egitimi
+baslatilmaz.
+
+Web egitim akisinda:
+
+1. `/training` sayfasindan baslangic ve bitis tarihlerini secin.
+2. **Egitimi baslat** ile yeni bir job olusturun.
+3. Uzun bir calismayi durdurmak icin **Egitimi duraklat** dugmesine basin.
+4. Uygulama yeniden baslarsa veya daha sonra devam etmek isterseniz
+  **Kaldigi yerden devam et** dugmesine basin.
+5. Kalici olarak vazgecmek icin egitimi durdurun; durdurma ile duraklatma
+  ayni anlama gelmez.
+
+Ilerleme mesajlarinda `gunluk at` o anki gunun toplamini, `toplam biriken`
+ise secilen tarih araliginda su ana kadar kaydedilen satir sayisini gosterir.
+Toplam kalan sure tahmini; tamamlanan son gunlerin medyan suresini, aktif
+gundeki `islenen/toplam at` oranini ve kalan gun sayisini birlikte kullanir.
+Ilk gunun ilk bolumunde tahmin yaklasiktir; gun tamamlandikca daha kararlı
+hale gelir.
+
+TJK isteklerinde bugunun gorunumu icin `Era=today`, gecmis egitim tarihleri
+icin `Era=past` kullanilir. Bos veya eksik sonuc sayfalari sessizce egitime
+katilmaz; ilerleme mesajinda ilgili tarih ve hipodrom uyarilir. TJK verisi
+deneysel oldugu icin egitim sonuclarini ve kaydedilen satir sayilarini
+kontrol etmek gerekir.
+
 Benter notlari:
 - `train` komutu iki asamali conditional logit modeli egitir ve kalibratoru kaydeder.
 - `predict` ciktilarinda `P(win)`, `P(2.)`, `P(3.)`, `P(Top3)`, `Edge`, `EV`, `Kelly`, `Decision` kolonlari bulunur.
@@ -175,7 +221,7 @@ Benter notlari:
 
 Temel ayarlar [config.yaml](config.yaml) dosyasindadir. Benter mimarisinde aktif olarak kullanilan gruplar:
 
-- Veri dosyalari: `phase1_raw_csv_path`, `phase1_clean_csv_path`, `phase1_features_csv_path`, `phase1_model_path`
+- Veri dosyalari: `phase1_raw_csv_path`, `phase1_clean_csv_path`, `phase1_features_csv_path`, `phase1_prediction_features_csv_path`, `phase1_model_path`
 - Egitim bolme parametreleri: `phase1_min_train_days`, `phase1_holdout_days`, `phase3_calibration_days`
 - Kalibrasyon: `phase3_calibration_method` (`isotonic`, `platt`, `none`)
 - Value bet filtreleri: `ev_probability_threshold`, `ev_min_edge`, `ev_min_value`

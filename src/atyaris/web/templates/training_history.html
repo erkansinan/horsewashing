@@ -25,9 +25,21 @@
     <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
     <span class="training-message">{{ job.message }}</span>
     {% if job.status == 'running' %}
-    <button type="button" class="pause-training" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi duraklat</button>
+    <button type="button" class="pause-training" data-training-action="pause" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi duraklat</button>
+    <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
+    {% elif job.status == 'awaiting_decision' %}
+    {% if job.can_accept_partial %}<button type="button" class="accept-partial-training" data-training-action="accept-partial" data-training-control="true" data-job-id="{{ job.job_id }}">Mevcut verilerle devam et</button>{% endif %}
+    <button type="button" class="retry-skipped-training" data-training-action="retry-skipped" data-training-control="true" data-job-id="{{ job.job_id }}">Atlananları tekrar dene</button>
+    <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
+    {% elif job.status == 'completed_with_warnings' %}
+    <button type="button" class="retry-skipped-training" data-training-action="retry-skipped" data-training-control="true" data-job-id="{{ job.job_id }}">Atlananları tekrar dene</button>
+    <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
+    {% elif job.status == 'retrying' %}
+    <span class="training-auto-retry">Atlanan veriler için otomatik tekrar deneniyor.</span>
+    <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
     {% elif job.status == 'paused' %}
-    <button type="button" class="resume-training" data-training-control="true" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
+    <button type="button" class="resume-training" data-training-action="resume" data-training-control="true" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
+    <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
     {% endif %}
   </div>
   {% endfor %}
@@ -35,6 +47,38 @@
 <script>
   (function () {
     const statuses = document.querySelectorAll(".training-status[data-job-id]");
+    const renderControls = (status, job) => {
+      status.querySelectorAll("[data-training-action]").forEach((button) => button.remove());
+      const jobId = status.dataset.jobId;
+      const addButton = (action, className, label) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = className;
+        button.dataset.trainingAction = action;
+        button.dataset.trainingControl = "true";
+        button.dataset.jobId = jobId;
+        button.textContent = label;
+        status.appendChild(button);
+      };
+      if (job.status === "running") {
+        addButton("pause", "pause-training", "Eğitimi duraklat");
+        addButton("cancel", "cancel-training", "Eğitimi durdur / iptal et");
+      } else if (job.status === "awaiting_decision") {
+        if (job.can_accept_partial) {
+          addButton("accept-partial", "accept-partial-training", "Mevcut verilerle devam et");
+        }
+        addButton("retry-skipped", "retry-skipped-training", "Atlananları tekrar dene");
+        addButton("cancel", "cancel-training", "Eğitimi durdur / iptal et");
+      } else if (job.status === "completed_with_warnings") {
+        addButton("retry-skipped", "retry-skipped-training", "Atlananları tekrar dene");
+        addButton("cancel", "cancel-training", "Eğitimi durdur / iptal et");
+      } else if (job.status === "retrying") {
+        addButton("cancel", "cancel-training", "Eğitimi durdur / iptal et");
+      } else if (job.status === "paused") {
+        addButton("resume", "resume-training", "Kaldığı yerden devam et");
+        addButton("cancel", "cancel-training", "Eğitimi durdur / iptal et");
+      }
+    };
     const poll = async (status) => {
       const jobId = status.dataset.jobId;
       try {
@@ -43,7 +87,8 @@
         status.dataset.state = job.status;
         status.querySelector("strong").textContent = job.status;
         status.querySelector(".training-message").textContent = job.message || "";
-        if (job.status === "running") {
+        renderControls(status, job);
+        if (job.status === "running" || job.status === "awaiting_decision" || job.status === "retrying" || job.status === "completed_with_warnings") {
           window.setTimeout(() => poll(status), 1500);
         } else {
           const pause = status.querySelector(".pause-training");
@@ -54,20 +99,26 @@
       }
     };
     statuses.forEach((status) => {
-      if (status.dataset.state === "running") poll(status);
+      if (["running", "awaiting_decision", "retrying", "completed_with_warnings"].includes(status.dataset.state)) poll(status);
     });
-    document.querySelectorAll(".pause-training").forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!window.confirm("Bu eğitim duraklatılsın mı? Tamamlanan günler korunur.")) return;
-        await fetch("/train/pause/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
-        window.location.reload();
-      });
-    });
-    document.querySelectorAll(".resume-training").forEach((button) => {
-      button.addEventListener("click", async () => {
-        await fetch("/train/resume/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
-        window.location.reload();
-      });
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-training-action]");
+      if (!button) return;
+      const action = button.dataset.trainingAction;
+      const jobId = encodeURIComponent(button.dataset.jobId);
+      if (action === "pause" && !window.confirm("Bu eğitim duraklatılsın mı? Tamamlanan günler korunur.")) return;
+      if (action === "retry-skipped" && !window.confirm("Atlanan kosu ve hipodromlar tekrar denensin mi?")) return;
+      if (action === "cancel" && !window.confirm("Bu eğitim durdurulup iptal edilsin mi? Checkpoint korunur ancak bu job devam ettirilmez.")) return;
+      const endpoints = {
+        pause: "/train/pause/",
+        cancel: "/train/cancel/",
+        resume: "/train/resume/",
+        "accept-partial": "/train/accept-partial/",
+        "retry-skipped": "/train/retry-skipped/",
+      };
+      button.disabled = true;
+      await fetch(endpoints[action] + jobId, { method: "POST" });
+      window.location.reload();
     });
   })();
 </script>
@@ -169,7 +220,9 @@
   <thead>
     <tr>
       <th>Model</th><th>Eğitim tarihi</th><th>Veri aralığı</th><th>Durum</th>
-      <th>Önceki model</th><th>Eklenen feature</th><th>Çıkan feature</th><th>Kalibrasyon değişti</th>
+      <th>Eğitim satırı</th><th>Feature</th><th>Holdout</th><th>Kalibrasyon</th><th>Blend</th>
+      <th>Test log loss</th><th>Test Top-1</th><th>Önceki model</th>
+      <th>Eklenen feature</th><th>Çıkan feature</th><th>Kalibrasyon değişti</th>
     </tr>
   </thead>
   <tbody>
@@ -179,6 +232,21 @@
       <td>{{ run.trained_at }}</td>
       <td>{{ run.train_start_date or '-' }} - {{ run.train_end_date or '-' }}</td>
       <td>{{ run.status }}</td>
+      <td>{{ run.metrics.get('training_rows', '-') }}</td>
+      <td>{{ run.metrics.get('feature_count', '-') }}</td>
+      <td>{{ run.holdout_days or '-' }}</td>
+      <td>{{ run.calibration_method or '-' }}</td>
+      <td>{{ '%.3f'|format(run.blend_weight) if run.blend_weight is not none else '-' }}</td>
+      <td>
+        {% if run.model_health and run.model_health.metrics and run.model_health.metrics.test %}
+          {{ '%.4f'|format(run.model_health.metrics.test.log_loss) }}
+        {% else %}-{% endif %}
+      </td>
+      <td>
+        {% if run.model_health and run.model_health.metrics and run.model_health.metrics.test %}
+          {{ '%.4f'|format(run.model_health.metrics.test.top1) }}
+        {% else %}-{% endif %}
+      </td>
       <td>{{ run.changes_from_previous.previous_model_version or '-' }}</td>
       <td>{{ run.changes_from_previous.added_features | join(', ') or '-' }}</td>
       <td>{{ run.changes_from_previous.removed_features | join(', ') or '-' }}</td>
