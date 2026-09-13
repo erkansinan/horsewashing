@@ -15,6 +15,26 @@ LEAKAGE_COLUMNS = {
     "latent_true_win_probability",
 }
 
+# These are numeric values available from TJK race declarations, horse history
+# and workout pages. Text-only identifiers (horse, jockey, trainer, equipment,
+# class and location names) remain metadata rather than arbitrary numeric codes.
+TJK_FEATURE_COLUMNS = [
+    "draw", "weight", "distance", "field_size", "age", "handicap_points", "odds",
+    "market_probability_norm", "implied_probability",
+    "career_starts", "career_wins", "career_places",
+    "last_year_starts", "last_year_wins", "last_year_places",
+    "jockey_horse_combo_starts", "jockey_horse_combo_wins",
+    "form_avg_3", "form_avg_5", "form_avg_10", "form_var_5", "last_run_perf",
+    "trend_3_10", "days_since_last_race", "fatigue_score", "recovery_score",
+    "short_rest_flag", "long_layoff_flag", "race_frequency_3", "race_frequency_5",
+    "seasonal_race_load", "distance_fit", "surface_fit", "track_fit",
+    "history_avg_finish_position", "history_avg_field_size", "history_avg_weight",
+    "history_avg_odds", "history_avg_handicap_points", "history_avg_race_time_seconds",
+    "history_avg_prize", "history_avg_s20",
+    "workout_count", "workout_avg_time_seconds", "workout_best_time_seconds",
+    "workout_avg_distance", "days_since_last_workout",
+]
+
 
 @dataclass
 class FeatureBuildResult:
@@ -70,6 +90,48 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
     df = preprocess_dataset(frame)
     if as_of_date is not None:
         df = df[df["date"] <= as_of_date].copy()
+
+    # Real TJK ingestion already computes historical features while the race
+    # history is available. Those rows intentionally do not contain the raw
+    # finish_position column, so rebuilding history here would replace valid
+    # values with the no-history defaults.
+    precomputed_columns = {
+        "days_since_last_race",
+        "form_avg_3",
+        "form_avg_5",
+        "form_avg_10",
+        "track_fit",
+        "surface_fit",
+        "distance_fit",
+    }
+    if "finish_position" not in df.columns and precomputed_columns.issubset(df.columns):
+        feat_df = df.copy()
+        grp_sum = feat_df.groupby("race_id")["market_probability"].transform("sum").replace(0.0, 1.0)
+        feat_df["market_probability_norm"] = feat_df["market_probability"] / grp_sum
+        race_mean_form = feat_df.groupby("race_id")["form_avg_5"].transform("mean")
+        race_sum_form = feat_df.groupby("race_id")["form_avg_5"].transform("sum")
+        race_count = feat_df.groupby("race_id")["horse_id"].transform("count").replace(0, 1)
+        feat_df["field_strength_index"] = race_mean_form
+        feat_df["opponent_strength_mean"] = (
+            (race_sum_form - feat_df["form_avg_5"]) / (race_count - 1).clip(lower=1)
+        ).fillna(race_mean_form)
+        feat_df["expected_early_pace"] = feat_df.groupby("race_id")["pace_hint"].transform("mean")
+        feat_df["pace_pressure"] = feat_df.groupby("race_id")["style_front_prob"].transform("mean") + (
+            0.7 * feat_df.groupby("race_id")["style_presser_prob"].transform("mean")
+        )
+        feat_df["pace_pressure"] = feat_df["pace_pressure"].clip(lower=0.0, upper=1.0)
+        feat_df["pace_suitability"] = (
+            feat_df["style_closer_prob"] * feat_df["pace_pressure"]
+            + feat_df["style_front_prob"] * (1.0 - feat_df["pace_pressure"])
+        )
+        feature_columns = TJK_FEATURE_COLUMNS.copy()
+        for column in feature_columns:
+            if column not in feat_df:
+                feat_df[column] = 0.0
+        feat_df[feature_columns] = feat_df[feature_columns].replace(
+            [np.inf, -np.inf], np.nan
+        ).fillna(0.0)
+        return FeatureBuildResult(frame=feat_df, feature_columns=feature_columns)
 
     histories: dict[str, list[dict[str, object]]] = defaultdict(list)
     feature_rows: list[dict[str, float | int | str | date | pd.Timestamp]] = []
@@ -167,6 +229,8 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "weight": float(row.weight) if pd.notnull(row.weight) else 56.0,
                 "distance": float(row.distance) if pd.notnull(row.distance) else 1400.0,
                 "field_size": float(row.field_size) if pd.notnull(row.field_size) else 10.0,
+                "age": float(getattr(row, "age", 0.0) or 0.0),
+                "handicap_points": float(getattr(row, "handicap_points", 0.0) or 0.0),
                 "form_avg_3": form_avg_3,
                 "form_avg_5": form_avg_5,
                 "form_avg_10": form_avg_10,
@@ -189,7 +253,6 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "distance_fit": distance_fit,
                 "surface_fit": surface_fit,
                 "track_fit": track_fit,
-                "condition_fit": condition_fit,
                 "market_probability": mprob,
                 "implied_probability": implied_prob,
                 "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
@@ -237,42 +300,10 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
         + feat_df["style_front_prob"] * (1.0 - feat_df["pace_pressure"])
     )
 
-    feature_columns = [
-        "draw",
-        "weight",
-        "distance",
-        "field_size",
-        "form_avg_3",
-        "form_avg_5",
-        "form_avg_10",
-        "form_var_5",
-        "last_run_perf",
-        "trend_3_10",
-        "days_since_last_race",
-        "fatigue_score",
-        "recovery_score",
-        "short_rest_flag",
-        "long_layoff_flag",
-        "race_frequency_3",
-        "race_frequency_5",
-        "seasonal_race_load",
-        "pace_hint",
-        "style_front_prob",
-        "style_presser_prob",
-        "style_stalker_prob",
-        "style_closer_prob",
-        "expected_early_pace",
-        "pace_pressure",
-        "pace_suitability",
-        "distance_fit",
-        "surface_fit",
-        "track_fit",
-        "condition_fit",
-        "field_strength_index",
-        "opponent_strength_mean",
-        "market_probability_norm",
-        "implied_probability",
-    ]
+    feature_columns = TJK_FEATURE_COLUMNS.copy()
+    for column in feature_columns:
+        if column not in feat_df:
+            feat_df[column] = 0.0
 
     feat_df[feature_columns] = feat_df[feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return FeatureBuildResult(frame=feat_df, feature_columns=feature_columns)

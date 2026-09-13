@@ -16,7 +16,13 @@ from atyaris.config import Settings
 from atyaris.ml.backtest import WalkForwardResult, walk_forward_backtest
 from atyaris.ml.calibration import apply_calibrator, fit_calibrator, from_payload, to_payload
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
-from atyaris.ml.features import FeatureBuildResult, assert_no_leakage_columns, build_leakage_safe_features, preprocess_dataset
+from atyaris.ml.features import (
+    TJK_FEATURE_COLUMNS,
+    FeatureBuildResult,
+    assert_no_leakage_columns,
+    build_leakage_safe_features,
+    preprocess_dataset,
+)
 from atyaris.ml.harville import add_harville_columns
 from atyaris.ml.market_blend import (
     BenterTwoStageArtifact,
@@ -279,30 +285,10 @@ def prepare_prediction_features(
 
 
 def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
-    drop_cols = {
-        "race_id",
-        "date",
-        "race_datetime",
-        "horse_id",
-        "is_winner",
-        "odds",
-        "raw_probability",
-        "calibrated_probability",
-        "place2_probability",
-        "place3_probability",
-        "top3_probability",
-        "rank",
-        "bet_decision",
-        "edge",
-        "ev",
-        "kelly_fraction",
-        "confidence",
-        # Market information is blended explicitly at 25% after the form model.
-        "market_probability",
-        "implied_probability",
-        "market_probability_norm",
-    }
-    return [c for c in frame.columns if c not in drop_cols]
+    missing = [column for column in TJK_FEATURE_COLUMNS if column not in frame.columns]
+    if missing:
+        raise ValueError(f"TJK feature verisinde eksik kolonlar var: {missing}")
+    return TJK_FEATURE_COLUMNS.copy()
 
 
 def train_phase1_model(

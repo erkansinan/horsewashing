@@ -1,11 +1,11 @@
 [
   {
-    "job_id": "409e497beefc46d38ebb0aef53e993b1",
-    "status": "paused",
-    "message": "Egitim duraklatildi; checkpoint korundu",
+    "job_id": "81c392638b904ac0b4261b8e0dcde38c",
+    "status": "running",
+    "message": "Egitim siraya alindi",
     "retry_targets": [],
     "can_accept_partial": false,
-    "start_date": "2026-08-14",
-    "end_date": "2026-09-11"
+    "start_date": "2026-06-13",
+    "end_date": "2026-09-12"
   }
 ]

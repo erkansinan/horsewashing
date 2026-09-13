@@ -207,7 +207,7 @@ def ingest_real_tjk_data(
                         continue
 
                     try:
-                        stats = source.get_horse_statistics(entry, include_workouts=False)
+                        stats = source.get_horse_statistics(entry, include_workouts=True)
                     except DataSourceError as exc:
                         # TJK may omit an individual horse history while still
                         # exposing the race and its official result. Keep the
@@ -234,6 +234,47 @@ def ingest_real_tjk_data(
                         if p.race_date < current
                     ]
                     history.sort(key=lambda p: p.race_date)
+
+                    def _mean(values: list[float]) -> float:
+                        return float(sum(values) / len(values)) if values else 0.0
+
+                    history_finish = [float(p.finish_position) for p in history if p.finish_position is not None]
+                    history_field_sizes = [float(p.field_size) for p in history if p.field_size is not None]
+                    history_weights = [float(p.weight_kg) for p in history if p.weight_kg is not None]
+                    history_odds = [float(p.odds) for p in history if p.odds is not None]
+                    history_handicap = [
+                        float(p.handicap_points) for p in history if p.handicap_points is not None
+                    ]
+                    history_times = [
+                        float(p.race_time_seconds) for p in history if p.race_time_seconds is not None
+                    ]
+                    history_prizes = [
+                        float(value)
+                        for p in history
+                        for value in [pd.to_numeric(p.prize_info, errors="coerce")]
+                        if pd.notna(value)
+                    ]
+                    history_s20 = [
+                        float(value)
+                        for p in history
+                        for value in [pd.to_numeric(p.s20, errors="coerce")]
+                        if pd.notna(value)
+                    ]
+                    workout_times = [
+                        float(workout.time_seconds)
+                        for workout in stats.workout_records
+                        if workout.time_seconds is not None
+                    ]
+                    workout_distances = [
+                        float(workout.distance_m)
+                        for workout in stats.workout_records
+                        if workout.distance_m is not None
+                    ]
+                    workout_dates = [
+                        workout.workout_date
+                        for workout in stats.workout_records
+                        if workout.workout_date is not None and workout.workout_date < current
+                    ]
 
                     perf_hist = [
                         1.0 - ((float(p.finish_position) - 1.0) / max(float(p.field_size or field_size) - 1.0, 1.0))
@@ -364,6 +405,8 @@ def ingest_real_tjk_data(
                             "weight": float(entry.weight_kg),
                             "distance": float(race.distance_m),
                             "field_size": float(field_size),
+                            "age": float(entry.age) if entry.age is not None else 0.0,
+                            "handicap_points": float(entry.handicap_points) if entry.handicap_points is not None else 0.0,
                             "form_avg_3": float(sum(recent_3) / len(recent_3)) if recent_3 else 0.45,
                             "form_avg_5": float(sum(recent_5) / len(recent_5)) if recent_5 else 0.45,
                             "form_avg_10": float(sum(recent_10) / len(recent_10)) if recent_10 else 0.45,
@@ -391,7 +434,28 @@ def ingest_real_tjk_data(
                             "distance_fit": distance_fit,
                             "surface_fit": surface_fit,
                             "track_fit": track_fit,
-                            "condition_fit": condition_fit,
+                            "career_starts": float(stats.career_starts),
+                            "career_wins": float(stats.career_wins),
+                            "career_places": float(stats.career_places),
+                            "last_year_starts": float(stats.last_year_starts),
+                            "last_year_wins": float(stats.last_year_wins),
+                            "last_year_places": float(stats.last_year_places),
+                            "jockey_horse_combo_starts": float(stats.jockey_horse_combo_starts),
+                            "jockey_horse_combo_wins": float(stats.jockey_horse_combo_wins),
+                            "history_avg_finish_position": _mean(history_finish),
+                            "history_avg_field_size": _mean(history_field_sizes),
+                            "history_avg_weight": _mean(history_weights),
+                            "history_avg_odds": _mean(history_odds),
+                            "history_avg_handicap_points": _mean(history_handicap),
+                            "history_avg_race_time_seconds": _mean(history_times),
+                            "history_avg_prize": _mean(history_prizes),
+                            "history_avg_s20": _mean(history_s20),
+                            "workout_count": float(len(stats.workout_records)),
+                            "workout_avg_time_seconds": _mean(workout_times),
+                            "workout_best_time_seconds": min(workout_times) if workout_times else 0.0,
+                            "workout_avg_distance": _mean(workout_distances),
+                            "days_since_last_workout": float((current - max(workout_dates)).days)
+                            if workout_dates else 0.0,
                             "market_probability": market_probability,
                             "implied_probability": implied_probability,
                             "odds": float(entry.odds) if entry.odds is not None else 0.0,

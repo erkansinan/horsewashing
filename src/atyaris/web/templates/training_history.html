@@ -150,7 +150,7 @@
     <tr><th>Eğitim veri aralığı</th><td>{{ latest.train_start_date or '-' }} - {{ latest.train_end_date or '-' }}</td></tr>
     <tr><th>Holdout günü</th><td>{{ latest.holdout_days }}</td></tr>
     <tr><th>Kalibrasyon</th><td>{{ latest.calibration_method }}</td></tr>
-    <tr><th>Feature sayısı</th><td>{{ latest.metrics.get('feature_count', '-') }}</td></tr>
+    <tr><th>TJK feature sayısı</th><td>{{ latest.metrics.get('feature_count', '-') }}</td></tr>
     <tr><th>Eğitim satırı</th><td>{{ latest.metrics.get('training_rows', '-') }}</td></tr>
   </table>
 </section>
@@ -220,7 +220,7 @@
   <thead>
     <tr>
       <th>Model</th><th>Eğitim tarihi</th><th>Veri aralığı</th><th>Durum</th>
-      <th>Eğitim satırı</th><th>Feature</th><th>Holdout</th><th>Kalibrasyon</th><th>Blend</th>
+      <th>Eğitim satırı</th><th>TJK feature</th><th>Holdout</th><th>Kalibrasyon</th><th>Blend</th>
       <th>Test log loss</th><th>Test Top-1</th><th>Önceki model</th>
       <th>Eklenen feature</th><th>Çıkan feature</th><th>Kalibrasyon değişti</th>
     </tr>

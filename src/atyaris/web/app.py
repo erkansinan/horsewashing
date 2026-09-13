@@ -38,6 +38,7 @@ from atyaris.ml.pipeline import (
     run_phase1_backtest,
     train_phase1_model,
 )
+from atyaris.ml.features import TJK_FEATURE_COLUMNS
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.phase5 import register_training_run
@@ -76,7 +77,7 @@ _ML_SORTABLE_FIELDS = {
     "edge": "Edge",
     "ev": "EV",
     "kelly_fraction": "Kelly",
-    "form_strength": "Form Gucu",
+    "form_strength": "TJK Veri Gucu",
 }
 
 _TRACK_DISPLAY_MAP = {
@@ -473,15 +474,18 @@ def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
         track_fit = _safe_float(row.get("track_fit"), 0.0)
         surface_fit = _safe_float(row.get("surface_fit"), 0.0)
         distance_fit = _safe_float(row.get("distance_fit"), 0.0)
-        pace_pressure = _safe_float(row.get("pace_pressure"), 0.0)
+        career_wins = _safe_float(row.get("career_wins"), 0.0)
+        career_starts = max(_safe_float(row.get("career_starts"), 0.0), 1.0)
+        workout_count = _safe_float(row.get("workout_count"), 0.0)
         return (
-            0.40 * form_5
-            + 0.25 * form_10
-            + 0.15 * form_3
-            + 0.10 * track_fit
-            + 0.06 * surface_fit
-            + 0.04 * distance_fit
-            + 0.02 * pace_pressure
+            0.32 * form_5
+            + 0.20 * form_10
+            + 0.12 * form_3
+            + 0.12 * track_fit
+            + 0.10 * surface_fit
+            + 0.08 * distance_fit
+            + 0.04 * (career_wins / career_starts)
+            + 0.02 * min(workout_count / 10.0, 1.0)
         )
     return _safe_float(row.get("calibrated_probability"), -1.0)
 
@@ -701,6 +705,8 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
                     "weight": rec.get("weight", "-"),
                     "distance": rec.get("distance", "-"),
                     "field_size": rec.get("field_size", "-"),
+                    "age": rec.get("age", "-"),
+                    "handicap_points": rec.get("handicap_points", "-"),
                     "form_avg_3": rec.get("form_avg_3", "-"),
                     "form_avg_5": rec.get("form_avg_5", "-"),
                     "form_avg_10": rec.get("form_avg_10", "-"),
@@ -708,7 +714,20 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
                     "track_fit": rec.get("track_fit", "-"),
                     "surface_fit": rec.get("surface_fit", "-"),
                     "distance_fit": rec.get("distance_fit", "-"),
-                    "pace_pressure": rec.get("pace_pressure", "-"),
+                    "career_starts": rec.get("career_starts", "-"),
+                    "career_wins": rec.get("career_wins", "-"),
+                    "career_places": rec.get("career_places", "-"),
+                    "last_year_starts": rec.get("last_year_starts", "-"),
+                    "last_year_wins": rec.get("last_year_wins", "-"),
+                    "last_year_places": rec.get("last_year_places", "-"),
+                    "jockey_horse_combo_wins": rec.get("jockey_horse_combo_wins", "-"),
+                    "history_avg_finish_position": rec.get("history_avg_finish_position", "-"),
+                    "history_avg_odds": rec.get("history_avg_odds", "-"),
+                    "history_avg_race_time_seconds": rec.get("history_avg_race_time_seconds", "-"),
+                    "workout_count": rec.get("workout_count", "-"),
+                    "workout_avg_time_seconds": rec.get("workout_avg_time_seconds", "-"),
+                    "workout_best_time_seconds": rec.get("workout_best_time_seconds", "-"),
+                    "days_since_last_workout": rec.get("days_since_last_workout", "-"),
                     "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
                     "edge": rec.get("edge", "-"),
                     "ev": rec.get("ev", "-"),
@@ -869,7 +888,9 @@ def _ml_model_loadable(paths) -> bool:  # type: ignore[no-untyped-def]
     if not paths.model_path.exists():
         return False
     try:
-        load_phase3_artifact(str(paths.model_path))
+        artifact = load_phase3_artifact(str(paths.model_path))
+        if artifact.feature_columns != TJK_FEATURE_COLUMNS:
+            return False
     except Exception:  # noqa: BLE001
         return False
     return True
@@ -1574,6 +1595,8 @@ def create_app() -> FastAPI:
                                 "weight": rec.get("weight", "-"),
                                 "distance": rec.get("distance", "-"),
                                 "field_size": rec.get("field_size", "-"),
+                                "age": rec.get("age", "-"),
+                                "handicap_points": rec.get("handicap_points", "-"),
                                 "form_avg_3": rec.get("form_avg_3", "-"),
                                 "form_avg_5": rec.get("form_avg_5", "-"),
                                 "form_avg_10": rec.get("form_avg_10", "-"),
@@ -1581,7 +1604,20 @@ def create_app() -> FastAPI:
                                 "track_fit": rec.get("track_fit", "-"),
                                 "surface_fit": rec.get("surface_fit", "-"),
                                 "distance_fit": rec.get("distance_fit", "-"),
-                                "pace_pressure": rec.get("pace_pressure", "-"),
+                                "career_starts": rec.get("career_starts", "-"),
+                                "career_wins": rec.get("career_wins", "-"),
+                                "career_places": rec.get("career_places", "-"),
+                                "last_year_starts": rec.get("last_year_starts", "-"),
+                                "last_year_wins": rec.get("last_year_wins", "-"),
+                                "last_year_places": rec.get("last_year_places", "-"),
+                                "jockey_horse_combo_wins": rec.get("jockey_horse_combo_wins", "-"),
+                                "history_avg_finish_position": rec.get("history_avg_finish_position", "-"),
+                                "history_avg_odds": rec.get("history_avg_odds", "-"),
+                                "history_avg_race_time_seconds": rec.get("history_avg_race_time_seconds", "-"),
+                                "workout_count": rec.get("workout_count", "-"),
+                                "workout_avg_time_seconds": rec.get("workout_avg_time_seconds", "-"),
+                                "workout_best_time_seconds": rec.get("workout_best_time_seconds", "-"),
+                                "days_since_last_workout": rec.get("days_since_last_workout", "-"),
                                 "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
                                 "edge": rec.get("edge", "-"),
                                 "ev": rec.get("ev", "-"),

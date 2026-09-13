@@ -97,3 +97,53 @@ def test_features_use_only_previous_races_for_same_day_target() -> None:
 
     assert first.form_avg_3 == 0.45
     assert second.form_avg_3 > first.form_avg_3
+
+
+def test_precomputed_real_features_are_not_replaced_by_no_history_defaults() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["R1", "R1"],
+            "date": [date(2025, 1, 1)] * 2,
+            "race_datetime": ["2025-01-01 12:00:00"] * 2,
+            "horse_id": ["H1", "H2"],
+            "draw": [1, 2],
+            "weight": [56.0, 57.0],
+            "distance": [1400, 1400],
+            "field_size": [2, 2],
+            "market_probability": [0.6, 0.4],
+            "implied_probability": [0.6, 0.4],
+            "form_avg_3": [0.8, 0.3],
+            "form_avg_5": [0.7, 0.2],
+            "form_avg_10": [0.6, 0.1],
+            "form_var_5": [0.02, 0.04],
+            "last_run_perf": [0.9, 0.1],
+            "trend_3_10": [0.1, 0.1],
+            "days_since_last_race": [8.0, 42.0],
+            "fatigue_score": [0.2, 0.8],
+            "recovery_score": [0.7, 0.5],
+            "short_rest_flag": [0.0, 0.0],
+            "long_layoff_flag": [0.0, 0.0],
+            "race_frequency_3": [0.2, 0.1],
+            "race_frequency_5": [0.3, 0.1],
+            "seasonal_race_load": [0.05, 0.02],
+            "pace_hint": [0.2, 0.0],
+            "style_front_prob": [0.5, 0.25],
+            "style_presser_prob": [0.25, 0.25],
+            "style_stalker_prob": [0.25, 0.25],
+            "style_closer_prob": [0.0, 0.25],
+            "distance_fit": [0.7, 0.4],
+            "surface_fit": [0.8, 0.45],
+            "track_fit": [0.6, 0.45],
+            "condition_fit": [0.5, 0.45],
+            "odds": [1.7, 2.5],
+            "track": ["ANKARA", "ANKARA"],
+            "surface": ["Kum", "Kum"],
+            "track_condition": ["NORMAL", "NORMAL"],
+        }
+    )
+
+    built = build_leakage_safe_features(frame)
+
+    assert built.frame.loc[0, "days_since_last_race"] == 8.0
+    assert built.frame.loc[0, "form_avg_3"] == 0.8
+    assert built.frame.loc[1, "surface_fit"] == 0.45

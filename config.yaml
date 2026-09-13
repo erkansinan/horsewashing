@@ -99,8 +99,8 @@ phase5_auto_promote_candidate: true
 #   weight: 0.3171
 #   rest: 0.0842
 weights:
-  form: 0.35
-  jockey_trainer: 0.15
-  distance_surface: 0.25
-  weight: 0.10
-  rest: 0.15
+  form: 0.30
+  jockey_trainer: 0.10
+  distance_surface: 0.05
+  weight: 0.25
+  rest: 0.30
