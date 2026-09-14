@@ -219,3 +219,26 @@ At No;At İsmi;Yaş
     results = TJKHtmlDataSource._parse_csv_results(csv_text)
 
     assert results == {1: {7: 1, 4: 2, 2: 3}, 2: {3: 1}}
+
+
+def test_parse_live_csv_results_maps_finish_order_by_program_name() -> None:
+    csv_text = """İstanbul;(66. Yarış Günü);13/09/2026
+1. Koşu : 14.00;Handikap
+At No;At İsmi;Yaş
+1;RICHWOOD;3y
+2;NAERYS SKG SK;3y
+3;JACKAL TROUBLE DB SK;3y
+"""
+
+    results = TJKHtmlDataSource._parse_csv_results(
+        csv_text,
+        horse_numbers_by_race_name={
+            1: {
+                "richwood": 7,
+                "naerys skg sk": 1,
+                "jackal trouble db sk": 10,
+            }
+        },
+    )
+
+    assert results == {1: {7: 1, 1: 2, 10: 3}}

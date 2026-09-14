@@ -18,9 +18,8 @@ LEAKAGE_COLUMNS = {
 # These are numeric values available from TJK race declarations, horse history
 # and workout pages. Text-only identifiers (horse, jockey, trainer, equipment,
 # class and location names) remain metadata rather than arbitrary numeric codes.
-TJK_FEATURE_COLUMNS = [
-    "draw", "weight", "distance", "field_size", "age", "handicap_points", "odds",
-    "market_probability_norm", "implied_probability",
+TJK_STAGE1_FEATURE_COLUMNS = [
+    "draw", "weight", "distance", "field_size", "age", "handicap_points",
     "career_starts", "career_wins", "career_places",
     "last_year_starts", "last_year_wins", "last_year_places",
     "jockey_horse_combo_starts", "jockey_horse_combo_wins",
@@ -33,7 +32,14 @@ TJK_FEATURE_COLUMNS = [
     "history_avg_prize", "history_avg_s20",
     "workout_count", "workout_avg_time_seconds", "workout_best_time_seconds",
     "workout_avg_distance", "days_since_last_workout",
+    "history_missing", "career_summary_missing", "workout_missing",
+    "age_missing", "handicap_missing", "odds_missing",
 ]
+
+# Backward-compatible public name; these are stage-1, non-market features.
+TJK_FEATURE_COLUMNS = TJK_STAGE1_FEATURE_COLUMNS
+
+STAGE2_MARKET_COLUMNS = ["odds", "market_probability_norm", "implied_probability"]
 
 
 @dataclass
@@ -124,7 +130,7 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
             feat_df["style_closer_prob"] * feat_df["pace_pressure"]
             + feat_df["style_front_prob"] * (1.0 - feat_df["pace_pressure"])
         )
-        feature_columns = TJK_FEATURE_COLUMNS.copy()
+        feature_columns = TJK_STAGE1_FEATURE_COLUMNS.copy()
         for column in feature_columns:
             if column not in feat_df:
                 feat_df[column] = 0.0
@@ -231,6 +237,12 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "field_size": float(row.field_size) if pd.notnull(row.field_size) else 10.0,
                 "age": float(getattr(row, "age", 0.0) or 0.0),
                 "handicap_points": float(getattr(row, "handicap_points", 0.0) or 0.0),
+                "history_missing": float(getattr(row, "history_missing", 0.0) or 0.0),
+                "career_summary_missing": float(getattr(row, "career_summary_missing", 0.0) or 0.0),
+                "workout_missing": float(getattr(row, "workout_missing", 0.0) or 0.0),
+                "age_missing": float(getattr(row, "age_missing", 0.0) or 0.0),
+                "handicap_missing": float(getattr(row, "handicap_missing", 0.0) or 0.0),
+                "odds_missing": float(getattr(row, "odds_missing", 0.0) or 0.0),
                 "form_avg_3": form_avg_3,
                 "form_avg_5": form_avg_5,
                 "form_avg_10": form_avg_10,
@@ -300,7 +312,7 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
         + feat_df["style_front_prob"] * (1.0 - feat_df["pace_pressure"])
     )
 
-    feature_columns = TJK_FEATURE_COLUMNS.copy()
+    feature_columns = TJK_STAGE1_FEATURE_COLUMNS.copy()
     for column in feature_columns:
         if column not in feat_df:
             feat_df[column] = 0.0

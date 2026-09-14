@@ -20,9 +20,10 @@ class BenterTwoStageArtifact:
     stage1_model: ConditionalLogitModel
     stage2_model: ConditionalLogitModel
     feature_columns: list[str]
-    logistic_weight_hint: float = 0.0
+    # Kept for loading older artifacts; prediction no longer uses fixed weights.
     form_weight: float = 0.75
     market_weight: float = 0.25
+    logistic_weight_hint: float = 0.0
 
     @property
     def logistic_weight(self) -> float:
@@ -103,11 +104,18 @@ def predict_two_stage_probability(artifact: BenterTwoStageArtifact, frame: pd.Da
     if frame.empty:
         return np.array([], dtype=float)
 
-    return blend_form_market_probability(
-        artifact,
-        frame,
-        predict_form_probability(artifact, frame),
-    )
+    stage1_probability = predict_form_probability(artifact, frame)
+    stage2_frame = _build_stage2_frame(stage1_probability, frame)
+    return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
+
+
+def _build_stage2_frame(stage1_probability: np.ndarray, frame: pd.DataFrame) -> pd.DataFrame:
+    market_probability = _normalized_market_probability(frame)
+    stage2_frame = frame.copy()
+    stage2_frame["stage1_logit"] = _safe_logit(stage1_probability)
+    stage2_frame["market_logit"] = _safe_logit(market_probability)
+    stage2_frame["interaction"] = stage2_frame["stage1_logit"] * stage2_frame["market_logit"]
+    return stage2_frame
 
 
 def blend_form_market_probability(
@@ -118,15 +126,8 @@ def blend_form_market_probability(
     if frame.empty:
         return np.array([], dtype=float)
 
-    market_prob = _normalized_market_probability(frame)
-
-    form_weight = float(getattr(artifact, "form_weight", 0.75))
-    market_weight = float(getattr(artifact, "market_weight", 0.25))
-    total_weight = form_weight + market_weight
-    if total_weight <= 0.0:
-        form_weight, market_weight, total_weight = 0.75, 0.25, 1.0
-
-    return (form_weight * form_probability + market_weight * market_prob) / total_weight
+    stage2_frame = _build_stage2_frame(form_probability, frame)
+    return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
 
 
 def predict_form_probability(artifact: BenterTwoStageArtifact, frame: pd.DataFrame) -> np.ndarray:

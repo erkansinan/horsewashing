@@ -359,9 +359,10 @@ Geriye uyumluluk notu:
 ### TJK Kaynakli Feature'larin Anlami
 
 Model artik sabit bir 32 feature listesini degil, TJK scraper'inin program,
-gecmis kosu, kariyer ozeti, ganyan ve idman sayfalarindan elde ettigi sayisal
-alanlari kullanir. Guncel liste `src/atyaris/ml/features.py` icindeki
-`TJK_FEATURE_COLUMNS` sabitidir. Mevcut kosunun `finish_position`/`is_winner`
+gecmis kosu, kariyer ozeti ve idman sayfalarindan elde ettigi sayisal alanlari
+kullanir. Stage-1 listesinin guncel adi `src/atyaris/ml/features.py` icindeki
+`TJK_STAGE1_FEATURE_COLUMNS` sabitidir; `TJK_FEATURE_COLUMNS` geriye uyumluluk
+takma adidir. Mevcut kosunun `finish_position`/`is_winner`
 sonucu feature hesaplanirken kullanilmaz; gecmis form ve ozetler yalnizca
 TJK'nin onceki kosularindan hesaplanir.
 
@@ -414,8 +415,8 @@ kullanilir.
 | `surface_fit` | Ayni pist turundeki, ornegin kum veya cim, performans uyumu. |
 | `track_fit` | Ayni hipodromdaki gecmis performans uyumu. |
 
-| `career_starts`, `career_wins`, `career_places` | TJK at ozeti kariyer toplamlaridir. |
-| `last_year_starts`, `last_year_wins`, `last_year_places` | TJK at ozetindeki en son yil toplamlaridir. |
+| `career_starts`, `career_wins`, `career_places` | Hedef yaris tarihinden onceki TJK gecmis kosularindan yeniden hesaplanan kariyer toplamlaridir. |
+| `last_year_starts`, `last_year_wins`, `last_year_places` | Hedef tarihten onceki son 365 gunden yeniden hesaplanan toplamlaridir. |
 | `jockey_horse_combo_starts`, `jockey_horse_combo_wins` | TJK gecmis kosularindan secili jokey-at kombinasyonu toplamlaridir. |
 | `history_avg_finish_position` | TJK gecmis kosularindaki ortalama bitis sirasidir. |
 | `history_avg_field_size` | Gecmis kosulardaki ortalama at sayisidir. |
@@ -433,7 +434,7 @@ kullanilir.
 | `workout_avg_time_seconds` | Parse edilen idman derecelerinin ortalamasidir. |
 | `workout_best_time_seconds` | Parse edilen idman derecelerinin en iyisidir. |
 | `workout_avg_distance` | Parse edilen idman mesafelerinin ortalamasidir. |
-| `days_since_last_workout` | Son TJK idmanindan bu yana gecen gun sayisidir. |
+| `days_since_last_workout` | Hedef tarihten onceki son TJK idmanindan bu yana gecen gun sayisidir. |
 
 ##### Eksik gecmis verinin yorumu
 
@@ -448,8 +449,20 @@ degerler tekrar hesaplanip varsayilanlarla ezilmez. Ancak at gecmisi TJK'den
 alinamadiysa varsayilanlar kullanilir. Bu nedenle bir feature'in sayisal
 olmasi, her satirda gercek gecmis verisi bulundugu anlamina gelmez.
 
-`odds`, `market_probability_norm` ve `implied_probability` de feature setine
-dahildir; bunlar TJK programindaki ganyandan uretilen piyasa feature'laridir.
+`odds`, `market_probability_norm` ve `implied_probability` stage-1 feature setine
+dahil degildir. Bunlar yalnizca stage-2 piyasa sinyalinde ve EV/Kelly hesabinda
+kullanilir. Stage-2, stage-1 logit sinyalini, normalize piyasa logitini ve
+etkilesimini kendi conditional-logit katsayilariyla ogrenir; sabit `%75/%25`
+blend kullanilmaz. Stage-2 ham cikisi uzerinde kalibrasyon fit edilir ve nihai
+`P(win)` yaris icinde yeniden normalize edilir.
+
+`history_missing`, `career_summary_missing`, `workout_missing`,
+`age_missing`, `handicap_missing` ve `odds_missing` alanlari, sifir/default
+deger ile gercekten sifir olan degeri ayirt etmek icin acik eksik-veri
+sinyalleridir. Stage-1 kaybi, ikili siniflandirma BCE yerine her yaris icin
+kazananin olasiliginin negatif logaritmasinin ortalamasi olan conditional
+negative log-likelihood olarak hesaplanir.
+
 TJK'nin yalnizca metin olarak verdigi at, jokey, antrenor, pist, hipodrom,
 ekipman ve sinif adlari rastgele sayisal kodlara cevrilmez. Bu alanlar ham
 metadata olarak korunur; aksi halde model kategoriler arasinda anlamsiz bir

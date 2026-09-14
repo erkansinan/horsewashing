@@ -1,3 +1,178 @@
+# Türkiye At Yarışı Tahmin Yazılımı
+
+## Güncel Proje Sözleşmesi
+
+Bu proje, TJK'nin günlük yarış programı, geçmiş koşu kayıtları ve idman
+verilerinden yararlanarak yarış içi göreli olasılıklar üreten bir analiz
+uygulamasıdır. Çıktılar kesin sonuç veya kazanç garantisi değildir; gerçek para
+bahsi otomatik olarak oynanmaz.
+
+Güncel teknoloji ve çalışma ortamı:
+
+- Python 3.9+; proje yerel `.venv` ile çalıştırılır.
+- FastAPI + Jinja2 web arayüzü ve Typer CLI.
+- `httpx`, BeautifulSoup/lxml, pandas, NumPy, scikit-learn ve joblib.
+- SQLite TTL cache, rate limiting ve yapılandırılmış logging.
+- Veri kaynağı `RaceDataSource` sözleşmesi üzerinden adapter olarak izole edilir.
+
+## 1. TJK Veri Kaynağı
+
+### Kaynaklar
+
+- [x] TJK resmi HTML sayfaları üzerinden günlük programı çek.
+- [x] Günlük sonuçları ve tarih bazlı geçmiş koşuları çek.
+- [x] At koşu/geçmiş bilgilerini at bazlı sayfalardan al.
+- [x] Kariyer, son yıl, jokey-at kombinasyonu ve idman verilerini topla.
+- [ ] TJK'nin resmi olmayan REST API'si bulunmadığı varsayımını düzenli aralıklarla yeniden doğrula.
+- [ ] `github.com/SezerFidanci/TJK-API` endpoint desenlerini yeniden kontrol et.
+- [ ] `github.com/fatihbozdag/Ganyan` projesini yalnızca mimari referans olarak incele; kod veya veri kopyalama.
+
+### Veri erişim kuralları
+
+- [x] `RaceDataSource` Protocol/adapter katmanı kullan.
+- [x] User-Agent gönder.
+- [x] İstekleri rate-limit et; gereksiz paralel isteklerden kaçın.
+- [x] SQLite TTL cache kullan.
+- [x] Canlı TJK erişimi başarısız olduğunda açık hata veya kontrollü fallback göster.
+- [x] Eksik günlük programı sessizce başarılı sayma; tarih ve hipodrom bilgisini hata mesajına dahil et.
+
+### Günlük program çıktısı
+
+- [x] Seçilen tarih ve hipodromlara göre yarışları listele.
+- [x] Hipodrom, koşu numarası, saat, mesafe, pist, grup/ikramiye ve atları göster.
+- [x] Şehir/hipodrom filtresi ve yarış seçimi sağla.
+- [x] At adı, jokey, antrenör, kilo, kulvar, sınıf ve ekipman gibi metin metadata'sını koru.
+- [x] Metin alanlarını keyfi sayısal kodlara dönüştürme.
+
+## 2. Zaman Güvenli TJK Özellikleri
+
+Güncel stage-1 feature sözleşmesi `src/atyaris/ml/features.py` içindeki
+`TJK_STAGE1_FEATURE_COLUMNS` sabitidir. `TJK_FEATURE_COLUMNS`, geriye dönük
+uyumluluk için aynı listenin takma adıdır.
+
+### Stage-1: temel model feature'ları
+
+- [x] Program feature'ları: `draw`, `weight`, `distance`, `field_size`, `age`, `handicap_points`.
+- [x] Kariyer ve son 365 gün toplamları.
+- [x] Jokey-at kombinasyonu toplamları.
+- [x] Son 3/5/10 koşu formu, varyans, son performans ve trend.
+- [x] Son koşudan geçen süre, dinlenme/yorgunluk ve yarış sıklığı.
+- [x] Mesafe, pist ve hipodrom uyumu.
+- [x] Geçmiş koşu bitiş, alan büyüklüğü, kilo, ganyan, HP, derece, ikramiye ve S20 özetleri.
+- [x] İdman sayısı, ortalama/en iyi derece, mesafe ve son idmandan geçen süre.
+- [x] `history_missing`, `career_summary_missing`, `workout_missing`, `age_missing`, `handicap_missing`, `odds_missing` sinyalleri.
+- [x] Kullanılmayan veya eksik geçmiş için default değerleri açık missing flag ile ayır.
+
+### Stage-1'den çıkarılan piyasa alanları
+
+- [x] `odds` stage-1 feature listesinde bulunmaz.
+- [x] `market_probability_norm` stage-1 feature listesinde bulunmaz.
+- [x] `implied_probability` stage-1 feature listesinde bulunmaz.
+- [x] Bu alanları yalnızca stage-2 piyasa modeli ve EV/Kelly katmanı kullanır.
+
+### Zaman sızıntısı kuralları
+
+- [x] Hedef yarışın `finish_position`/`is_winner` sonucu feature üretiminde kullanılmaz.
+- [x] Geçmiş koşu satırları yalnızca `race_date < target_race_date` koşuluyla kullanılır.
+- [x] Kariyer ve son 365 gün özetlerini TJK'nin güncel aggregate değerlerinden doğrudan alma; filtrelenmiş geçmişten yeniden hesapla.
+- [x] İdman kayıtlarını `workout_date < target_race_date` koşuluyla filtrele.
+- [x] Gelecek tarihli veya hedef yarış sonrası kayıtları walk-forward eğitiminden çıkar.
+
+## 3. Benter ML Mimarisi
+
+### Stage-1 temel model
+
+- [x] Yarış içi softmax kullanan conditional logit modeli uygula.
+- [x] L1/L2 regularization ve standardizasyon desteği sağla.
+- [x] Bağımsız ikili sınıflandırma yerine aynı yarıştaki atların göreli olasılıklarını üret.
+- [x] Stage-1 eğitiminde piyasa/ganyan feature'larını kullanma.
+
+### Stage-2 piyasa birleştirme
+
+- [x] Stage-1 olasılığını logit sinyaline dönüştür.
+- [x] Yarış içinde normalize edilmiş piyasa olasılığını logit sinyaline dönüştür.
+- [x] Stage-1 logit, piyasa logit ve etkileşim terimini ikinci conditional logit modeline ver.
+- [x] Tahmin sırasında gerçekten stage-2 modelini çağır; sabit `%75/%25` blend kullanma.
+- [x] Eski artifact ağırlık alanlarını yalnızca serialization uyumluluğu için koru; karar hesabında kullanma.
+
+### Loss, calibration ve olasılık çıktısı
+
+- [x] Eğitim/validation loss olarak yarış bazlı conditional negative log-likelihood kullan.
+- [x] Kazananı olmayan bozuk yarış gruplarını güvenli biçimde ele al.
+- [x] Kalibratörü stage-1 yerine final stage-2 ham olasılıkları üzerinde fit et.
+- [x] Tahminde final stage-2 olasılıklarını kalibre et.
+- [x] Kalibre edilmiş olasılıkları yarış içinde yeniden normalize et.
+- [x] Harville ile 2., 3. ve Top-3 olasılıklarını üret.
+
+### EV, Kelly ve raporlama
+
+- [x] `EV = calibrated_probability * odds - 1` hesabını kullan.
+- [x] Fractional Kelly ve üst bahis oranı sınırı uygula.
+- [x] Minimum edge, minimum EV ve minimum olasılık filtrelerini config'ten al.
+- [x] Model ve piyasa karşılaştırmasını raporla.
+- [x] Yarış içi olasılık toplamlarının 1 olmasını doğrula.
+
+## 4. Web ve CLI
+
+- [x] Ana web bağlantısının metnini `Ana sayfa` olarak göster; kök linki koru.
+- [x] Günlük yarış ve at bilgilerini web arayüzünde göster.
+- [x] ML tahmin üretme butonunu model, tarih, hipodrom ve prediction feature akışına bağla.
+- [x] Eğitim işlemini arka planda çalıştır; ilerleme, duraklatma, iptal ve retry durumlarını göster.
+- [x] Eğitim tamamlandığında artifact'in beklenen stage-1 feature listesiyle eşleştiğini kontrol et.
+- [x] Eski artifact'i sessizce kullanma; eksik/eski feature listesini açıkça raporla ve yeniden eğitim iste.
+- [x] Web tahmin hatalarını kullanıcıya anlaşılır Türkçe mesajla göster.
+- [x] Çıktıda sıralama, güven, `P(win)`, `P(2.)`, `P(3.)`, `P(Top3)`, edge, EV, Kelly ve karar alanlarını göster.
+- [x] Sonuçların kesinlik taşımadığını ve sorumlu bahis uyarısını göster.
+
+## 5. Doğrulama ve Test
+
+- [x] Scraper HTML parser testleri mock fixture'larla çalışır.
+- [x] Cache, HTTP client, modeller, scoring ve web testleri bulunur.
+- [x] Feature testleri yeni TJK stage-1 listesini ve missing flag'leri doğrular.
+- [x] Stage-1 feature listesinde piyasa kolonlarının bulunmadığını test et.
+- [x] Stage-2 tahmininin sabit blend yerine stage-2 model çıktısını kullandığını test et.
+- [x] Conditional NLL'yi elle hesaplanan yarış örneğiyle test et.
+- [x] Hedef tarih filtrelemesi ve gelecek idman/kariyer verisi sızıntısını test et.
+- [x] Final stage-2 calibration sırasını test et.
+- [x] Artifact kaydetme/yükleme ve eski artifact hata mesajını test et.
+- [x] Walk-forward backtest çalıştır.
+- [x] Log-loss, Brier, ECE/calibration, Top-1, ROI, correct-bet ratio ve model-piyasa farkını ölç.
+- [x] Model-piyasa ROI farkı için bootstrap güven aralığı raporla.
+- [ ] Canlı TJK erişimine bağlı olmayan tam regresyon testinin tüm 96 testte tamamlandığını ayrıca kaydet.
+- [ ] Büyük gerçek TJK veri setiyle uzun dönem performans ve kalibrasyon raporu üret.
+
+## 6. Teslim ve İşletim
+
+- [x] `README.md` kurulum, kullanım, TJK veri envanteri ve feature anlamlarını açıklar.
+- [x] `requirements.txt` ve `pyproject.toml` günceldir.
+- [x] CLI ile ingest, eğitim, tahmin, backtest, rapor ve ticket optimization komutları sağlanır.
+- [x] Model artifact'i `models/phase1_logreg.joblib` altında kaydedilir.
+- [x] Model sağlık raporu `.health.json` olarak üretilir.
+- [x] Eğitim ve tahmin yollarında atomik dosya yazımı kullanılır.
+- [x] TJK erişim hataları loglanır ve kontrollü fallback uygulanır.
+- [ ] TJK endpoint değişiklikleri için adapter parser sözleşmesi ve fixture güncelleme prosedürü ekle.
+- [ ] Üretim çalıştırma/runbook dokümanına model yeniden eğitim ve eski artifact yenileme adımlarını ekle.
+
+## 7. Güvenlik ve Kapsam Sınırları
+
+- [x] TJK'ya makul istek sıklığıyla eriş.
+- [x] Cache ve User-Agent kullan.
+- [x] Kullanım şartlarına uygun scraping uygula.
+- [x] Otomatik bahis oynama, hesap erişimi veya ödeme işlemi kapsam dışıdır.
+- [x] Uygulama tahmin aracıdır; kesin sonuç ve kazanç garantisi vermez.
+
+## İlgili Modüller
+
+- Veri: `src/atyaris/data_sources/`, `src/atyaris/cache/`
+- Feature üretimi: `src/atyaris/ml/features.py`, `src/atyaris/ml/real_ingestion.py`
+- Stage-1: `src/atyaris/ml/fundamental_model.py`
+- Stage-2: `src/atyaris/ml/market_blend.py`
+- Calibration: `src/atyaris/ml/calibration.py`
+- Harville: `src/atyaris/ml/harville.py`
+- EV/Kelly: `src/atyaris/ml/ev_kelly.py`
+- Pipeline: `src/atyaris/ml/pipeline.py`, `src/atyaris/ml/backtest.py`
+- Web: `src/atyaris/web/app.py`, `src/atyaris/web/templates/`
+- Testler: `tests/`
 # GÖREV: Türkiye At Yarışı Tahmin Yazılımı Geliştirme
 
 ## ROL

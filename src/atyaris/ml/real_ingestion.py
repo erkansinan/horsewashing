@@ -52,6 +52,7 @@ def ingest_real_tjk_data(
     progress_callback: Callable[[str], None] | None = None,
     require_results: bool = True,
     hippodrome: str | None = None,
+    race_no: int | None = None,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Build labelled training or unlabelled prediction rows from live TJK pages."""
     source = build_data_source("tjk", __import__("atyaris.config", fromlist=["get_settings"]).get_settings())
@@ -123,6 +124,10 @@ def ingest_real_tjk_data(
                 continue
             if not races:
                 continue
+            if race_no is not None:
+                races = [race for race in races if race.race_no == race_no]
+                if not races:
+                    continue
             if require_results:
                 try:
                     results = source.get_daily_race_results(current, hippodrome)
@@ -234,6 +239,14 @@ def ingest_real_tjk_data(
                         if p.race_date < current
                     ]
                     history.sort(key=lambda p: p.race_date)
+                    historical_workouts = [
+                        workout
+                        for workout in stats.workout_records
+                        if workout.workout_date is not None
+                        and workout.workout_date < current
+                        and workout.distance_m is not None
+                        and abs(float(workout.distance_m) - float(race.distance_m)) <= 200.0
+                    ]
 
                     def _mean(values: list[float]) -> float:
                         return float(sum(values) / len(values)) if values else 0.0
@@ -262,18 +275,24 @@ def ingest_real_tjk_data(
                     ]
                     workout_times = [
                         float(workout.time_seconds)
-                        for workout in stats.workout_records
+                        for workout in historical_workouts
                         if workout.time_seconds is not None
                     ]
                     workout_distances = [
                         float(workout.distance_m)
-                        for workout in stats.workout_records
+                        for workout in historical_workouts
                         if workout.distance_m is not None
                     ]
                     workout_dates = [
                         workout.workout_date
-                        for workout in stats.workout_records
-                        if workout.workout_date is not None and workout.workout_date < current
+                        for workout in historical_workouts
+                    ]
+                    career_wins = sum(1 for p in history if p.finish_position == 1)
+                    career_places = sum(
+                        1 for p in history if p.finish_position is not None and p.finish_position <= 3
+                    )
+                    last_year_history = [
+                        p for p in history if (current - p.race_date).days <= 365
                     ]
 
                     perf_hist = [
@@ -434,12 +453,18 @@ def ingest_real_tjk_data(
                             "distance_fit": distance_fit,
                             "surface_fit": surface_fit,
                             "track_fit": track_fit,
-                            "career_starts": float(stats.career_starts),
-                            "career_wins": float(stats.career_wins),
-                            "career_places": float(stats.career_places),
-                            "last_year_starts": float(stats.last_year_starts),
-                            "last_year_wins": float(stats.last_year_wins),
-                            "last_year_places": float(stats.last_year_places),
+                            "career_starts": float(len(history)),
+                            "career_wins": float(career_wins),
+                            "career_places": float(career_places),
+                            "last_year_starts": float(len(last_year_history)),
+                            "last_year_wins": float(sum(1 for p in last_year_history if p.finish_position == 1)),
+                            "last_year_places": float(
+                                sum(
+                                    1
+                                    for p in last_year_history
+                                    if p.finish_position is not None and p.finish_position <= 3
+                                )
+                            ),
                             "jockey_horse_combo_starts": float(stats.jockey_horse_combo_starts),
                             "jockey_horse_combo_wins": float(stats.jockey_horse_combo_wins),
                             "history_avg_finish_position": _mean(history_finish),
@@ -450,12 +475,18 @@ def ingest_real_tjk_data(
                             "history_avg_race_time_seconds": _mean(history_times),
                             "history_avg_prize": _mean(history_prizes),
                             "history_avg_s20": _mean(history_s20),
-                            "workout_count": float(len(stats.workout_records)),
+                            "workout_count": float(len(historical_workouts)),
                             "workout_avg_time_seconds": _mean(workout_times),
                             "workout_best_time_seconds": min(workout_times) if workout_times else 0.0,
                             "workout_avg_distance": _mean(workout_distances),
                             "days_since_last_workout": float((current - max(workout_dates)).days)
                             if workout_dates else 0.0,
+                            "history_missing": float(not history),
+                            "career_summary_missing": float(not history),
+                            "workout_missing": float(not historical_workouts),
+                            "age_missing": float(entry.age is None),
+                            "handicap_missing": float(entry.handicap_points is None),
+                            "odds_missing": float(entry.odds is None or entry.odds <= 1.0),
                             "market_probability": market_probability,
                             "implied_probability": implied_probability,
                             "odds": float(entry.odds) if entry.odds is not None else 0.0,

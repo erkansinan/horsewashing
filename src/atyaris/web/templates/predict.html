@@ -242,34 +242,6 @@
   {% endif %}
   {% endif %}
 
-  {% if ml_prediction.ticket_preview %}
-  <h3>Bu Kosuyu Iceren Ornek Kolonlar</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Strateji</th>
-        <th>Kombinasyon</th>
-        <th>Prob</th>
-        <th>EV</th>
-        <th>M.Carlo Hit</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for col in ml_prediction.ticket_preview[:8] %}
-      <tr>
-        <td>{{ col.column_id }}</td>
-        <td>{{ col.strategy }}</td>
-        <td>{{ col.combination }}</td>
-        <td>{{ "%.6f"|format(col.probability) }}</td>
-        <td>{{ "%.3f"|format(col.ev) }}</td>
-        <td>{{ "%.6f"|format(col.monte_carlo_hit_rate) }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
   <p class="disclaimer">{{ ml_prediction.disclaimer }}</p>
 
 {% elif prediction %}

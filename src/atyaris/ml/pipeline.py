@@ -14,10 +14,18 @@ import pandas as pd
 
 from atyaris.config import Settings
 from atyaris.ml.backtest import WalkForwardResult, walk_forward_backtest
-from atyaris.ml.calibration import apply_calibrator, fit_calibrator, from_payload, to_payload
+from atyaris.ml.calibration import (
+    apply_calibrator,
+    apply_probability_floor,
+    fit_calibrator,
+    recover_collapsed_calibration,
+    from_payload,
+    smooth_race_probabilities,
+    to_payload,
+)
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
-    TJK_FEATURE_COLUMNS,
+    TJK_STAGE1_FEATURE_COLUMNS,
     FeatureBuildResult,
     assert_no_leakage_columns,
     build_leakage_safe_features,
@@ -26,10 +34,10 @@ from atyaris.ml.features import (
 from atyaris.ml.harville import add_harville_columns
 from atyaris.ml.market_blend import (
     BenterTwoStageArtifact,
-    blend_form_market_probability,
     extract_market_reference_probability,
     fit_two_stage_benter,
     predict_form_probability,
+    predict_two_stage_probability,
 )
 from atyaris.ml.model_health import run_model_health_checks
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
@@ -266,6 +274,7 @@ def prepare_prediction_features(
     paths: Phase1Paths,
     progress_callback: Callable[[str], None] | None = None,
     hippodrome: str | None = None,
+    race_no: int | None = None,
 ) -> pd.DataFrame:
     """Create target-day features without adding unlabelled rows to training data."""
     ingestion_kwargs = {
@@ -274,8 +283,15 @@ def prepare_prediction_features(
     }
     if hippodrome:
         ingestion_kwargs["hippodrome"] = hippodrome
+    if race_no is not None:
+        ingestion_kwargs["race_no"] = race_no
     raw = ingest_real_tjk_data(target_date, target_date, paths, **ingestion_kwargs)
     historical = pd.read_csv(paths.clean_csv) if paths.clean_csv.exists() else pd.DataFrame()
+    if not historical.empty and "date" in historical.columns:
+        historical_dates = pd.to_datetime(historical["date"], errors="coerce").dt.date
+        # The target day is prediction-only. Even if results were later written
+        # to clean_races.csv, they must not become history for this prediction.
+        historical = historical[historical_dates < target_date].copy()
     combined = pd.concat([historical, raw], ignore_index=True, sort=False)
     built = build_leakage_safe_features(combined, as_of_date=target_date)
     prediction = built.frame[pd.to_datetime(built.frame["date"]).dt.date == target_date].copy()
@@ -285,10 +301,10 @@ def prepare_prediction_features(
 
 
 def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
-    missing = [column for column in TJK_FEATURE_COLUMNS if column not in frame.columns]
+    missing = [column for column in TJK_STAGE1_FEATURE_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"TJK feature verisinde eksik kolonlar var: {missing}")
-    return TJK_FEATURE_COLUMNS.copy()
+    return TJK_STAGE1_FEATURE_COLUMNS.copy()
 
 
 def train_phase1_model(
@@ -334,7 +350,7 @@ def train_phase1_model(
         checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",
     )
 
-    raw_cal = predict_form_probability(artifact, calibration_df)
+    raw_cal = predict_two_stage_probability(artifact, calibration_df)
     calibrator = fit_calibrator(
         y_true=calibration_df["is_winner"].to_numpy(),
         raw_prob=raw_cal,
@@ -370,10 +386,26 @@ def predict_for_date(
     ev_min_edge: float = 0.03,
     ev_min_value: float = 0.02,
 ) -> pd.DataFrame:
-    frames = [pd.read_csv(paths.features_csv)]
-    if paths.prediction_features_csv.exists():
-        frames.append(pd.read_csv(paths.prediction_features_csv))
-    frame = pd.concat(frames, ignore_index=True, sort=False)
+    training_frame = pd.read_csv(paths.features_csv)
+    prediction_frame = (
+        pd.read_csv(paths.prediction_features_csv)
+        if paths.prediction_features_csv.exists()
+        else pd.DataFrame()
+    )
+    training_frame["date"] = pd.to_datetime(training_frame["date"], errors="coerce").dt.date
+    prediction_frame["date"] = (
+        pd.to_datetime(prediction_frame["date"], errors="coerce").dt.date
+        if not prediction_frame.empty and "date" in prediction_frame.columns
+        else pd.Series(dtype="object")
+    )
+    target_prediction = prediction_frame[prediction_frame["date"] == target_date].copy()
+    if not target_prediction.empty:
+        # A dedicated prediction snapshot takes precedence over any labelled
+        # rows for the same day that may exist in the training feature file.
+        training_frame = training_frame[training_frame["date"] != target_date].copy()
+        frame = pd.concat([training_frame, target_prediction], ignore_index=True, sort=False)
+    else:
+        frame = pd.concat([training_frame, prediction_frame], ignore_index=True, sort=False)
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     day_df = frame[frame["date"] == target_date].copy()
 
@@ -405,23 +437,19 @@ def predict_for_date(
     calibrator = from_payload(calibrator_payload)
 
     out = day_df.copy()
-    form_probability = apply_calibrator(
-        calibrator,
-        predict_form_probability(artifact, out),
-    )
+    form_probability = predict_form_probability(artifact, out)
     market_probability = extract_market_reference_probability(out)
-    form_weight = float(getattr(artifact, "form_weight", 0.75))
-    market_weight = float(getattr(artifact, "market_weight", 0.25))
-    total_weight = form_weight + market_weight
-    if total_weight <= 0.0:
-        form_weight, market_weight, total_weight = 0.75, 0.25, 1.0
     out["form_probability"] = form_probability
-    out["raw_probability"] = blend_form_market_probability(
-        artifact,
-        out,
-        form_probability,
+    out["raw_probability"] = predict_two_stage_probability(artifact, out)
+    raw_probability = out["raw_probability"].to_numpy()
+    calibrated_probability = recover_collapsed_calibration(
+        apply_calibrator(calibrator, raw_probability),
+        raw_probability,
     )
-    out["calibrated_probability"] = out["raw_probability"]
+    out["calibrated_probability"] = smooth_race_probabilities(
+        calibrated_probability,
+        out.groupby("race_id")["race_id"].transform("size").to_numpy(),
+    )
 
     # Race-level normalization.
     denom = out.groupby("race_id")["calibrated_probability"].transform("sum").replace(0.0, 1.0)

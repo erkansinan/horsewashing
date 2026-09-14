@@ -38,7 +38,7 @@ from atyaris.ml.pipeline import (
     run_phase1_backtest,
     train_phase1_model,
 )
-from atyaris.ml.features import TJK_FEATURE_COLUMNS
+from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.phase5 import register_training_run
@@ -261,6 +261,8 @@ def _schedule_skipped_training_retry(job_id: str) -> None:
 class MLRaceSummary:
     race_id: str
     race_name: str
+    race_time: str
+    horse_names: str
     horse_count: int
     top_horse_name: str
     top_probability: float
@@ -379,7 +381,18 @@ def _derive_horse_stats_metrics(stats, race_distance: int | None = None, race_su
         pace_pressure = max(0.0, min(1.0, front_share + 0.7 * presser_share))
     else:
         workout_pace = []
-        for workout in sorted(stats.workout_records, key=lambda w: (w.workout_date or date.min), reverse=True)[:5]:
+        matching_workouts = [
+            workout
+            for workout in stats.workout_records
+            if race_distance is not None
+            and workout.distance_m is not None
+            and abs(float(workout.distance_m) - float(race_distance)) <= 200.0
+        ]
+        for workout in sorted(
+            matching_workouts,
+            key=lambda w: (w.workout_date or date.min),
+            reverse=True,
+        )[:5]:
             if workout.distance_m and workout.time_seconds and workout.distance_m > 0:
                 sec_per_100 = workout.time_seconds / max(workout.distance_m / 100.0, 1.0)
                 # ivme/tempo sinyali: daha hizli idman daha yuksek pace pressure olarak yorumlanir
@@ -502,6 +515,12 @@ def _ml_race_summaries(frame: pd.DataFrame) -> list[MLRaceSummary]:
             MLRaceSummary(
                 race_id=str(race_id),
                 race_name=str(first.get("race_name", race_id)),
+                race_time=str(first.get("race_time", "-")),
+                horse_names=", ".join(
+                    str(name)
+                    for name in race_df.get("horse_name", race_df.get("horse_id", "-"))
+                    if str(name).strip() and str(name).lower() != "nan"
+                ) or "-",
                 horse_count=int(len(race_df)),
                 top_horse_name=str(first.get("horse_name", first.get("horse_id", "-"))),
                 top_probability=float(first.get("calibrated_probability", 0.0)),
@@ -530,6 +549,12 @@ def _ml_race_summaries_from_races(  # type: ignore[no-untyped-def]
             MLRaceSummary(
                 race_id=_to_ml_frame_race_id(str(race.id), race.start_time.date()) or str(race.id),
                 race_name=f"{race.hippodrome} - {race.race_no}. Kosu",
+                race_time=race.start_time.strftime("%H:%M"),
+                horse_names=", ".join(
+                    str(entry.horse_name)
+                    for entry in active
+                    if str(entry.horse_name).strip()
+                ) or "-",
                 horse_count=len(active),
                 top_horse_name=top,
                 top_probability=top_probability,
@@ -867,33 +892,50 @@ def _overlay_bulletin_horse_names(
     return records
 
 
-def _ml_has_date(paths, target_date: date, city: str = "") -> bool:  # type: ignore[no-untyped-def]
-    for feature_path in (paths.features_csv, paths.prediction_features_csv):
+def _ml_has_date(
+    paths,
+    target_date: date,
+    city: str = "",
+    race_no: int | None = None,
+) -> bool:  # type: ignore[no-untyped-def]
+    # Training features may contain results for a day that is already over.
+    # They must never make a live prediction look ready for that same day.
+    for feature_path in (paths.prediction_features_csv,):
         if not feature_path.exists():
             continue
         try:
-            dates = pd.read_csv(feature_path, usecols=lambda column: column in {"date", "track"})
+            dates = pd.read_csv(
+                feature_path,
+                usecols=lambda column: column in {"date", "track", "race_id"},
+            )
         except Exception:  # noqa: BLE001
             continue
         parsed = pd.to_datetime(dates["date"], errors="coerce").dt.date
         matching = parsed == target_date
         if city and "track" in dates.columns:
             matching &= dates["track"].astype(str).map(_normalize_track_key) == _normalize_track_key(city)
+        if race_no is not None and "race_id" in dates.columns:
+            matching &= dates["race_id"].astype(str).map(_parse_race_no) == race_no
         if bool(matching.any()):
             return True
     return False
 
 
-def _ml_model_loadable(paths) -> bool:  # type: ignore[no-untyped-def]
+def _ml_model_loadable(paths) -> tuple[bool, str]:  # type: ignore[no-untyped-def]
     if not paths.model_path.exists():
-        return False
+        return False, f"Model dosyasi bulunamadi: {paths.model_path}"
     try:
-        artifact = load_phase3_artifact(str(paths.model_path))
-        if artifact.feature_columns != TJK_FEATURE_COLUMNS:
-            return False
-    except Exception:  # noqa: BLE001
-        return False
-    return True
+        artifact, _ = load_phase3_artifact(str(paths.model_path))
+        if artifact.feature_columns != TJK_STAGE1_FEATURE_COLUMNS:
+            missing = sorted(set(TJK_STAGE1_FEATURE_COLUMNS) - set(artifact.feature_columns))
+            obsolete = sorted(set(artifact.feature_columns) - set(TJK_STAGE1_FEATURE_COLUMNS))
+            return False, (
+                "Model eski TJK feature semasiyla kaydedilmis. "
+                f"Eksik: {missing}; artik kullanilmamasi gerekenler: {obsolete}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Model artifact'i yuklenemedi: {exc}"
+    return True, ""
 
 
 def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> tuple[list[str], str | None]:
@@ -911,26 +953,39 @@ def _ensure_ml_ready_for_date(
     settings,
     target_date: date,
     city: str = "",
+    race_no: int | None = None,
 ) -> None:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
-    if not _ml_model_loadable(paths):
+    loadable_result = _ml_model_loadable(paths)
+    if isinstance(loadable_result, tuple):
+        model_loadable, model_error = loadable_result
+    else:
+        model_loadable = bool(loadable_result)
+        model_error = ""
+    if not model_loadable:
         raise RuntimeError(
-            "ML modeli hazir degil. Once Model Egitimi bolumunden egitimi tamamlayin."
+            "ML modeli hazir degil. Once Model Egitimi bolumunden yeni TJK feature'lariyla "
+            f"egitimi tamamlayin. Ayrinti: {model_error}"
         )
     try:
-        has_date = _ml_has_date(paths, target_date, city=city)
+        has_date = _ml_has_date(paths, target_date, city=city, race_no=race_no)
     except TypeError as exc:
         if "unexpected keyword argument 'city'" not in str(exc):
             raise
         has_date = _ml_has_date(paths, target_date)
     if not has_date:
         try:
-                prepare_prediction_features(target_date, paths, hippodrome=city or None)
+                prepare_prediction_features(
+                    target_date,
+                    paths,
+                    hippodrome=city or None,
+                    race_no=race_no,
+                )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 f"{target_date.isoformat()} icin labelsiz tahmin feature verisi hazirlanamadi: {exc}"
             ) from exc
-        if not _ml_has_date(paths, target_date):
+        if not _ml_has_date(paths, target_date, city=city, race_no=race_no):
             raise RuntimeError(
                 f"{target_date.isoformat()} icin tahmin feature verisi olusmadi. "
                 "TJK gunluk programi kontrol edilmeli."
@@ -942,17 +997,23 @@ def _predict_ml_for_date_with_recovery(
     settings,
     target_date: date,
     city: str = "",
+    race_no: int | None = None,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     paths = paths_from_settings(settings)
     if city:
         try:
-            _ensure_ml_ready_for_date(settings, target_date, city=city)
+            _ensure_ml_ready_for_date(settings, target_date, city=city, race_no=race_no)
         except TypeError as exc:
-            if "unexpected keyword argument 'city'" not in str(exc):
+            if "unexpected keyword argument" not in str(exc):
                 raise
             _ensure_ml_ready_for_date(settings, target_date)
     else:
-        _ensure_ml_ready_for_date(settings, target_date)
+        try:
+            _ensure_ml_ready_for_date(settings, target_date, race_no=race_no)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            _ensure_ml_ready_for_date(settings, target_date)
     try:
         pred = predict_for_date(
             paths,
@@ -1489,8 +1550,13 @@ def create_app() -> FastAPI:
 
             if source == "ml":
                 paths = paths_from_settings(settings)
-                pred = _predict_ml_for_date_with_recovery(settings, parsed_date, city=city)
                 requested_race_no = _parse_race_no(str(race_id))
+                pred = _predict_ml_for_date_with_recovery(
+                    settings,
+                    parsed_date,
+                    city=city,
+                    race_no=requested_race_no,
+                )
                 target_track_key = _normalize_track_key(city) if city else ""
 
                 data_source = _bulletin_source_for_ml(settings)
@@ -1567,11 +1633,9 @@ def create_app() -> FastAPI:
                     p2_fallback, p3_fallback = _place_probabilities_from_records(records)
                     for rec in records:
                         hid = str(rec.get("horse_id", ""))
-                        p2_val = _safe_float(rec.get("place2_probability"), 0.0)
-                        p3_val = _safe_float(rec.get("place3_probability"), 0.0)
-                        if p2_val <= 0.0 and hid in p2_fallback:
+                        if hid in p2_fallback:
                             rec["place2_probability"] = p2_fallback[hid]
-                        if p3_val <= 0.0 and hid in p3_fallback:
+                        if hid in p3_fallback:
                             rec["place3_probability"] = p3_fallback[hid]
                         rec["top3_probability"] = min(
                             1.0,

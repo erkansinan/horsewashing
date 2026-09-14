@@ -289,6 +289,46 @@ def _learning_curve_report(artifact: BenterTwoStageArtifact) -> dict[str, Any]:
     }
 
 
+def dataset_quality_report(
+    train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> dict[str, Any]:
+    frame = pd.concat([train_df, validation_df, test_df], ignore_index=True, sort=False)
+    dedupe_columns = [
+        column
+        for column in ("date", "race_id", "horse_id", "draw")
+        if column in frame.columns
+    ]
+    if dedupe_columns:
+        frame = frame.drop_duplicates(subset=dedupe_columns, keep="first")
+    dates = pd.to_datetime(frame.get("date", pd.Series(dtype="object")), errors="coerce").dropna()
+    races = frame.get("race_id", pd.Series(dtype="object")).nunique()
+    return {
+        "rows": int(len(frame)),
+        "unique_dates": int(dates.dt.date.nunique()),
+        "unique_races": int(races),
+        "winner_labels": int(pd.to_numeric(frame.get("is_winner", pd.Series(dtype=float)), errors="coerce").sum()),
+        "calibration_rows": int(len(validation_df)),
+        "production_ready": bool(
+            dates.dt.date.nunique() >= 30
+            and races >= 100
+            and len(frame) >= 1000
+            and len(validation_df) >= 300
+        ),
+        "warnings": [
+            warning
+            for condition, warning in [
+                (dates.dt.date.nunique() < 30, "En az 30 farkli tarih gerekli."),
+                (races < 100, "En az 100 yaris gerekli."),
+                (len(frame) < 1000, "En az 1000 at-yaris satiri gerekli."),
+                (len(validation_df) < 300, "Kalibrasyon icin en az 300 satir gerekli."),
+            ]
+            if condition
+        ],
+    }
+
+
 def run_model_health_checks(
     artifact: BenterTwoStageArtifact,
     train_df: pd.DataFrame,
@@ -308,8 +348,8 @@ def run_model_health_checks(
         test_parameter_update(artifact),
         test_learning_curve_improves(artifact),
     ]
-    train_probability = predict_form_probability(artifact, train_df)
-    validation_probability = predict_form_probability(artifact, validation_df)
+    train_probability = predict_two_stage_probability(artifact, train_df)
+    validation_probability = predict_two_stage_probability(artifact, validation_df)
     test_probability = predict_two_stage_probability(artifact, test_df)
     report: dict[str, Any] = {
         "passed": all(check.passed for check in checks),
@@ -325,6 +365,7 @@ def run_model_health_checks(
         "calibration_curve": _calibration_curve(test_df, test_probability),
         "test_probability_variance": float(np.var(test_probability)) if not test_df.empty else 0.0,
         "test_rows": int(len(test_df)),
+        "dataset_quality": dataset_quality_report(train_df, validation_df, test_df),
     }
     report["passed"] = bool(report["passed"] and report["learning_curve"]["loss_decreased"])
     if output_path is not None:

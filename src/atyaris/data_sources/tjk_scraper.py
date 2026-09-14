@@ -137,6 +137,12 @@ _CSV_RACE_HEADER_RE = re.compile(r"^\s*(\d+)\.\s*Ko[sş]u\b", re.IGNORECASE)
 _DISTANCE_SURFACE_RE = re.compile(r"(\d{3,4})\s*(Kum|Cim|Çim|Sentetik)", re.IGNORECASE)
 
 
+def _normalize_horse_name(value: str) -> str:
+    value = re.sub(r"\bK Kulaklık takılacağını ifade eder\.?", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value.casefold()
+
+
 def _era_for_date(target_date: date) -> str:
     """Use TJK's historical view for dates before the current day."""
     return "today" if target_date >= date.today() else "past"
@@ -210,14 +216,6 @@ class TJKHtmlDataSource(RaceDataSource):
             "Era": _era_for_date(target_date),
         }
         html = self._get_html(url, params)
-        csv_link = BeautifulSoup(html, "lxml").select_one("a#CSVBulten[href]")
-        if csv_link is not None:
-            csv_url = csv_link.get("href")
-            if csv_url:
-                csv_results = self._parse_csv_results(self._get_html(str(csv_url), {}))
-                if csv_results:
-                    return csv_results
-
         soup = BeautifulSoup(html, "lxml")
         mapping: dict[str, int] = {}
         for link in soup.select("ul.gunluk-tabs li a"):
@@ -264,7 +262,18 @@ class TJKHtmlDataSource(RaceDataSource):
         if csv_link is not None:
             csv_url = csv_link.get("href")
             if csv_url:
-                csv_results = self._parse_csv_results(self._get_html(str(csv_url), {}))
+                program_races = self.get_daily_races(target_date, matched)
+                horse_numbers = {
+                    race.race_no: {
+                        _normalize_horse_name(entry.horse_name): entry.number
+                        for entry in race.entries
+                    }
+                    for race in program_races
+                }
+                csv_results = self._parse_csv_results(
+                    self._get_html(str(csv_url), {}),
+                    horse_numbers_by_race_name=horse_numbers,
+                )
                 if csv_results:
                     return csv_results
 
@@ -305,7 +314,10 @@ class TJKHtmlDataSource(RaceDataSource):
         return results
 
     @staticmethod
-    def _parse_csv_results(csv_text: str) -> dict[int, dict[int, int]]:
+    def _parse_csv_results(
+        csv_text: str,
+        horse_numbers_by_race_name: dict[int, dict[str, int]] | None = None,
+    ) -> dict[int, dict[int, int]]:
         results: dict[int, dict[int, int]] = {}
         current_race_no: int | None = None
         in_entries = False
@@ -322,9 +334,27 @@ class TJKHtmlDataSource(RaceDataSource):
                 continue
             if not in_entries or current_race_no is None or not first_cell.isdigit():
                 continue
-            horse_number = int(first_cell)
             race_results = results[current_race_no]
-            race_results.setdefault(horse_number, len(race_results) + 1)
+            finish_position = len(race_results) + 1
+            if horse_numbers_by_race_name is None:
+                horse_number = int(first_cell)
+            else:
+                horse_name = row[1] if len(row) > 1 else ""
+                normalized_name = _normalize_horse_name(horse_name)
+                race_names = horse_numbers_by_race_name.get(current_race_no, {})
+                horse_number = race_names.get(normalized_name)
+                if horse_number is None:
+                    matches = [
+                        number
+                        for program_name, number in race_names.items()
+                        if program_name.startswith(normalized_name)
+                        or normalized_name.startswith(program_name)
+                    ]
+                    if len(set(matches)) == 1:
+                        horse_number = matches[0]
+                if horse_number is None:
+                    continue
+            race_results.setdefault(horse_number, finish_position)
         return {race_no: race_results for race_no, race_results in results.items() if race_results}
 
     def get_available_hippodromes(self, target_date: date) -> list[str]:

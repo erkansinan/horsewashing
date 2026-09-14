@@ -65,3 +65,13 @@ def test_reproducibility() -> None:
     train, _, test, features = _splits()
     result = health.test_reproducibility(train, test, features)
     assert result.passed
+
+
+def test_dataset_quality_report_deduplicates_fallback_splits() -> None:
+    train, validation, test, _ = _splits()
+    report = health.dataset_quality_report(train, validation, test)
+
+    assert report["rows"] == 24
+    assert report["unique_dates"] == 8
+    assert report["unique_races"] == 8
+    assert report["production_ready"] is False

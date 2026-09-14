@@ -843,7 +843,9 @@ def test_predict_ml_ticket_preview_keeps_same_track_and_future_legs(monkeypatch)
     )
 
     assert response.status_code == 200
-    assert "C-good" in response.text
+    assert "ML Tahmin" in response.text
+    assert "Bu Kosuyu Iceren Ornek Kolonlar" not in response.text
+    assert "C-good" not in response.text
     assert "C-bad" not in response.text
 
 

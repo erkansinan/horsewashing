@@ -100,8 +100,11 @@ def fit_conditional_logit(
 
     def _loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
         labels = frame["is_winner"].to_numpy(dtype=float)
-        clipped = np.clip(probabilities, 1e-8, 1.0 - 1e-8)
-        return float(-np.mean(labels * np.log(clipped) + (1.0 - labels) * np.log(1.0 - clipped)))
+        winner_indices = np.flatnonzero(labels > 0.5)
+        if winner_indices.size == 0:
+            return 0.0
+        clipped = np.clip(probabilities[winner_indices], 1e-8, 1.0)
+        return float(-np.mean(np.log(clipped)))
 
     validation_x = None
     validation_y = None

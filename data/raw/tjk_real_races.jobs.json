@@ -1,11 +1,1 @@
-[
-  {
-    "job_id": "81c392638b904ac0b4261b8e0dcde38c",
-    "status": "running",
-    "message": "Egitim siraya alindi",
-    "retry_targets": [],
-    "can_accept_partial": false,
-    "start_date": "2026-06-13",
-    "end_date": "2026-09-12"
-  }
-]
+[]
