@@ -24,7 +24,7 @@
         <th><a href="{{ sort_urls.rank }}">Rank{% if sort_by == 'rank' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>No</th>
         <th>At</th>
-        <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th title="TJK programındaki at oranı; sonuç sayfasındaki GANYAN ödeme tutarı değildir"><a href="{{ sort_urls.odds }}">Ganyan (oran){% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.calibrated_probability }}">P(win){% if sort_by == 'calibrated_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.place2_probability }}">P(2.){% if sort_by == 'place2_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.place3_probability }}">P(3.){% if sort_by == 'place3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
@@ -274,7 +274,7 @@
         <th><a href="{{ sort_urls.number }}">No{% if sort_by == 'number' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>At</th>
         <th>Jokey</th>
-        <th><a href="{{ sort_urls.odds }}">Ganyan{% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th title="TJK programındaki at oranı; sonuç sayfasındaki GANYAN ödeme tutarı değildir"><a href="{{ sort_urls.odds }}">Ganyan (oran){% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.total }}">Toplam{% if sort_by == 'total' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.form }}">Form{% if sort_by == 'form' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.jockey_trainer }}">Jokey{% if sort_by == 'jockey_trainer' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>

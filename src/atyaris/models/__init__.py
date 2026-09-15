@@ -9,6 +9,7 @@ from atyaris.models.entities import (
     RacePrediction,
     ScoreBreakdown,
     Trainer,
+    TrainerStatistics,
     TrackSurface,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "RacePrediction",
     "ScoreBreakdown",
     "Trainer",
+    "TrainerStatistics",
     "TrackSurface",
 ]

@@ -23,6 +23,8 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "career_starts", "career_wins", "career_places",
     "last_year_starts", "last_year_wins", "last_year_places",
     "jockey_horse_combo_starts", "jockey_horse_combo_wins",
+    "trainer_win_rate", "trainer_top3_rate", "trainer_top5_rate",
+    "trainer_experience_log", "trainer_stats_missing",
     "form_avg_3", "form_avg_5", "form_avg_10", "form_var_5", "last_run_perf",
     "trend_3_10", "days_since_last_race", "fatigue_score", "recovery_score",
     "short_rest_flag", "long_layoff_flag", "race_frequency_3", "race_frequency_5",

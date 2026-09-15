@@ -55,6 +55,100 @@ def test_parse_daily_program_extracts_race_and_entries() -> None:
 
     scratched = race.entries[1]
     assert scratched.is_scratched is True
+
+
+def test_parse_entry_row_prefers_semantic_gny_cell() -> None:
+    html = """
+    <tr>
+      <td>1</td><td>DENIZ YILDIZI</td><td>4y a k</td><td>PEDIGRI</td>
+      <td>56,5</td><td>Ahmet Celik</td><td>Sahip A.S.</td><td>Osman Ozturk</td>
+      <td>1</td><td>50</td><td>1-2345</td><td>41</td>
+      <td class="gny">7,25</td><td>%10</td><td>ek bilgi</td>
+    </tr>
+    """
+    row = BeautifulSoup(html, "lxml").find("tr")
+    assert row is not None
+    cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
+
+    entry = TJKHtmlDataSource._parse_entry_row(cells, row)
+
+    assert entry.odds == 7.25
+
+
+def test_parse_entries_uses_gny_header_column() -> None:
+    html = """
+    <table>
+      <tr><th>No</th><th>At</th><th>Gny</th><th>Not</th><th>Ek</th><th>A</th><th>B</th><th>C</th></tr>
+      <tr><td>1</td><td>DENIZ YILDIZI</td><td>8,40</td><td>41</td><td>9,99</td><td>56</td><td>Jokey</td><td>Trainer</td></tr>
+    </table>
+    """
+    table = BeautifulSoup(html, "lxml").find("table")
+    assert table is not None
+
+    entries = TJKHtmlDataSource()._parse_entries(table)
+
+    assert len(entries) == 1
+    assert entries[0].odds == 8.4
+
+
+def test_parse_entries_uses_headers_when_program_columns_shift() -> None:
+    html = """
+    <table>
+      <tr><th>No</th><th>At</th><th>Gny</th><th>Jokey</th><th>Yaş</th><th>HP</th><th>Son 6</th><th>Kilo</th><th>Antrenör</th></tr>
+      <tr><td>1</td><td>DENIZ YILDIZI</td><td>8,40</td><td>Ahmet Celik</td><td>4y a k</td><td>50</td><td>1-2345</td><td>56,5</td><td>Osman Ozturk</td></tr>
+    </table>
+    """
+    table = BeautifulSoup(html, "lxml").find("table")
+    assert table is not None
+
+    entries = TJKHtmlDataSource()._parse_entries(table)
+
+    assert len(entries) == 1
+    assert entries[0].odds == 8.4
+    assert entries[0].weight_kg == 56.5
+    assert entries[0].jockey.name == "Ahmet Celik"
+    assert entries[0].trainer.name == "Osman Ozturk"
+    assert entries[0].handicap_points == 50.0
+    assert entries[0].recent_form_positions == [1, 2, 3, 4, 5]
+
+
+def test_parse_entry_row_extracts_trainer_id() -> None:
+    html = """
+    <tr>
+      <td>1</td><td>DENIZ YILDIZI</td><td>4y a k</td><td>PEDIGRI</td>
+      <td>56,5</td><td>Ahmet Celik</td><td>Sahip A.S.</td>
+      <td><a href="/TR/YarisSever/Query/Page/AntrenorIstatistikleri?1=1&amp;QueryParameter_AntrenorId=3025">Osman Ozturk</a></td>
+      <td>1</td><td>50</td><td>1-2345</td><td>41</td><td></td><td>5,50</td><td>%10</td><td></td>
+    </tr>
+    """
+    row = BeautifulSoup(html, "lxml").find("tr")
+    assert row is not None
+    cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
+
+    entry = TJKHtmlDataSource._parse_entry_row(cells, row)
+
+    assert entry.trainer.source_trainer_id == 3025
+
+
+def test_parse_trainer_statistics_table() -> None:
+    html = """
+    <table>
+      <tr><th>Antrenör</th><th>Koşu</th><th>1.</th><th>2.</th><th>3.</th><th>4.</th><th>5.</th><th>1.%</th><th>2.%</th><th>3.%</th><th>4.%</th><th>5.%</th></tr>
+      <tr><td>Osman Ozturk</td><td>100</td><td>20</td><td>15</td><td>10</td><td>12</td><td>8</td><td>20,00</td><td>15,00</td><td>10,00</td><td>12,00</td><td>8,00</td></tr>
+    </table>
+    """
+    source = TJKHtmlDataSource()
+    source._get_html = lambda url, params: html  # type: ignore[method-assign]
+
+    stats = source.get_trainer_statistics(3025)
+
+    assert stats.trainer_id == 3025
+    assert stats.trainer_name == "Osman Ozturk"
+    assert stats.total_starts == 100
+    assert stats.first_place == 20
+    assert stats.third_place == 10
+    assert stats.first_rate == 20.0
+    assert stats.fifth_rate == 8.0
 def test_get_horse_statistics_raises_not_implemented() -> None:
     source = TJKHtmlDataSource()
     races = source._parse_daily_program(_SAMPLE_HTML, "Ankara", date(2026, 8, 18))

@@ -10,7 +10,7 @@ import pandas as pd
 
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
-from atyaris.models.entities import HorseStatistics
+from atyaris.models.entities import HorseStatistics, TrainerStatistics
 from atyaris.services import build_data_source
 
 
@@ -63,6 +63,7 @@ def ingest_real_tjk_data(
     daily_races: list[tuple[date, object, list[object], dict[int, dict[int, int]]]] = []
     unavailable_days: list[str] = []
     unavailable_result_sets: list[str] = []
+    trainer_stats_cache: dict[int, TrainerStatistics | None] = {}
     started_at = monotonic()
     total_days = max((end_date - start_date).days + 1, 1)
     completed_days = 0
@@ -233,6 +234,42 @@ def ingest_real_tjk_data(
                             progress_callback(
                                 f"    Uyari: {entry.horse_name} gecmisi alinamadi; varsayilan istatistik kullaniliyor ({exc})"
                             )
+                    trainer_statistics = None
+                    trainer_id = entry.trainer.source_trainer_id
+                    if trainer_id is not None:
+                        if trainer_id not in trainer_stats_cache:
+                            try:
+                                trainer_stats_cache[trainer_id] = source.get_trainer_statistics(trainer_id)
+                            except DataSourceError as exc:
+                                trainer_stats_cache[trainer_id] = None
+                                logger.warning(
+                                    "TJK antrenor istatistigi alinamadi | antrenor=%s | id=%s | hata=%s",
+                                    entry.trainer.name,
+                                    trainer_id,
+                                    exc,
+                                )
+                        trainer_statistics = trainer_stats_cache.get(trainer_id)
+
+                    trainer_starts = trainer_statistics.total_starts if trainer_statistics else 0
+                    # Small samples are shrunk toward conservative field priors.
+                    trainer_strength = min(max(trainer_starts, 0), 1000) / (min(max(trainer_starts, 0), 1000) + 30.0)
+                    trainer_win_rate = (
+                        (trainer_statistics.first_rate / 100.0) * trainer_strength
+                        + 0.10 * (1.0 - trainer_strength)
+                        if trainer_statistics else 0.0
+                    )
+                    trainer_top3_rate = (
+                        ((trainer_statistics.first_rate + trainer_statistics.second_rate + trainer_statistics.third_rate) / 100.0)
+                        * trainer_strength
+                        + 0.30 * (1.0 - trainer_strength)
+                        if trainer_statistics else 0.0
+                    )
+                    trainer_top5_rate = (
+                        ((trainer_statistics.first_rate + trainer_statistics.second_rate + trainer_statistics.third_rate + trainer_statistics.fourth_rate + trainer_statistics.fifth_rate) / 100.0)
+                        * trainer_strength
+                        + 0.50 * (1.0 - trainer_strength)
+                        if trainer_statistics else 0.0
+                    )
                     history = [
                         p
                         for p in stats.past_performances
@@ -475,6 +512,17 @@ def ingest_real_tjk_data(
                             ),
                             "jockey_horse_combo_starts": float(stats.jockey_horse_combo_starts),
                             "jockey_horse_combo_wins": float(stats.jockey_horse_combo_wins),
+                            "trainer_starts": float(trainer_starts),
+                            "trainer_first_place": float(trainer_statistics.first_place if trainer_statistics else 0),
+                            "trainer_second_place": float(trainer_statistics.second_place if trainer_statistics else 0),
+                            "trainer_third_place": float(trainer_statistics.third_place if trainer_statistics else 0),
+                            "trainer_fourth_place": float(trainer_statistics.fourth_place if trainer_statistics else 0),
+                            "trainer_fifth_place": float(trainer_statistics.fifth_place if trainer_statistics else 0),
+                            "trainer_win_rate": float(trainer_win_rate),
+                            "trainer_top3_rate": float(trainer_top3_rate),
+                            "trainer_top5_rate": float(trainer_top5_rate),
+                            "trainer_experience_log": float(np.log1p(trainer_starts)),
+                            "trainer_stats_missing": float(trainer_statistics is None),
                             "history_avg_finish_position": _mean(history_finish),
                             "history_avg_field_size": _mean(history_field_sizes),
                             "history_avg_weight": _mean(history_weights),

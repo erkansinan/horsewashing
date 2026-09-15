@@ -25,7 +25,26 @@ class Jockey(BaseModel):
 
 class Trainer(BaseModel):
     name: str
+    source_trainer_id: Optional[int] = None
     win_rate: Optional[float] = Field(default=None, ge=0, le=100)
+
+
+class TrainerStatistics(BaseModel):
+    """TJK AntrenorIstatistikleri sayfasindaki toplam kariyer ozetidir."""
+
+    trainer_id: int
+    trainer_name: str = ""
+    total_starts: int = 0
+    first_place: int = 0
+    second_place: int = 0
+    third_place: int = 0
+    fourth_place: int = 0
+    fifth_place: int = 0
+    first_rate: float = 0.0
+    second_rate: float = 0.0
+    third_rate: float = 0.0
+    fourth_rate: float = 0.0
+    fifth_rate: float = 0.0
 
 
 class PastPerformance(BaseModel):

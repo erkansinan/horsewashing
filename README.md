@@ -426,6 +426,26 @@ kullanilir.
 | `history_avg_race_time_seconds` | Gecmis derecelerin saniye cinsinden ortalamasidir. |
 | `history_avg_prize`, `history_avg_s20` | TJK gecmis satirlarindaki sayisal ikramiye ve S20 ortalamalaridir. |
 
+#### TJK antrenor feature'lari
+
+Yaris programindaki `Antrenor` linkinden `QueryParameter_AntrenorId` alinir ve
+TJK `AntrenorIstatistikleri` sayfasindaki kariyer ozet tablosu okunur. Ayni
+antrenor icin endpoint cagrisina ingestion oturumu boyunca cache uygulanir.
+
+| Feature | Anlami |
+| --- | --- |
+| `trainer_win_rate` | Antrenorun 1. olma yuzdesi; toplam kosu sayisina gore %10 onculune kucultulur. |
+| `trainer_top3_rate` | 1.-3. siralarin toplami; kucuk orneklemlerde %30 onculune kucultulur. |
+| `trainer_top5_rate` | 1.-5. siralarin toplami; kucuk orneklemlerde %50 onculune kucultulur. |
+| `trainer_experience_log` | Toplam antrenor kosusunun `log1p` donusumu. |
+| `trainer_stats_missing` | Antrenor ID'si veya TJK istatistik tablosu alinamadiginda 1 olur. |
+
+Bu feature'lar tek basina ham yuzdeyi kullanmaz; deneyimli antrenorun oranina
+daha fazla, az kosulu antrenorun oranina daha az guvenilir. Yeni feature'larin
+model tarafindan ogrenilmesi icin tarihsel TJK feature verisi antrenor endpoint'i
+de kullanilarak yeniden ingestion ve egitimden gecirilmelidir. Eski CSV/artifact
+dosyalari otomatik olarak geriye donuk antrenor istatistigi icermez.
+
 #### TJK idman feature'lari
 
 | Feature | Anlami |

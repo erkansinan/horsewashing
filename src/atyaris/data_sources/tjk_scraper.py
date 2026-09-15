@@ -53,6 +53,7 @@ from atyaris.models.entities import (
     Race,
     RaceEntry,
     Trainer,
+    TrainerStatistics,
     TrackSurface,
     WorkoutRecord,
 )
@@ -124,6 +125,7 @@ _DAILY_RESULTS_DATA_PATH = "/TR/YarisSever/Info/Data/GunlukYarisSonuclari"
 _DAILY_RESULTS_CITY_PATH = "/TR/YarisSever/Info/Sehir/GunlukYarisSonuclari"
 _HORSE_HISTORY_PATH = "/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri"
 _HORSE_WORKOUT_PATH = "/TR/YarisSever/Query/Page/IdmanIstatistikleri"
+_TRAINER_STATISTICS_PATH = "/TR/YarisSever/Query/Page/AntrenorIstatistikleri"
 
 _SURFACE_MAP = {
     "kum": TrackSurface.KUM,
@@ -507,18 +509,34 @@ class TJKHtmlDataSource(RaceDataSource):
 
     def _parse_entries(self, table) -> list[RaceEntry]:  # type: ignore[no-untyped-def]
         entries: list[RaceEntry] = []
+        column_indices: dict[str, int] = {}
+        for header_row in table.find_all("tr"):
+            headers = header_row.find_all("th")
+            if not headers:
+                continue
+            for index, header in enumerate(headers):
+                header_text = re.sub(r"[^a-z0-9]", "", header.get_text(" ", strip=True).casefold())
+                if header_text:
+                    column_indices.setdefault(header_text, index)
+            if column_indices:
+                break
         for row in table.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
             if len(cells) < 8:
                 continue
             try:
-                entries.append(self._parse_entry_row(cells, row))
+                entries.append(self._parse_entry_row(cells, row, column_indices=column_indices))
             except (ValueError, IndexError) as exc:
                 logger.debug("Satir ayristirilamadi, atlaniyor: %s (%s)", cells, exc)
         return entries
 
     @staticmethod
-    def _parse_entry_row(cells: list[str], row=None) -> RaceEntry:  # type: ignore[no-untyped-def]
+    def _parse_entry_row(
+        cells: list[str],
+        row=None,
+        odds_index: int | None = None,
+        column_indices: dict[str, int] | None = None,
+    ) -> RaceEntry:  # type: ignore[no-untyped-def]
         def _first_float(text: str) -> float | None:
             if not text:
                 return None
@@ -531,14 +549,25 @@ class TJKHtmlDataSource(RaceDataSource):
             except ValueError:
                 return None
 
-        number_idx = 0
+        column_indices = column_indices or {}
+
+        def _header_index(*aliases: str) -> int | None:
+            for alias in aliases:
+                normalized = re.sub(r"[^a-z0-9]", "", alias.casefold())
+                if normalized in column_indices:
+                    return column_indices[normalized]
+            return None
+
+        number_idx = _header_index("no", "atno") or 0
         for i in range(min(3, len(cells))):
             if re.fullmatch(r"\d+", cells[i] or ""):
                 number_idx = i
                 break
 
         number = int(re.sub(r"\D", "", cells[number_idx]) or 0)
-        name_idx = min(number_idx + 1, len(cells) - 1)
+        name_idx = _header_index("at", "atadi", "horse", "horsename")
+        if name_idx is None:
+            name_idx = min(number_idx + 1, len(cells) - 1)
         raw_name = cells[name_idx]
         is_scratched = "Kosmaz" in raw_name or "Koşmaz" in raw_name
         horse_name = re.sub(r"\(.*?\)", "", raw_name).replace("Kosmaz", "").replace("Koşmaz", "")
@@ -548,16 +577,23 @@ class TJKHtmlDataSource(RaceDataSource):
         horse_name = re.sub(r"\s+(?:KG|DB|SK|K|D|B|GKR|KB|KBB)+\s*$", "", horse_name).strip()
 
         age = None
-        age_idx = min(number_idx + 2, len(cells) - 1)
+        age_idx = _header_index("yas", "age")
+        if age_idx is None:
+            age_idx = min(number_idx + 2, len(cells) - 1)
         age_match = re.search(r"(\d+)\s*y", cells[age_idx], flags=re.IGNORECASE)
         if age_match:
             age = int(age_match.group(1))
 
-        weight_idx = min(number_idx + 4, len(cells) - 1)
-        jockey_idx = min(number_idx + 5, len(cells) - 1)
-        trainer_idx = min(number_idx + 7, len(cells) - 1)
-        hp_idx = min(number_idx + 9, len(cells) - 1)
-        form_idx = min(number_idx + 10, len(cells) - 1)
+        weight_idx = _header_index("kilo", "siklet", "weight")
+        jockey_idx = _header_index("jokey", "jockey")
+        trainer_idx = _header_index("antrenor", "antrenör", "trainer")
+        hp_idx = _header_index("hp", "handikap", "handicappoints")
+        form_idx = _header_index("son6", "son6kosu", "form", "recentform")
+        weight_idx = min(number_idx + 4, len(cells) - 1) if weight_idx is None else weight_idx
+        jockey_idx = min(number_idx + 5, len(cells) - 1) if jockey_idx is None else jockey_idx
+        trainer_idx = min(number_idx + 7, len(cells) - 1) if trainer_idx is None else trainer_idx
+        hp_idx = min(number_idx + 9, len(cells) - 1) if hp_idx is None else hp_idx
+        form_idx = min(number_idx + 10, len(cells) - 1) if form_idx is None else form_idx
 
         weight = _first_float(cells[weight_idx]) or 0.0
         jockey_name = cells[jockey_idx] or "Bilinmiyor"
@@ -583,7 +619,24 @@ class TJKHtmlDataSource(RaceDataSource):
                 if m:
                     recent_form_positions.append(int(m.group(0)))
 
-        odds_raw = cells[-3] if len(cells) >= 3 else None
+        header_odds_index = _header_index("gny", "ganyan", "odds")
+        odds_index = header_odds_index if header_odds_index is not None else odds_index
+        odds_raw = cells[odds_index] if odds_index is not None and odds_index < len(cells) else None
+        if row is not None:
+            for cell in row.find_all("td"):
+                marker_values: list[str] = []
+                for attribute in ("class", "id", "data-field", "data-column", "title"):
+                    value = cell.get(attribute, "")
+                    if isinstance(value, (list, tuple)):
+                        marker_values.extend(str(item) for item in value)
+                    else:
+                        marker_values.append(str(value))
+                markers = " ".join(marker_values).casefold()
+                if re.search(r"(?:^|[\s_-])(gny|odds|ganyan)(?:$|[\s_-])", markers):
+                    odds_raw = cell.get_text(" ", strip=True)
+                    break
+        if odds_raw is None and len(cells) >= 3:
+            odds_raw = cells[-3]
         odds = None
         if odds_raw and odds_raw not in {"-", ""}:
             try:
@@ -592,6 +645,7 @@ class TJKHtmlDataSource(RaceDataSource):
                 odds = None
 
         source_horse_id = None
+        source_trainer_id = None
         if row is not None:
             link = row.find("a", href=re.compile(r"QueryParameter_AtId=\d+"))
             if link is not None:
@@ -605,6 +659,11 @@ class TJKHtmlDataSource(RaceDataSource):
                 m = re.search(r"QueryParameter_AtId=(\d+)", row_markup)
                 if m:
                     source_horse_id = int(m.group(1))
+            trainer_link = row.find("a", href=re.compile(r"QueryParameter_AntrenorId=\d+", re.IGNORECASE))
+            trainer_markup = str(trainer_link or row)
+            trainer_match = re.search(r"QueryParameter_AntrenorId=(\d+)", trainer_markup, re.IGNORECASE)
+            if trainer_match:
+                source_trainer_id = int(trainer_match.group(1))
 
         return RaceEntry(
             number=number,
@@ -613,7 +672,7 @@ class TJKHtmlDataSource(RaceDataSource):
             horse_name=horse_name,
             age=age,
             jockey=Jockey(name=jockey_name),
-            trainer=Trainer(name=trainer_name),
+            trainer=Trainer(name=trainer_name, source_trainer_id=source_trainer_id),
             weight_kg=weight,
             odds=odds,
             handicap_points=handicap_points,
@@ -621,6 +680,62 @@ class TJKHtmlDataSource(RaceDataSource):
             form_raw=form_raw,
             is_scratched=is_scratched,
         )
+
+    def get_trainer_statistics(self, trainer_id: int) -> TrainerStatistics:
+        """TJK antrenor ozet tablosunu baslik adlarina gore parse eder."""
+        if trainer_id <= 0:
+            raise DataSourceError("Gecerli bir QueryParameter_AntrenorId bulunamadi.")
+        url = f"{self._base_url}{_TRAINER_STATISTICS_PATH}"
+        html = self._get_html(
+            url,
+            {"1": "1", "QueryParameter_AntrenorId": str(trainer_id)},
+        )
+        soup = BeautifulSoup(html, "lxml")
+
+        def normalize(value: str) -> str:
+            folded = value.casefold().translate(_TURKISH_FOLD)
+            return re.sub(r"[^a-z0-9%]", "", folded)
+
+        def number(value: str) -> float:
+            text = (value or "").replace("%", "").strip()
+            text = text.replace(".", "").replace(",", ".") if "," in text and "." in text else text.replace(",", ".")
+            match = re.search(r"\d+(?:\.\d+)?", text)
+            return float(match.group(0)) if match else 0.0
+
+        aliases = {
+            "trainer_name": {"antrenor", "trainer"},
+            "total_starts": {"kosu", "kosusayisi", "starts"},
+            "first_place": {"1"}, "second_place": {"2"}, "third_place": {"3"},
+            "fourth_place": {"4"}, "fifth_place": {"5"},
+            "first_rate": {"1%"}, "second_rate": {"2%"}, "third_rate": {"3%"},
+            "fourth_rate": {"4%"}, "fifth_rate": {"5%"},
+        }
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            if not rows:
+                continue
+            header_cells = rows[0].find_all(["th", "td"])
+            header_map = {normalize(cell.get_text(" ", strip=True)): index for index, cell in enumerate(header_cells)}
+            if not ({"kosu", "1", "2", "3"} <= set(header_map)):
+                continue
+            for row in rows[1:]:
+                cells = [cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"])]
+                if len(cells) < len(header_map):
+                    continue
+                values: dict[str, float | str] = {}
+                for field, field_aliases in aliases.items():
+                    index = next((header_map[alias] for alias in field_aliases if alias in header_map), None)
+                    if index is None or index >= len(cells):
+                        continue
+                    values[field] = cells[index] if field == "trainer_name" else number(cells[index])
+                if not values.get("total_starts"):
+                    continue
+                return TrainerStatistics(
+                    trainer_id=trainer_id,
+                    trainer_name=str(values.get("trainer_name", "")),
+                    **{field: int(value) if field in {"total_starts", "first_place", "second_place", "third_place", "fourth_place", "fifth_place"} else float(value) for field, value in values.items() if field != "trainer_name"},
+                )
+        raise DataSourceError("AntrenorIstatistikleri tablosu bulunamadi veya parse edilemedi.")
 
     def get_horse_statistics(
         self,
