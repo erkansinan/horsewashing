@@ -375,6 +375,21 @@ def _derive_horse_stats_metrics(stats, race_distance: int | None = None, race_su
         for p in performances[:10]
         if p.early_pace_index is not None
     ]
+    workout_times = [
+        float(workout.time_seconds)
+        for workout in stats.workout_records
+        if workout.time_seconds is not None
+    ]
+    workout_dates = [
+        workout.workout_date
+        for workout in stats.workout_records
+        if workout.workout_date is not None
+    ]
+    workout_distances = [
+        float(workout.distance_m)
+        for workout in stats.workout_records
+        if workout.distance_m is not None
+    ]
     if pace_values:
         front_share = sum(1 for value in pace_values if value >= 0.6) / len(pace_values)
         presser_share = sum(1 for value in pace_values if 0.2 <= value < 0.6) / len(pace_values)
@@ -409,6 +424,11 @@ def _derive_horse_stats_metrics(stats, race_distance: int | None = None, race_su
         "surface_fit": round(surface_fit, 2),
         "distance_fit": round(distance_fit, 2),
         "pace_pressure": round(pace_pressure, 3),
+        "workout_count": float(len(stats.workout_records)),
+        "workout_avg_time_seconds": round(sum(workout_times) / len(workout_times), 2) if workout_times else 0.0,
+        "workout_best_time_seconds": min(workout_times) if workout_times else 0.0,
+        "workout_avg_distance": round(sum(workout_distances) / len(workout_distances), 2) if workout_distances else 0.0,
+        "days_since_last_workout": float((date.today() - max(workout_dates)).days) if workout_dates else 0.0,
     }
 
 

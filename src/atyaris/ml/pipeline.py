@@ -54,6 +54,31 @@ class Phase1Paths:
     model_path: Path = Path("models/phase1_logreg.joblib")
 
 
+def _apply_prediction_reliability(
+    frame: pd.DataFrame,
+    model_probability: np.ndarray,
+    market_probability: np.ndarray,
+) -> np.ndarray:
+    """Shrink weakly evidenced predictions toward the race market baseline."""
+    starts = pd.to_numeric(
+        frame.get("career_starts", pd.Series(0.0, index=frame.index)),
+        errors="coerce",
+    ).fillna(0.0).to_numpy(dtype=float)
+    reliability = np.clip(starts / 5.0, 0.0, 1.0)
+    workout_missing = pd.to_numeric(
+        frame.get("workout_missing", pd.Series(1.0, index=frame.index)),
+        errors="coerce",
+    ).fillna(1.0).to_numpy(dtype=float)
+    reliability *= np.where(workout_missing >= 0.5, 0.5, 1.0)
+    blended = market_probability + reliability * (model_probability - market_probability)
+    for race_id, indices in frame.groupby("race_id", sort=False).indices.items():
+        del race_id
+        total = float(np.sum(blended[indices]))
+        if total > 0.0:
+            blended[indices] = blended[indices] / total
+    return blended
+
+
 def paths_from_settings(settings: Settings) -> Phase1Paths:
     return Phase1Paths(
         raw_csv=Path(settings.phase1_raw_csv_path),
@@ -449,6 +474,11 @@ def predict_for_date(
     out["calibrated_probability"] = smooth_race_probabilities(
         calibrated_probability,
         out.groupby("race_id")["race_id"].transform("size").to_numpy(),
+    )
+    out["calibrated_probability"] = _apply_prediction_reliability(
+        out,
+        out["calibrated_probability"].to_numpy(dtype=float),
+        market_probability,
     )
 
     # Race-level normalization.

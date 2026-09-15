@@ -283,6 +283,14 @@ def ingest_real_tjk_data(
                         for workout in historical_workouts
                         if workout.distance_m is not None
                     ]
+                    workout_speed_indices = [
+                        100.0 / (float(workout.time_seconds) / (float(workout.distance_m) / 100.0))
+                        for workout in historical_workouts
+                        if workout.time_seconds is not None
+                        and workout.distance_m is not None
+                        and float(workout.time_seconds) > 0.0
+                        and float(workout.distance_m) > 0.0
+                    ]
                     workout_dates = [
                         workout.workout_date
                         for workout in historical_workouts
@@ -479,6 +487,8 @@ def ingest_real_tjk_data(
                             "workout_avg_time_seconds": _mean(workout_times),
                             "workout_best_time_seconds": min(workout_times) if workout_times else 0.0,
                             "workout_avg_distance": _mean(workout_distances),
+                            "workout_avg_speed_index": _mean(workout_speed_indices),
+                            "workout_best_speed_index": max(workout_speed_indices) if workout_speed_indices else 0.0,
                             "days_since_last_workout": float((current - max(workout_dates)).days)
                             if workout_dates else 0.0,
                             "history_missing": float(not history),

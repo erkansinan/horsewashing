@@ -580,6 +580,10 @@ def test_derive_horse_stats_metrics_uses_tjk_and_workout_data() -> None:
     assert metrics["surface_fit"] > 0
     assert metrics["distance_fit"] > 0
     assert 0.0 <= metrics["pace_pressure"] <= 1.0
+    assert metrics["workout_count"] == 1.0
+    assert metrics["workout_avg_time_seconds"] == 72.0
+    assert metrics["workout_best_time_seconds"] == 72.0
+    assert metrics["days_since_last_workout"] == 9.0
 
 
 def test_form_strength_sort_prioritizes_form_metrics_over_ev() -> None:

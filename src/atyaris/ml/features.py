@@ -30,8 +30,9 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "history_avg_finish_position", "history_avg_field_size", "history_avg_weight",
     "history_avg_odds", "history_avg_handicap_points", "history_avg_race_time_seconds",
     "history_avg_prize", "history_avg_s20",
-    "workout_count", "workout_avg_time_seconds", "workout_best_time_seconds",
-    "workout_avg_distance", "days_since_last_workout",
+    "workout_count",
+    "workout_avg_distance", "workout_avg_speed_index", "workout_best_speed_index",
+    "days_since_last_workout",
     "history_missing", "career_summary_missing", "workout_missing",
     "age_missing", "handicap_missing", "odds_missing",
 ]
@@ -96,6 +97,37 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
     df = preprocess_dataset(frame)
     if as_of_date is not None:
         df = df[df["date"] <= as_of_date].copy()
+
+    if "workout_avg_speed_index" not in df.columns:
+        avg_time = pd.to_numeric(
+            df.get("workout_avg_time_seconds", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        avg_distance = pd.to_numeric(
+            df.get("workout_avg_distance", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        df["workout_avg_speed_index"] = np.divide(
+            avg_distance,
+            avg_time,
+            out=np.zeros(len(df), dtype=float),
+            where=avg_time.to_numpy(dtype=float) > 0.0,
+        )
+    if "workout_best_speed_index" not in df.columns:
+        best_time = pd.to_numeric(
+            df.get("workout_best_time_seconds", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        avg_distance = pd.to_numeric(
+            df.get("workout_avg_distance", pd.Series(0.0, index=df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        df["workout_best_speed_index"] = np.divide(
+            avg_distance,
+            best_time,
+            out=np.zeros(len(df), dtype=float),
+            where=best_time.to_numpy(dtype=float) > 0.0,
+        )
 
     # Real TJK ingestion already computes historical features while the race
     # history is available. Those rows intentionally do not contain the raw
