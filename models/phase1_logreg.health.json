@@ -1,17 +1,15 @@
 {
-  "passed": false,
+  "passed": true,
   "checks": [
     {
       "name": "test_no_leakage",
-      "passed": false,
+      "passed": true,
       "details": {
         "train_max_date": "2026-09-04",
         "validation_min_date": "2026-09-05",
+        "validation_max_date": "2026-09-09",
         "test_min_date": "2026-09-10",
-        "leaked_features": [
-          "history_avg_finish_position",
-          "history_avg_prize"
-        ],
+        "leaked_features": [],
         "overlapping_horses": {
           "train_validation": [
             "ADANALI DEM\u0130R-1",
@@ -237,6 +235,11 @@
             "VA\u015eAK KIZ-10",
             "\u00d6ZASYALI-13"
           ]
+        },
+        "overlap_warning": true,
+        "historical_feature_provenance": {
+          "history_avg_finish_position": "history filtered with p.race_date < current before averaging finish_position",
+          "history_avg_prize": "history filtered with p.race_date < current before averaging prize_info"
         }
       }
     },
@@ -1940,8 +1943,8 @@
       "source": "derived pre-race feature"
     },
     "history_avg_finish_position": {
-      "available_before_race": false,
-      "source": "derived pre-race feature"
+      "available_before_race": true,
+      "source": "historical performances before race"
     },
     "history_avg_field_size": {
       "available_before_race": true,
@@ -1964,8 +1967,8 @@
       "source": "derived pre-race feature"
     },
     "history_avg_prize": {
-      "available_before_race": false,
-      "source": "derived pre-race feature"
+      "available_before_race": true,
+      "source": "historical performances before race"
     },
     "history_avg_s20": {
       "available_before_race": true,

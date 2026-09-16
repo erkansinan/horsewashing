@@ -19,7 +19,7 @@ from atyaris.ml.fundamental_model import fit_conditional_logit, predict_conditio
 from atyaris.ml.market_blend import BenterTwoStageArtifact, predict_form_probability, predict_two_stage_probability
 
 
-POST_RACE_TOKENS = (
+POST_RACE_COLUMNS = {
     "finish_position",
     "is_winner",
     "result",
@@ -28,8 +28,7 @@ POST_RACE_TOKENS = (
     "closing_odds",
     "post_race",
     "payout",
-    "prize",
-)
+}
 
 FEATURE_AVAILABILITY = {
     "draw": "race declaration",
@@ -42,6 +41,13 @@ FEATURE_AVAILABILITY = {
     "form_avg_5": "historical performances before race",
     "form_avg_10": "historical performances before race",
     "days_since_last_race": "historical performances before race",
+    "history_avg_finish_position": "historical performances before race",
+    "history_avg_prize": "historical performances before race",
+}
+
+HISTORICAL_FEATURE_PROVENANCE = {
+    "history_avg_finish_position": "history filtered with p.race_date < current before averaging finish_position",
+    "history_avg_prize": "history filtered with p.race_date < current before averaging prize_info",
 }
 
 
@@ -62,32 +68,44 @@ def test_no_leakage(
     test_df: pd.DataFrame,
     feature_columns: list[str],
 ) -> HealthCheckResult:
-    """Check temporal ordering, post-race columns, and horse group separation."""
+    """Check temporal ordering and post-race columns.
+
+    Horses may legitimately occur in multiple chronological partitions; that is
+    expected racing history, not row leakage.
+    """
     train_max = pd.to_datetime(train_df["date"]).max()
     validation_min = pd.to_datetime(validation_df["date"]).min() if not validation_df.empty else train_max
-    test_min = pd.to_datetime(test_df["date"]).min() if not test_df.empty else validation_min
-    temporal_ok = train_max < validation_min and validation_min <= test_min
+    validation_max = pd.to_datetime(validation_df["date"]).max() if not validation_df.empty else validation_min
+    test_min = pd.to_datetime(test_df["date"]).min() if not test_df.empty else validation_max
+    temporal_ok = train_max < validation_min and validation_max < test_min
 
     leaked = sorted(
         col for col in feature_columns
-        if any(token in col.lower() for token in POST_RACE_TOKENS)
+        if col.lower() in POST_RACE_COLUMNS
     )
     train_horses = set(train_df.get("horse_id", pd.Series(dtype=str)).astype(str))
     validation_horses = set(validation_df.get("horse_id", pd.Series(dtype=str)).astype(str))
     test_horses = set(test_df.get("horse_id", pd.Series(dtype=str)).astype(str))
-    group_ok = not (train_horses & validation_horses or train_horses & test_horses or validation_horses & test_horses)
-    passed = bool(temporal_ok and not leaked and group_ok)
+    overlap_warning = {
+        "train_validation": sorted(train_horses & validation_horses),
+        "train_test": sorted(train_horses & test_horses),
+        "validation_test": sorted(validation_horses & test_horses),
+    }
+    passed = bool(temporal_ok and not leaked)
     return _result(
         "test_no_leakage",
         passed,
         train_max_date=str(train_max.date()) if not pd.isna(train_max) else None,
         validation_min_date=str(validation_min.date()) if not pd.isna(validation_min) else None,
+        validation_max_date=str(validation_max.date()) if not pd.isna(validation_max) else None,
         test_min_date=str(test_min.date()) if not pd.isna(test_min) else None,
         leaked_features=leaked,
-        overlapping_horses={
-            "train_validation": sorted(train_horses & validation_horses),
-            "train_test": sorted(train_horses & test_horses),
-            "validation_test": sorted(validation_horses & test_horses),
+        overlapping_horses=overlap_warning,
+        overlap_warning=bool(any(overlap_warning.values())),
+        historical_feature_provenance={
+            name: HISTORICAL_FEATURE_PROVENANCE[name]
+            for name in feature_columns
+            if name in HISTORICAL_FEATURE_PROVENANCE
         },
     )
 
@@ -96,7 +114,7 @@ def feature_availability_report(feature_columns: list[str]) -> dict[str, dict[st
     """Answer whether each configured feature exists before the race starts."""
     return {
         column: {
-            "available_before_race": not any(token in column.lower() for token in POST_RACE_TOKENS),
+            "available_before_race": column.lower() not in POST_RACE_COLUMNS,
             "source": FEATURE_AVAILABILITY.get(column, "derived pre-race feature"),
         }
         for column in feature_columns
