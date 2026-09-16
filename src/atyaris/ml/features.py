@@ -39,6 +39,19 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "age_missing", "handicap_missing", "odds_missing",
 ]
 
+TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
+    "trainer_win_rate",
+    "form_avg_5",
+    "last_run_perf",
+    "distance_fit",
+    "surface_fit",
+    "handicap_points",
+    "jockey_horse_combo_wins",
+    "history_avg_finish_position",
+    "draw",
+    "weight",
+]
+
 # Backward-compatible public name; these are stage-1, non-market features.
 TJK_FEATURE_COLUMNS = TJK_STAGE1_FEATURE_COLUMNS
 

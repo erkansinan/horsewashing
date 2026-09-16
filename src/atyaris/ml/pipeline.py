@@ -25,6 +25,7 @@ from atyaris.ml.calibration import (
 )
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
+    TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
     TJK_STAGE1_FEATURE_COLUMNS,
     FeatureBuildResult,
     assert_no_leakage_columns,
@@ -39,6 +40,7 @@ from atyaris.ml.market_blend import (
     predict_form_probability,
     predict_two_stage_probability,
 )
+from atyaris.ml.fundamental_model import fit_conditional_logit, predict_conditional_logit_probability
 from atyaris.ml.model_health import run_model_health_checks
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
@@ -329,7 +331,42 @@ def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
     missing = [column for column in TJK_STAGE1_FEATURE_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"TJK feature verisinde eksik kolonlar var: {missing}")
-    return TJK_STAGE1_FEATURE_COLUMNS.copy()
+    return TJK_SELECTED_STAGE1_FEATURE_COLUMNS.copy()
+
+
+def _select_stage1_regularization(
+    train_df: pd.DataFrame,
+    feature_columns: list[str],
+) -> float:
+    candidates = (0.1, 0.25, 0.5, 1.0)
+    dates = sorted(pd.to_datetime(train_df["date"]).dt.date.unique())
+    if len(dates) < 6:
+        return 0.5
+    fold_starts = [max(3, int(len(dates) * ratio)) for ratio in (0.55, 0.70, 0.85)]
+    scores: dict[float, list[float]] = {candidate: [] for candidate in candidates}
+    for candidate in candidates:
+        for fold_start in fold_starts:
+            if fold_start >= len(dates):
+                continue
+            fold_train = train_df[train_df["date"].isin(dates[:fold_start])]
+            fold_validation = train_df[train_df["date"].isin(dates[fold_start:])]
+            model = fit_conditional_logit(
+                fold_train,
+                feature_columns,
+                max_iter=300,
+                regularization_strength=candidate,
+            )
+            probability = predict_conditional_logit_probability(model, fold_validation)
+            winner_probability = np.clip(
+                probability[fold_validation["is_winner"].to_numpy(dtype=bool)],
+                1e-8,
+                1.0,
+            )
+            scores[candidate].append(float(-np.mean(np.log(winner_probability))))
+    return min(
+        candidates,
+        key=lambda candidate: float(np.mean(scores[candidate])) if scores[candidate] else float("inf"),
+    )
 
 
 def _split_temporal_frames(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -373,12 +410,13 @@ def train_phase1_model(
 
     train_df, calibration_df, test_df = _split_temporal_frames(frame)
 
+    stage1_regularization = _select_stage1_regularization(train_df, feature_columns)
     artifact = fit_two_stage_benter(
         train_df,
         calibration_df,
         feature_columns,
         stage1_penalty="l2",
-        stage1_regularization=0.05,
+        stage1_regularization=stage1_regularization,
         stage2_penalty="l2",
         stage2_regularization=0.02,
         checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",

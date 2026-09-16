@@ -50,6 +50,20 @@ HISTORICAL_FEATURE_PROVENANCE = {
     "history_avg_prize": "history filtered with p.race_date < current before averaging prize_info",
 }
 
+EXPECTED_FEATURE_SIGNS = {
+    "trainer_win_rate": 1,
+    "form_avg_3": 1,
+    "form_avg_5": 1,
+    "last_run_perf": 1,
+    "distance_fit": 1,
+    "surface_fit": 1,
+    "handicap_points": 1,
+    "jockey_horse_combo_wins": 1,
+    "workout_best_speed_index": 1,
+    "history_avg_finish_position": -1,
+    "weight": -1,
+}
+
 
 @dataclass
 class HealthCheckResult:
@@ -279,6 +293,17 @@ def test_parameter_update(artifact: BenterTwoStageArtifact) -> HealthCheckResult
     return _result("test_parameter_update", changed, coefficient_norm=float(np.linalg.norm(coefficients)))
 
 
+def test_feature_signs(artifact: BenterTwoStageArtifact) -> HealthCheckResult:
+    violations = []
+    for index, feature in enumerate(artifact.feature_columns):
+        expected = EXPECTED_FEATURE_SIGNS.get(feature)
+        if expected is not None and index < len(artifact.stage1_model.coef_):
+            coefficient = float(artifact.stage1_model.coef_[index])
+            if coefficient * expected <= 0.0:
+                violations.append({"feature": feature, "coefficient": coefficient, "expected_sign": expected})
+    return _result("test_feature_signs", not violations, violations=violations)
+
+
 def test_learning_curve_improves(artifact: BenterTwoStageArtifact) -> HealthCheckResult:
     train_loss = list(getattr(artifact.stage1_model, "loss_history_", []))
     validation_loss = list(getattr(artifact.stage1_model, "validation_loss_history_", []))
@@ -392,6 +417,7 @@ def run_model_health_checks(
         test_reproducibility(train_df, test_df, feature_columns),
         test_noise_feature_is_ignored(train_df, test_df, feature_columns),
         test_parameter_update(artifact),
+        test_feature_signs(artifact),
         test_learning_curve_improves(artifact),
     ]
     train_probability = predict_two_stage_probability(artifact, train_df)
