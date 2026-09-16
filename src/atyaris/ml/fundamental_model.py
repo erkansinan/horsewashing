@@ -171,3 +171,12 @@ def predict_conditional_logit_probability(model: ConditionalLogitModel, frame: p
     utility = x @ model.coef_ + model.intercept_
     groups = _race_groups(frame)
     return _softmax_by_group(utility, groups)
+
+
+def predict_conditional_logit_utility(model: ConditionalLogitModel, frame: pd.DataFrame) -> np.ndarray:
+    """Return standardized conditional-logit utility before race softmax."""
+    if frame.empty:
+        return np.array([], dtype=float)
+    x_raw = frame[model.feature_columns].to_numpy(dtype=float)
+    x = _standardize_apply(x_raw, model.mean_, model.scale_)
+    return x @ model.coef_ + model.intercept_

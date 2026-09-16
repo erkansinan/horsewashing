@@ -11,6 +11,7 @@ import pandas as pd
 from atyaris.ml.fundamental_model import (
     ConditionalLogitModel,
     fit_conditional_logit,
+    predict_conditional_logit_utility,
     predict_conditional_logit_probability,
 )
 
@@ -89,7 +90,8 @@ def fit_two_stage_benter(
     blend_df["market_logit"] = _safe_logit(market_prob)
     blend_df["interaction"] = blend_df["stage1_logit"] * blend_df["market_logit"]
 
-    stage2_features = ["stage1_logit", "market_logit", "interaction"]
+    # Market logit is the fixed backbone; stage 2 learns only a correction.
+    stage2_features = ["stage1_logit", "interaction"]
     stage2 = fit_conditional_logit(
         blend_df,
         stage2_features,
@@ -106,7 +108,11 @@ def predict_two_stage_probability(artifact: BenterTwoStageArtifact, frame: pd.Da
 
     stage1_probability = predict_form_probability(artifact, frame)
     stage2_frame = _build_stage2_frame(stage1_probability, frame)
-    return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
+    if "market_logit" in artifact.stage2_model.feature_columns:
+        return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
+    market_logit = stage2_frame["market_logit"].to_numpy(dtype=float)
+    delta_utility = predict_conditional_logit_utility(artifact.stage2_model, stage2_frame)
+    return _softmax_by_race(market_logit + delta_utility, frame)
 
 
 def _build_stage2_frame(stage1_probability: np.ndarray, frame: pd.DataFrame) -> pd.DataFrame:
@@ -118,6 +124,16 @@ def _build_stage2_frame(stage1_probability: np.ndarray, frame: pd.DataFrame) -> 
     return stage2_frame
 
 
+def _softmax_by_race(utility: np.ndarray, frame: pd.DataFrame) -> np.ndarray:
+    probabilities = np.zeros_like(utility, dtype=float)
+    for _, indices in frame.groupby("race_id", sort=False).indices.items():
+        values = utility[indices]
+        shifted = values - np.max(values)
+        exponentials = np.exp(shifted)
+        probabilities[indices] = exponentials / max(float(np.sum(exponentials)), 1e-12)
+    return probabilities
+
+
 def blend_form_market_probability(
     artifact: BenterTwoStageArtifact,
     frame: pd.DataFrame,
@@ -127,7 +143,11 @@ def blend_form_market_probability(
         return np.array([], dtype=float)
 
     stage2_frame = _build_stage2_frame(form_probability, frame)
-    return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
+    if "market_logit" in artifact.stage2_model.feature_columns:
+        return predict_conditional_logit_probability(artifact.stage2_model, stage2_frame)
+    market_logit = stage2_frame["market_logit"].to_numpy(dtype=float)
+    delta_utility = predict_conditional_logit_utility(artifact.stage2_model, stage2_frame)
+    return _softmax_by_race(market_logit + delta_utility, frame)
 
 
 def predict_form_probability(artifact: BenterTwoStageArtifact, frame: pd.DataFrame) -> np.ndarray:

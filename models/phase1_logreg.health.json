@@ -252,14 +252,16 @@
       }
     },
     {
-      "name": "test_beats_baseline",
+      "name": "test_beats_market_baseline",
       "passed": true,
       "details": {
-        "full_log_loss": 0.21468345306222367,
+        "full_log_loss": 0.2192481723578787,
         "market_only_log_loss": 0.2645092608298622,
-        "full_top1": 0.5978260869565217,
+        "full_top1": 0.4891304347826087,
         "market_only_top1": 0.40217391304347827,
-        "favorite_top1": 0.40217391304347827
+        "favorite_top1": 0.40217391304347827,
+        "full_top4": 0.8478260869565217,
+        "market_only_top4": 0.7065217391304348
       }
     },
     {
@@ -275,8 +277,8 @@
       "name": "test_prediction_diversity",
       "passed": true,
       "details": {
-        "probability_variance": 0.0141764672565562,
-        "race_mean_count": 31
+        "probability_variance": 0.03107287654482332,
+        "race_mean_count": 32
       }
     },
     {
@@ -2021,81 +2023,81 @@
   },
   "metrics": {
     "train": {
-      "log_loss": 0.23515152213322518,
-      "top1": 0.542713567839196
+      "log_loss": 0.2462853671235707,
+      "top1": 0.457286432160804
     },
     "validation": {
-      "log_loss": 0.2546651978740777,
-      "top1": 0.47126436781609193
+      "log_loss": 0.2544105351888817,
+      "top1": 0.4367816091954023
     },
     "test": {
-      "log_loss": 0.21468345306222367,
-      "top1": 0.5978260869565217
+      "log_loss": 0.2192481723578787,
+      "top1": 0.4891304347826087
     }
   },
   "calibration_curve": [
     {
       "bin_low": 0.0,
       "bin_high": 0.1,
-      "predicted": 0.04367421396531448,
-      "observed": 0.022397891963109356
+      "predicted": 0.021150934345364813,
+      "observed": 0.026282853566958697
     },
     {
       "bin_low": 0.1,
       "bin_high": 0.2,
-      "predicted": 0.13421642732443062,
-      "observed": 0.11180124223602485
+      "predicted": 0.14510206719282268,
+      "observed": 0.16304347826086957
     },
     {
       "bin_low": 0.2,
       "bin_high": 0.30000000000000004,
-      "predicted": 0.23877449903343484,
-      "observed": 0.40816326530612246
+      "predicted": 0.24479875757077288,
+      "observed": 0.2564102564102564
     },
     {
       "bin_low": 0.30000000000000004,
       "bin_high": 0.4,
-      "predicted": 0.33954353428009343,
-      "observed": 0.7058823529411765
+      "predicted": 0.34922458156290537,
+      "observed": 0.3333333333333333
     },
     {
       "bin_low": 0.4,
       "bin_high": 0.5,
-      "predicted": 0.43910104093829455,
-      "observed": 1.0
+      "predicted": 0.45318070462531335,
+      "observed": 0.4
     },
     {
       "bin_low": 0.5,
       "bin_high": 0.6000000000000001,
-      "predicted": 0.5622853194377997,
-      "observed": 0.7
+      "predicted": 0.5466425778868771,
+      "observed": 0.2857142857142857
     },
     {
       "bin_low": 0.6000000000000001,
       "bin_high": 0.7000000000000001,
-      "predicted": 0.6494080722604346,
-      "observed": 0.6666666666666666
+      "predicted": 0.6409006304385358,
+      "observed": 0.625
     },
     {
       "bin_low": 0.7000000000000001,
       "bin_high": 0.8,
-      "predicted": 0.7217195728588549,
-      "observed": 1.0
+      "predicted": 0.742752173097025,
+      "observed": 0.5833333333333334
     },
     {
       "bin_low": 0.8,
       "bin_high": 0.9,
-      "predicted": 0.8150548021316476,
-      "observed": 0.6666666666666666
+      "predicted": 0.8380518927012933,
+      "observed": 1.0
     },
     {
       "bin_low": 0.9,
       "bin_high": 1.0,
-      "predicted": 0.9498409193778247,
-      "observed": 0.6666666666666666
+      "predicted": 0.9557131353504595,
+      "observed": 0.9090909090909091
     }
   ],
-  "test_probability_variance": 0.0141764672565562,
+  "test_probability_variance": 0.03107287654482332,
   "test_rows": 1018,
   "dataset_quality": {
     "rows": 5940,

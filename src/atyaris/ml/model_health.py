@@ -141,6 +141,17 @@ def _race_top1(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     return float(picks["is_winner"].mean())
 
 
+def _race_top4(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
+    if frame.empty:
+        return 0.0
+    work = frame[["race_id", "is_winner"]].copy()
+    work["probability"] = probabilities
+    hits = []
+    for _, group in work.groupby("race_id"):
+        hits.append(int(group.nlargest(4, "probability")["is_winner"].max() == 1))
+    return float(np.mean(hits)) if hits else 0.0
+
+
 def _log_loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     if frame.empty:
         return 0.0
@@ -149,15 +160,15 @@ def _log_loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
-def test_beats_baseline(
+def test_beats_market_baseline(
     artifact: BenterTwoStageArtifact,
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     feature_columns: list[str],
 ) -> HealthCheckResult:
-    """Compare the full model with market-only and always-favorite baselines."""
+    """Require the model to beat the market on both loss and top-4 recall."""
     if test_df.empty:
-        return _result("test_beats_baseline", False, reason="empty test set")
+        return _result("test_beats_market_baseline", False, reason="empty test set")
     market_col = "market_probability_norm" if "market_probability_norm" in train_df else "market_probability"
     market_model = fit_conditional_logit(train_df, [market_col], max_iter=80, random_state=42)
     market_p = predict_conditional_logit_probability(market_model, test_df)
@@ -165,15 +176,32 @@ def test_beats_baseline(
     market_top1 = _race_top1(test_df, market_p)
     full_top1 = _race_top1(test_df, full_p)
     favorite_top1 = _race_top1(test_df, test_df[market_col].to_numpy(dtype=float))
+    full_top4 = _race_top4(test_df, full_p)
+    market_top4 = _race_top4(test_df, market_p)
     return _result(
-        "test_beats_baseline",
-        bool(full_top1 > market_top1 and full_top1 > favorite_top1),
+        "test_beats_market_baseline",
+        bool(
+            _log_loss(test_df, full_p) < _log_loss(test_df, market_p)
+            and full_top4 > market_top4
+        ),
         full_log_loss=_log_loss(test_df, full_p),
         market_only_log_loss=_log_loss(test_df, market_p),
         full_top1=full_top1,
         market_only_top1=market_top1,
         favorite_top1=favorite_top1,
+        full_top4=full_top4,
+        market_only_top4=market_top4,
     )
+
+
+def test_beats_baseline(
+    artifact: BenterTwoStageArtifact,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_columns: list[str],
+) -> HealthCheckResult:
+    """Backward-compatible name for the market baseline gate."""
+    return test_beats_market_baseline(artifact, train_df, test_df, feature_columns)
 
 
 def test_label_shuffle_fails(
@@ -358,7 +386,7 @@ def run_model_health_checks(
     checks = [
         test_no_leakage(train_df, validation_df, test_df, feature_columns),
         test_test_set_isolation(train_df, validation_df, test_df, feature_columns),
-        test_beats_baseline(artifact, train_df, test_df, feature_columns),
+        test_beats_market_baseline(artifact, train_df, test_df, feature_columns),
         test_label_shuffle_fails(train_df, test_df, feature_columns),
         test_prediction_diversity(artifact, test_df),
         test_reproducibility(train_df, test_df, feature_columns),
