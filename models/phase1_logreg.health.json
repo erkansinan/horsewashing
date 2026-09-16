@@ -1622,6 +1622,18 @@
       "source": "race declaration"
     }
   },
+  "feature_missingness": {
+    "trainer_win_rate": 0.0,
+    "form_avg_5": 0.0,
+    "last_run_perf": 0.0,
+    "distance_fit": 0.0,
+    "surface_fit": 0.0,
+    "handicap_points": 0.0,
+    "jockey_horse_combo_wins": 0.0,
+    "history_avg_finish_position": 0.0,
+    "draw": 0.0,
+    "weight": 0.0
+  },
   "metrics": {
     "train": {
       "log_loss": 0.26199795499732015,

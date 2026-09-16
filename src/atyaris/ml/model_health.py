@@ -135,6 +135,13 @@ def feature_availability_report(feature_columns: list[str]) -> dict[str, dict[st
     }
 
 
+def feature_missingness_report(frame: pd.DataFrame, feature_columns: list[str]) -> dict[str, float]:
+    return {
+        column: float(frame[column].isna().mean()) if column in frame.columns else 1.0
+        for column in feature_columns
+    }
+
+
 def test_test_set_isolation(
     train_df: pd.DataFrame,
     validation_df: pd.DataFrame,
@@ -429,6 +436,10 @@ def run_model_health_checks(
         "learning_curve": _learning_curve_report(artifact),
         "feature_importance": feature_importance_report(artifact),
         "feature_availability": feature_availability_report(feature_columns),
+        "feature_missingness": feature_missingness_report(
+            pd.concat([train_df, validation_df, test_df], ignore_index=True, sort=False),
+            feature_columns,
+        ),
         "metrics": {
             "train": _metrics(train_df, train_probability),
             "validation": _metrics(validation_df, validation_probability),

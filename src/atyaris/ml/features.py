@@ -52,6 +52,16 @@ TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
     "weight",
 ]
 
+MISSINGNESS_INDICATOR_COLUMNS = {
+    "odds_missing",
+    "trainer_stats_missing",
+    "history_missing",
+    "workout_missing",
+    "career_summary_missing",
+    "age_missing",
+    "handicap_missing",
+}
+
 # Backward-compatible public name; these are stage-1, non-market features.
 TJK_FEATURE_COLUMNS = TJK_STAGE1_FEATURE_COLUMNS
 

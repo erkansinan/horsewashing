@@ -25,6 +25,7 @@ from atyaris.ml.calibration import (
 )
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
+    MISSINGNESS_INDICATOR_COLUMNS,
     TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
     TJK_STAGE1_FEATURE_COLUMNS,
     FeatureBuildResult,
@@ -328,10 +329,22 @@ def prepare_prediction_features(
 
 
 def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
-    missing = [column for column in TJK_STAGE1_FEATURE_COLUMNS if column not in frame.columns]
+    selected = [
+        column
+        for column in TJK_SELECTED_STAGE1_FEATURE_COLUMNS
+        if column not in MISSINGNESS_INDICATOR_COLUMNS
+    ]
+    missing = [column for column in selected if column not in frame.columns]
     if missing:
         raise ValueError(f"TJK feature verisinde eksik kolonlar var: {missing}")
-    return TJK_SELECTED_STAGE1_FEATURE_COLUMNS.copy()
+    high_missing = {
+        column: float(frame[column].isna().mean())
+        for column in selected
+        if float(frame[column].isna().mean()) > 0.30
+    }
+    if high_missing:
+        raise ValueError(f"Yuzde 30 uzeri eksik feature kullanilamaz: {high_missing}")
+    return selected
 
 
 def _select_stage1_regularization(
