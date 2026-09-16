@@ -122,21 +122,19 @@ def test_phase3_training_fails_before_model_fit_when_features_are_empty(tmp_path
         train_phase1_model(paths)
 
 
-def test_phase3_training_handles_single_day_window(tmp_path, monkeypatch) -> None:
+def test_phase3_training_rejects_single_day_window(tmp_path, monkeypatch) -> None:
     paths = _setup_phase3_artifacts(tmp_path, monkeypatch)
     frame = pd.read_csv(paths.features_csv)
     frame["date"] = "2025-04-30"
     frame.to_csv(paths.features_csv, index=False)
 
-    artifact = train_phase1_model(
-        paths,
-        holdout_days=30,
-        calibration_days=21,
-        calibration_method="none",
-    )
-
-    assert artifact.feature_columns
-    assert paths.model_path.exists()
+    with pytest.raises(ValueError, match="en az 3 farkli tarih"):
+        train_phase1_model(
+            paths,
+            holdout_days=30,
+            calibration_days=21,
+            calibration_method="none",
+        )
 
 
 def test_prediction_features_are_separate_from_labelled_training_features(tmp_path, monkeypatch) -> None:

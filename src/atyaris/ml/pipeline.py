@@ -332,6 +332,34 @@ def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
     return TJK_STAGE1_FEATURE_COLUMNS.copy()
 
 
+def _split_temporal_frames(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split labelled rows by chronological date into 70/15/15 partitions."""
+    dates = sorted(pd.to_datetime(frame["date"]).dt.date.unique())
+    if len(dates) < 3:
+        raise ValueError("Zamansal split icin en az 3 farkli tarih gerekli")
+
+    train_date_count = max(1, int(round(len(dates) * 0.70)))
+    validation_date_count = max(1, int(round(len(dates) * 0.15)))
+    if train_date_count + validation_date_count >= len(dates):
+        raise ValueError("Zamansal split icin train/validation/test araliklari olusturulamadi")
+
+    train_dates = set(dates[:train_date_count])
+    validation_dates = set(dates[train_date_count:train_date_count + validation_date_count])
+    test_dates = set(dates[train_date_count + validation_date_count:])
+    date_values = pd.to_datetime(frame["date"]).dt.date
+    train_df = frame[date_values.isin(train_dates)].copy()
+    validation_df = frame[date_values.isin(validation_dates)].copy()
+    test_df = frame[date_values.isin(test_dates)].copy()
+
+    if train_df.empty or validation_df.empty or test_df.empty:
+        raise ValueError("Zamansal split bos bir partition olusturdu")
+    if not (max(train_dates) < min(validation_dates) < min(test_dates)):
+        raise ValueError("Zamansal split tarih araliklari cakismiyor")
+    if len(train_df) <= len(test_df):
+        raise ValueError("Train satir sayisi test satir sayisindan buyuk olmali")
+    return train_df, validation_df, test_df
+
+
 def train_phase1_model(
     paths: Phase1Paths,
     holdout_days: int = 30,
@@ -343,26 +371,7 @@ def train_phase1_model(
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
     feature_columns = _benter_feature_columns(frame)
 
-    split_date = max(frame["date"]) - timedelta(days=holdout_days)
-    calibration_split = split_date - timedelta(days=calibration_days)
-
-    train_df = frame[frame["date"] < calibration_split].copy()
-    calibration_df = frame[(frame["date"] >= calibration_split) & (frame["date"] < split_date)].copy()
-
-    if train_df.empty:
-        train_df = frame[frame["date"] < split_date].copy()
-    if train_df.empty:
-        # A short window (for example one race day) has no historical side of
-        # the temporal split. Keep the labelled rows usable instead of failing
-        # before the model can be fitted.
-        train_df = frame.copy()
-    if calibration_df.empty:
-        calibration_df = frame[frame["date"] >= split_date].copy()
-    if calibration_df.empty:
-        calibration_df = train_df.copy()
-
-    _require_rows(train_df, "Model egitimi")
-    _require_rows(calibration_df, "Kalibrasyon")
+    train_df, calibration_df, test_df = _split_temporal_frames(frame)
 
     artifact = fit_two_stage_benter(
         train_df,
@@ -384,7 +393,6 @@ def train_phase1_model(
 
     _ensure_parent(paths.model_path)
     save_phase3_artifact(artifact, to_payload(calibrator), str(paths.model_path))
-    test_df = frame[frame["date"] >= split_date].copy()
     run_model_health_checks(
         artifact,
         train_df,
