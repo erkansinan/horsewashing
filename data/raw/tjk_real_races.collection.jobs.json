@@ -1,0 +1,13 @@
+[
+  {
+    "job_id": "b7b4f23600354c1d9dfb58dc01a7efd9",
+    "status": "running",
+    "message": "Veri toplama duraklatiliyor...",
+    "start_date": "2026-09-09",
+    "end_date": "2026-09-16",
+    "completed_days": 0,
+    "remaining_days": 8,
+    "skipped_days": 0,
+    "failed_targets": 0
+  }
+]

@@ -67,3 +67,23 @@ def test_phase5_report_generation_and_tracking(tmp_path, monkeypatch) -> None:
     assert len(recent["models"]) >= 1
     assert len(recent["backtests"]) >= 1
     assert len(recent["tickets"]) >= 1
+
+    fixed_test = result["model_health"]["fixed_test_comparison"]
+    assert fixed_test["status"] == "ok"
+    assert fixed_test["bootstrap_samples"] == 1000
+    assert len(fixed_test["top4_difference_bootstrap_ci"]) == 2
+    assert "model_top4" in fixed_test
+    assert "market_top4" in fixed_test
+    assert "model_log_loss" in fixed_test
+    assert "market_log_loss" in fixed_test
+    report_payload = json_path.read_text(encoding="utf-8")
+    assert '"fixed_test_comparison"' in report_payload
+
+    fixed_test = result["model_health"]["fixed_test_comparison"]
+    assert fixed_test["status"] == "ok"
+    assert fixed_test["bootstrap_samples"] == 1000
+    assert len(fixed_test["top4_difference_bootstrap_ci"]) == 2
+    assert "model_top4" in fixed_test
+    assert "market_top4" in fixed_test
+    assert "model_log_loss" in fixed_test
+    assert "market_log_loss" in fixed_test

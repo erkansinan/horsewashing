@@ -10,7 +10,11 @@ def test_walk_forward_temporal_integrity_and_metrics() -> None:
     provider = _FixtureRacingDataProvider()
     data = provider.get_dataset(date(2024, 1, 1), date(2025, 3, 31))
 
-    result = walk_forward_backtest(data, min_train_days=60)
+    result = walk_forward_backtest(
+        data,
+        min_train_days=60,
+        retrain_interval_days=14,
+    )
 
     assert result.evaluated_days > 0
     assert result.evaluated_races > 0

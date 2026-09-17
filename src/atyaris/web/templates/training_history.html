@@ -2,7 +2,49 @@
 {% block title %}ML Eğitim{% endblock %}
 {% block content %}
 <h2>ML Eğitim</h2>
-<p>Etiketli TJK sonuçlarıyla modeli yeniden eğitin. Uzun işlemler gün gün checkpoint alınarak sürdürülür.</p>
+<p>Veriyi önce kesintili olarak toplayın, ardından aşağıdaki akıştan modeli yeniden eğitin.</p>
+
+<section class="training-panel" aria-labelledby="collection-start-title">
+  <h2 id="collection-start-title">TJK verisi toplama</h2>
+  <form class="filters" method="get" action="/collect">
+    <label>Başlangıç tarihi
+      <input type="date" name="start_date" value="{{ start_date }}" required>
+    </label>
+    <label>Bitiş tarihi
+      <input type="date" name="end_date" value="{{ end_date }}" required>
+    </label>
+    <button type="submit">Veri toplamayı başlat</button>
+  </form>
+  {% for job in collection_jobs %}
+  <div class="training-status collection-status" data-state="{{ job.status }}" data-job-id="{{ job.job_id }}">
+    <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
+    <span class="collection-message">{{ job.message }}</span><br>
+    <span>Gün: <b class="completed-days">{{ job.completed_days or 0 }}</b> tamamlandı / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı</span><br>
+    <span>Tahmini kalan süre: {{ job.estimated_remaining or 'hesaplaniyor' }}</span><br>
+    <span>Atlanan: {{ job.skipped_days or 0 }} | Başarısız hedef: {{ job.failed_targets or 0 }}</span>
+    {% if job.status == 'running' %}
+    <button type="button" data-collection-action="pause" data-job-id="{{ job.job_id }}">Toplamayı duraklat</button>
+    <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
+    {% elif job.status == 'paused' %}
+    <button type="button" data-collection-action="resume" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
+    <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+
+<section class="training-panel" aria-labelledby="raw-maintenance-title">
+  <h2 id="raw-maintenance-title">Ham veri bakımı</h2>
+  {% for item in raw_maintenance %}
+  <div>
+    {{ item.name }}: {{ item.active_records }} kayıt, {{ item.file_bytes }} byte
+    {% if item.recommended %}<strong>Compact önerilir: {{ item.reason }}</strong>{% endif %}
+  </div>
+  {% endfor %}
+  <form method="post" action="/raw/compact">
+    <button type="submit">Ham veriyi compact et</button>
+  </form>
+</section>
 
 <section class="training-panel" aria-labelledby="training-start-title">
   <h2 id="training-start-title">Yeni eğitim başlat</h2>
@@ -15,6 +57,18 @@
     </label>
     <button type="submit">Eğitimi başlat</button>
   </form>
+  <form class="filters" method="get" action="/train">
+    <input type="hidden" name="mode" value="local">
+    <label>Başlangıç tarihi
+      <input type="date" name="start_date" value="{{ start_date }}" required>
+    </label>
+    <label>Bitiş tarihi
+      <input type="date" name="end_date" value="{{ end_date }}" required>
+    </label>
+    <button type="submit">Lokal veriden eğit</button>
+  </form>
+  <p>Lokal eğitim internetten veri çekmez; mevcut yerel ham arşivi kullanır.</p>
+  <p>Model eğitimi için en az 6 farklı tarih içeren bir aralık seçin.</p>
 </section>
 
 {% if training_jobs %}
@@ -123,6 +177,33 @@
   })();
 </script>
 {% endif %}
+
+<script>
+  (function () {
+    const update = async (status) => {
+      const response = await fetch("/collect/status/" + encodeURIComponent(status.dataset.jobId));
+      const job = await response.json();
+      status.dataset.state = job.status;
+      status.querySelector("strong").textContent = job.status;
+      status.querySelector(".collection-message").textContent = job.message || "";
+      status.querySelector(".completed-days").textContent = job.completed_days || 0;
+      status.querySelector(".remaining-days").textContent = job.remaining_days || 0;
+      if (job.status === "running" || job.status === "paused") window.setTimeout(() => update(status), 1500);
+    };
+    document.querySelectorAll(".collection-status[data-job-id]").forEach((status) => {
+      if (["running", "paused"].includes(status.dataset.state)) update(status);
+    });
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-collection-action]");
+      if (!button) return;
+      const action = button.dataset.collectionAction;
+      if (action === "cancel" && !window.confirm("Veri toplama durdurulsun mu? Checkpoint korunur.")) return;
+      button.disabled = true;
+      await fetch("/collect/" + action + "/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
+      window.location.reload();
+    });
+  })();
+</script>
 
 <h2>Model eğitim geçmişi</h2>
 <form class="filters" method="get" action="/training-history">

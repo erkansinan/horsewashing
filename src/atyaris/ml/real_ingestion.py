@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from collections.abc import Callable
+from datetime import datetime, timezone
+import json
 import logging
+from pathlib import Path
 from time import monotonic
 
 import numpy as np
@@ -11,6 +14,7 @@ import pandas as pd
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
 from atyaris.models.entities import HorseStatistics, TrainerStatistics
+from atyaris.ml.raw_store import JsonlRawStore
 from atyaris.services import build_data_source
 
 
@@ -45,6 +49,41 @@ def _estimate_remaining(started_at: float, completed: int, total: int) -> str:
     return _format_duration((elapsed / completed) * (total - completed))
 
 
+def _append_raw_history_records(path: Path | None, records: list[dict[str, object]]) -> None:
+    if path is None or not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_keys: set[tuple[object, ...]] = set()
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                payload = json.loads(line)
+                existing_keys.add(
+                    (
+                        payload.get("target_date"),
+                        payload.get("target_race_id"),
+                        payload.get("target_horse_id"),
+                        payload.get("race_date"),
+                        payload.get("finish_position"),
+                    )
+                )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Ham gecmis JSONL okunamadi; yeni satirlar yine eklenecek: %s", path)
+    with path.open("a", encoding="utf-8") as handle:
+        for record in records:
+            key = (
+                record.get("target_date"),
+                record.get("target_race_id"),
+                record.get("target_horse_id"),
+                record.get("race_date"),
+                record.get("finish_position"),
+            )
+            if key in existing_keys:
+                continue
+            handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+            existing_keys.add(key)
+
+
 def ingest_real_tjk_data(
     start_date: date,
     end_date: date,
@@ -60,6 +99,12 @@ def ingest_real_tjk_data(
         raise RuntimeError("ML egitimi icin gercek TJK kaynagi bekleniyor.")
 
     rows: list[dict[str, object]] = []
+    raw_history_records: list[dict[str, object]] = []
+    raw_program_records: list[dict[str, object]] = []
+    raw_result_records: list[dict[str, object]] = []
+    raw_workout_records: list[dict[str, object]] = []
+    raw_trainer_records: list[dict[str, object]] = []
+    raw_history_path = getattr(paths, "raw_history_jsonl", None)
     daily_races: list[tuple[date, object, list[object], dict[int, dict[int, int]]]] = []
     unavailable_days: list[str] = []
     unavailable_result_sets: list[str] = []
@@ -212,6 +257,42 @@ def ingest_real_tjk_data(
                         # academic training/evaluation without inventing labels.
                         continue
 
+                    raw_program_records.append(
+                        {
+                            "race_id": str(race.id),
+                            "horse_id": str(entry.horse_id),
+                            "race_date": current.isoformat(),
+                            "race_datetime": race.start_time.isoformat() if race.start_time else None,
+                            "hippodrome": str(hippodrome),
+                            "race_no": race.race_no,
+                            "field_size": len(race.entries),
+                            "horse_name": entry.horse_name,
+                            "draw": entry.number,
+                            "age": entry.age,
+                            "jockey_id": getattr(entry.jockey, "source_jockey_id", None),
+                            "jockey_name": entry.jockey.name,
+                            "trainer_id": entry.trainer.source_trainer_id,
+                            "trainer_name": entry.trainer.name,
+                            "weight_kg": entry.weight_kg,
+                            "handicap_points": entry.handicap_points,
+                            "odds": entry.odds,
+                            "distance_m": race.distance_m,
+                            "surface": race.surface.value if hasattr(race.surface, "value") else str(race.surface),
+                        }
+                    )
+                    raw_result_records.append(
+                        {
+                            "race_id": str(race.id),
+                            "horse_id": str(entry.horse_id),
+                            "race_date": current.isoformat(),
+                            "hippodrome": str(hippodrome),
+                            "race_no": race.race_no,
+                            "horse_number": entry.number,
+                            "horse_name": entry.horse_name,
+                            "finish_position": finish_position,
+                        }
+                    )
+
                     try:
                         stats = source.get_horse_statistics(entry, include_workouts=True)
                     except DataSourceError as exc:
@@ -234,6 +315,24 @@ def ingest_real_tjk_data(
                             progress_callback(
                                 f"    Uyari: {entry.horse_name} gecmisi alinamadi; varsayilan istatistik kullaniliyor ({exc})"
                             )
+                    retrieved_at = datetime.now(timezone.utc).isoformat()
+                    for performance in stats.past_performances:
+                        raw_history_records.append(
+                            {
+                                "retrieved_at": retrieved_at,
+                                "horse_id": str(entry.horse_id),
+                                "race_id": f"{entry.horse_id}|{performance.race_date.isoformat()}|{performance.hippodrome}|{race.race_no}",
+                                "race_date": performance.race_date.isoformat(),
+                                "target_date": current.isoformat(),
+                                "target_hippodrome": hippodrome,
+                                "target_race_no": race.race_no,
+                                "target_race_id": str(race.id),
+                                "target_horse_id": str(entry.horse_id),
+                                "target_horse_name": entry.horse_name,
+                                "source_horse_id": entry.source_horse_id,
+                                **performance.model_dump(mode="json"),
+                            }
+                        )
                     trainer_statistics = None
                     trainer_id = entry.trainer.source_trainer_id
                     if trainer_id is not None:
@@ -249,6 +348,42 @@ def ingest_real_tjk_data(
                                     exc,
                                 )
                         trainer_statistics = trainer_stats_cache.get(trainer_id)
+                    if trainer_statistics is not None:
+                        raw_trainer_records.append(
+                            {
+                                "trainer_id": str(trainer_statistics.trainer_id),
+                                "as_of_date": current.isoformat(),
+                                "trainer_name": trainer_statistics.trainer_name,
+                                "total_starts": trainer_statistics.total_starts,
+                                "first_place": trainer_statistics.first_place,
+                                "second_place": trainer_statistics.second_place,
+                                "third_place": trainer_statistics.third_place,
+                                "fourth_place": trainer_statistics.fourth_place,
+                                "fifth_place": trainer_statistics.fifth_place,
+                                "first_rate": trainer_statistics.first_rate,
+                                "second_rate": trainer_statistics.second_rate,
+                                "third_rate": trainer_statistics.third_rate,
+                                "fourth_rate": trainer_statistics.fourth_rate,
+                                "fifth_rate": trainer_statistics.fifth_rate,
+                                "retrieved_at": retrieved_at,
+                            }
+                        )
+                    for workout in stats.workout_records:
+                        raw_workout_records.append(
+                            {
+                                "horse_id": str(entry.horse_id),
+                                "workout_date": workout.workout_date.isoformat() if workout.workout_date else None,
+                                "distance_m": workout.distance_m,
+                                "time_seconds": workout.time_seconds,
+                                "detail": workout.detail,
+                                "hippodrome": workout.hippodrome,
+                                "surface": workout.surface,
+                                "workout_type": workout.workout_type,
+                                "workout_jockey": workout.workout_jockey,
+                                "status": workout.status,
+                                "ranking_status": workout.ranking_status,
+                            }
+                        )
 
                     trainer_starts = trainer_statistics.total_starts if trainer_statistics else 0
                     # Small samples are shrunk toward conservative field priors.
@@ -276,6 +411,13 @@ def ingest_real_tjk_data(
                         if p.race_date < current
                     ]
                     history.sort(key=lambda p: p.race_date)
+                    current_jockey = entry.jockey.name.strip().casefold()
+                    jockey_horse_combo_wins = sum(
+                        1
+                        for performance in history
+                        if (performance.jockey_name or "").strip().casefold() == current_jockey
+                        and performance.finish_position == 1
+                    )
                     historical_workouts = [
                         workout
                         for workout in stats.workout_records
@@ -511,7 +653,7 @@ def ingest_real_tjk_data(
                                 )
                             ),
                             "jockey_horse_combo_starts": float(stats.jockey_horse_combo_starts),
-                            "jockey_horse_combo_wins": float(stats.jockey_horse_combo_wins),
+                            "jockey_horse_combo_wins": float(jockey_horse_combo_wins),
                             "trainer_starts": float(trainer_starts),
                             "trainer_first_place": float(trainer_statistics.first_place if trainer_statistics else 0),
                             "trainer_second_place": float(trainer_statistics.second_place if trainer_statistics else 0),
@@ -555,6 +697,17 @@ def ingest_real_tjk_data(
                         }
                     )
 
+    if raw_history_path is not None and raw_history_records:
+        JsonlRawStore(raw_history_path, "horse_history").upsert(raw_history_records)
+    raw_stores = [
+        (getattr(paths, "raw_daily_program_jsonl", None), "daily_program", raw_program_records),
+        (getattr(paths, "raw_race_results_jsonl", None), "race_results", raw_result_records),
+        (getattr(paths, "raw_workouts_jsonl", None), "workouts", raw_workout_records),
+        (getattr(paths, "raw_trainer_statistics_jsonl", None), "trainer_statistics", raw_trainer_records),
+    ]
+    for raw_path, collection, records in raw_stores:
+        if raw_path is not None and records:
+            JsonlRawStore(raw_path, collection).upsert(records)
     frame = pd.DataFrame(rows)
     if frame.empty:
         details = []

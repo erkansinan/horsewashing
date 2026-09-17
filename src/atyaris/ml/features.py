@@ -40,13 +40,11 @@ TJK_STAGE1_FEATURE_COLUMNS = [
 ]
 
 TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
-    "trainer_win_rate",
     "form_avg_5",
     "last_run_perf",
     "distance_fit",
     "surface_fit",
     "handicap_points",
-    "jockey_horse_combo_wins",
     "history_avg_finish_position",
     "draw",
     "weight",

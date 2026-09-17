@@ -76,6 +76,7 @@ def generate_phase5_report(
         "model_version": model_version,
         "target_date": target_date,
         "backtest_metrics": backtest_metrics,
+        "fixed_test_comparison": (health_report or {}).get("fixed_test_comparison", {}),
         "optimization_summary": optimization_result.get("summary", {}),
         "columns": optimization_result.get("columns", []),
         "top_predictions": top_preds.to_dict(orient="records") if not top_preds.empty else [],
@@ -149,6 +150,12 @@ def generate_phase5_report(
 
   <h2>Backtest Summary</h2>
   <div class=\"card\"><pre>{json.dumps(backtest_metrics, ensure_ascii=True, indent=2, default=str)}</pre></div>
+
+  <h2>Fixed Test Set Edge Analysis</h2>
+  <div class=\"card\"><pre>{json.dumps((health_report or {}).get("fixed_test_comparison", {}), ensure_ascii=True, indent=2, default=str)}</pre></div>
+
+  <h2>Fixed Test Set Edge Analysis</h2>
+  <div class=\"card\"><pre>{json.dumps(backtest_metrics.get("fixed_test_comparison", {}), ensure_ascii=True, indent=2, default=str)}</pre></div>
 
   <h2>Fold Trends</h2>
   <div class=\"card\"><strong>Log Loss (by fold)</strong><br>{chart_log_loss}</div>

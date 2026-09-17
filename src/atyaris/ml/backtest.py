@@ -135,6 +135,7 @@ def walk_forward_backtest(
     dataset: pd.DataFrame,
     min_train_days: int = 90,
     test_step_days: int = 1,
+    retrain_interval_days: int = 14,
     calibration_days: int = 21,
     calibration_method: str = "isotonic",
     ev_probability_threshold: float = 0.18,
@@ -151,6 +152,10 @@ def walk_forward_backtest(
     fold_log_losses: list[float] = []
     fold_briers: list[float] = []
     fold_rois: list[float] = []
+    cached_artifact = None
+    cached_calibrator = None
+    last_fit_day = None
+    retrain_interval_days = max(int(retrain_interval_days), 1)
 
     i = min_train_days
     while i < len(unique_days):
@@ -172,13 +177,33 @@ def walk_forward_backtest(
         if calibration_df.empty:
             calibration_df = train_df.tail(min(500, len(train_df))).copy()
 
-        artifact = fit_two_stage_benter(core_train_df, calibration_df, features.feature_columns)
-        calibration_form_probability = predict_two_stage_probability(artifact, calibration_df)
-        calibrator = fit_calibrator(
-            y_true=calibration_df["is_winner"].to_numpy(),
-            raw_prob=calibration_form_probability,
-            method=calibration_method,
+        should_retrain = (
+            cached_artifact is None
+            or last_fit_day is None
+            or (pd.Timestamp(test_day) - pd.Timestamp(last_fit_day)).days
+            >= retrain_interval_days
         )
+        if should_retrain:
+            cached_artifact = fit_two_stage_benter(
+                core_train_df,
+                calibration_df,
+                features.feature_columns,
+            )
+            calibration_form_probability = predict_two_stage_probability(
+                cached_artifact,
+                calibration_df,
+            )
+            cached_calibrator = fit_calibrator(
+                y_true=calibration_df["is_winner"].to_numpy(),
+                raw_prob=calibration_form_probability,
+                method=calibration_method,
+            )
+            last_fit_day = test_day
+
+        artifact = cached_artifact
+        calibrator = cached_calibrator
+        if artifact is None or calibrator is None:
+            raise RuntimeError("Walk-forward modeli yeniden egitilemedi.")
 
         pred = test_df.copy()
         pred["raw_probability"] = predict_two_stage_probability(artifact, pred)

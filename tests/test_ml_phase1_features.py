@@ -99,6 +99,78 @@ def test_features_use_only_previous_races_for_same_day_target() -> None:
     assert second.form_avg_3 > first.form_avg_3
 
 
+def test_no_future_aggregates() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "race_id": "R1",
+                "date": date(2025, 1, 1),
+                "race_datetime": "2025-01-01 12:00:00",
+                "horse_id": "H1",
+                "draw": 1,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 2,
+                "odds": 2.0,
+                "market_probability": 0.5,
+                "finish_position": 1,
+                "is_winner": 1,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+            {
+                "race_id": "R2",
+                "date": date(2025, 1, 2),
+                "race_datetime": "2025-01-02 12:00:00",
+                "horse_id": "H1",
+                "draw": 1,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 2,
+                "odds": 2.0,
+                "market_probability": 0.5,
+                "finish_position": 2,
+                "is_winner": 0,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+        ]
+    )
+
+    full = build_leakage_safe_features(frame).frame
+    prefix = build_leakage_safe_features(frame.iloc[:1]).frame
+    aggregate_columns = [
+        "form_avg_3",
+        "form_avg_5",
+        "form_avg_10",
+        "form_var_5",
+        "last_run_perf",
+        "days_since_last_race",
+        "distance_fit",
+        "surface_fit",
+        "track_fit",
+        "history_avg_finish_position",
+        "history_avg_field_size",
+        "history_avg_weight",
+        "history_avg_odds",
+        "history_avg_handicap_points",
+        "history_avg_race_time_seconds",
+        "history_avg_prize",
+        "history_avg_s20",
+        "jockey_horse_combo_wins",
+    ]
+
+    pd.testing.assert_series_equal(
+        full.loc[0, aggregate_columns],
+        prefix.loc[0, aggregate_columns],
+        check_names=False,
+    )
+
+
 def test_precomputed_real_features_are_not_replaced_by_no_history_defaults() -> None:
     frame = pd.DataFrame(
         {

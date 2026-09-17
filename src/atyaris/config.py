@@ -69,6 +69,11 @@ class Settings(BaseSettings):
 
     # Benter pipeline veri/artifact path ayarlari.
     phase1_raw_csv_path: str = "data/raw/tjk_real_races.csv"
+    phase1_raw_history_jsonl_path: str = "data/raw/tjk_horse_history.jsonl"
+    phase1_raw_daily_program_jsonl_path: str = "data/raw/tjk_daily_program.jsonl"
+    phase1_raw_race_results_jsonl_path: str = "data/raw/tjk_race_results.jsonl"
+    phase1_raw_workouts_jsonl_path: str = "data/raw/tjk_workouts.jsonl"
+    phase1_raw_trainer_statistics_jsonl_path: str = "data/raw/tjk_trainer_statistics.jsonl"
     phase1_clean_csv_path: str = "data/processed/clean_races.csv"
     phase1_features_csv_path: str = "data/processed/features_phase1.csv"
     phase1_prediction_features_csv_path: str = "data/processed/prediction_features_phase1.csv"

@@ -51,6 +51,11 @@ from atyaris.ml.real_ingestion import ingest_real_tjk_data
 @dataclass
 class Phase1Paths:
     raw_csv: Path = Path("data/raw/tjk_real_races.csv")
+    raw_history_jsonl: Path = Path("data/raw/tjk_horse_history.jsonl")
+    raw_daily_program_jsonl: Path = Path("data/raw/tjk_daily_program.jsonl")
+    raw_race_results_jsonl: Path = Path("data/raw/tjk_race_results.jsonl")
+    raw_workouts_jsonl: Path = Path("data/raw/tjk_workouts.jsonl")
+    raw_trainer_statistics_jsonl: Path = Path("data/raw/tjk_trainer_statistics.jsonl")
     clean_csv: Path = Path("data/processed/clean_races.csv")
     features_csv: Path = Path("data/processed/features_phase1.csv")
     prediction_features_csv: Path = Path("data/processed/prediction_features_phase1.csv")
@@ -85,6 +90,11 @@ def _apply_prediction_reliability(
 def paths_from_settings(settings: Settings) -> Phase1Paths:
     return Phase1Paths(
         raw_csv=Path(settings.phase1_raw_csv_path),
+        raw_history_jsonl=Path(settings.phase1_raw_history_jsonl_path),
+        raw_daily_program_jsonl=Path(settings.phase1_raw_daily_program_jsonl_path),
+        raw_race_results_jsonl=Path(settings.phase1_raw_race_results_jsonl_path),
+        raw_workouts_jsonl=Path(settings.phase1_raw_workouts_jsonl_path),
+        raw_trainer_statistics_jsonl=Path(settings.phase1_raw_trainer_statistics_jsonl_path),
         clean_csv=Path(settings.phase1_clean_csv_path),
         features_csv=Path(settings.phase1_features_csv_path),
         prediction_features_csv=Path(settings.phase1_prediction_features_csv_path),
@@ -101,6 +111,7 @@ def _training_checkpoint_path(paths: Phase1Paths) -> Path:
 
 
 _TRAINING_COLLECTION_VERSION = 2
+MIN_TRAINING_DATES = 6
 
 
 def _write_csv_atomically(frame: pd.DataFrame, path: Path) -> None:
@@ -163,8 +174,9 @@ def ingest_real_data(
     end_date: date,
     paths: Phase1Paths,
     progress_callback: Callable[[str], None] | None = None,
+    checkpoint_path: Path | None = None,
 ) -> pd.DataFrame:
-    checkpoint_path = _training_checkpoint_path(paths)
+    checkpoint_path = checkpoint_path or _training_checkpoint_path(paths)
     completed_dates = _load_training_checkpoint(checkpoint_path, start_date, end_date)
     existing = pd.DataFrame()
     if completed_dates and paths.raw_csv.exists():
@@ -385,8 +397,11 @@ def _select_stage1_regularization(
 def _split_temporal_frames(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split labelled rows by chronological date into 70/15/15 partitions."""
     dates = sorted(pd.to_datetime(frame["date"]).dt.date.unique())
-    if len(dates) < 3:
-        raise ValueError("Zamansal split icin en az 3 farkli tarih gerekli")
+    if len(dates) < MIN_TRAINING_DATES:
+        raise ValueError(
+            "Zamansal split icin train/validation/test araliklarini olusturmak "
+            f"icin en az {MIN_TRAINING_DATES} farkli tarih gerekli"
+        )
 
     train_date_count = max(1, int(round(len(dates) * 0.70)))
     validation_date_count = max(1, int(round(len(dates) * 0.15)))

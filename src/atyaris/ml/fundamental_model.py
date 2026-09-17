@@ -43,17 +43,30 @@ def _standardize_apply(x: np.ndarray, mean_: np.ndarray, scale_: np.ndarray) -> 
 
 
 def _softmax_by_group(utility: np.ndarray, groups: list[np.ndarray]) -> np.ndarray:
-    probs = np.zeros_like(utility, dtype=float)
-    for g in groups:
-        u = utility[g]
-        shift = np.max(u)
-        e = np.exp(u - shift)
-        denom = np.sum(e)
-        if denom <= 0.0:
-            probs[g] = 1.0 / max(len(g), 1)
-        else:
-            probs[g] = e / denom
-    return probs
+    if not groups:
+        return np.zeros_like(utility, dtype=float)
+
+    group_index = np.empty(len(utility), dtype=np.intp)
+    for group_number, indices in enumerate(groups):
+        group_index[indices] = group_number
+
+    group_count = len(groups)
+    group_max = np.full(group_count, -np.inf, dtype=float)
+    np.maximum.at(group_max, group_index, utility)
+    exponentials = np.exp(utility - group_max[group_index])
+    group_totals = np.zeros(group_count, dtype=float)
+    np.add.at(group_totals, group_index, exponentials)
+    probabilities = np.divide(
+        exponentials,
+        group_totals[group_index],
+        out=np.zeros_like(exponentials),
+        where=group_totals[group_index] > 0.0,
+    )
+
+    for group_number, indices in enumerate(groups):
+        if group_totals[group_number] <= 0.0:
+            probabilities[indices] = 1.0 / max(len(indices), 1)
+    return probabilities
 
 
 def fit_conditional_logit(

@@ -30,6 +30,7 @@ from atyaris.data_sources.tjk_scraper import KNOWN_HIPPODROMES, TJKHtmlDataSourc
 from atyaris.ml.pipeline import (
     build_features,
     ingest_real_data,
+    MIN_TRAINING_DATES,
     optimize_for_date,
     paths_from_settings,
     prepare_prediction_features,
@@ -38,6 +39,9 @@ from atyaris.ml.pipeline import (
     run_phase1_backtest,
     train_phase1_model,
 )
+from atyaris.ml.real_ingestion import ingest_real_tjk_data
+from atyaris.ml.raw_store import JsonlRawStore
+from atyaris.ml.local_pipeline import build_local_raw_frame
 from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
@@ -110,6 +114,9 @@ _TRAINING_JOBS: dict[str, dict[str, object]] = {}
 _TRAINING_CANCEL_EVENTS: dict[str, Event] = {}
 _TRAINING_PAUSE_REQUESTS: set[str] = set()
 _TRAINING_RETRY_TIMERS: dict[str, Timer] = {}
+_COLLECTION_JOBS: dict[str, dict[str, object]] = {}
+_COLLECTION_CANCEL_EVENTS: dict[str, Event] = {}
+_COLLECTION_PAUSE_REQUESTS: set[str] = set()
 
 
 class _TrainingCancelled(Exception):
@@ -123,6 +130,11 @@ class _TrainingPaused(Exception):
 def _training_jobs_manifest_path() -> Path:
     settings = get_settings()
     return paths_from_settings(settings).raw_csv.with_suffix(".jobs.json")
+
+
+def _collection_jobs_manifest_path() -> Path:
+    settings = get_settings()
+    return paths_from_settings(settings).raw_csv.with_suffix(".collection.jobs.json")
 
 
 def _persist_training_jobs() -> None:
@@ -141,6 +153,20 @@ def _persist_training_jobs() -> None:
             }
             for job_id, job in _TRAINING_JOBS.items()
             if job.get("status") in {"running", "paused", "awaiting_decision", "retrying", "completed_with_warnings"}
+        ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _persist_collection_jobs() -> None:
+    path = _collection_jobs_manifest_path()
+    with _TRAINING_LOCK:
+        jobs = [
+            {"job_id": job_id, **job}
+            for job_id, job in _COLLECTION_JOBS.items()
+            if job.get("status") in {"running", "paused", "completed", "failed"}
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -255,6 +281,193 @@ def _schedule_skipped_training_retry(job_id: str) -> None:
         timer.daemon = True
         _TRAINING_RETRY_TIMERS[job_id] = timer
         timer.start()
+
+
+def _restore_collection_jobs() -> None:
+    path = _collection_jobs_manifest_path()
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Collection job manifest could not be read: %s", path)
+        return
+    if not isinstance(payload, list):
+        return
+    with _TRAINING_LOCK:
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            job_id = str(item.get("job_id", "")).strip()
+            if not job_id or not item.get("start_date") or not item.get("end_date"):
+                continue
+            restored = dict(item)
+            restored.pop("job_id", None)
+            if restored.get("status") == "running":
+                restored["status"] = "paused"
+                restored["message"] = "Sunucu yeniden baslatildi; checkpointten devam edilebilir"
+            _COLLECTION_JOBS[job_id] = restored
+
+
+def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    cancel_event = _COLLECTION_CANCEL_EVENTS[job_id]
+    total_days = max((end_date - start_date).days + 1, 1)
+    collection_checkpoint = paths.raw_csv.with_suffix(".collection.progress.json")
+    completed_units: set[str] = set()
+    failed_units: set[str] = set()
+    if collection_checkpoint.exists():
+        try:
+            payload = json.loads(collection_checkpoint.read_text(encoding="utf-8"))
+            if (
+                payload.get("start_date") == start_date.isoformat()
+                and payload.get("end_date") == end_date.isoformat()
+            ):
+                completed_units = {str(value) for value in payload.get("completed_units", [])}
+                failed_units = {str(value) for value in payload.get("failed_units", [])}
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            completed_units = set()
+
+    def write_checkpoint() -> None:
+        payload = {
+            "collection_version": 1,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "completed_units": sorted(completed_units),
+            "failed_units": sorted(failed_units),
+        }
+        temporary = collection_checkpoint.with_suffix(collection_checkpoint.suffix + ".tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        temporary.replace(collection_checkpoint)
+
+    def append_frame(frame: pd.DataFrame) -> None:
+        if frame.empty:
+            return
+        existing = pd.read_csv(paths.raw_csv) if paths.raw_csv.exists() else pd.DataFrame()
+        combined = pd.concat([existing, frame], ignore_index=True, sort=False)
+        keys = [column for column in ["date", "race_id", "horse_id", "draw"] if column in combined.columns]
+        if keys:
+            combined = combined.drop_duplicates(subset=keys, keep="last")
+        temporary = paths.raw_csv.with_suffix(paths.raw_csv.suffix + ".tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_csv(temporary, index=False)
+        temporary.replace(paths.raw_csv)
+
+    source = _bulletin_source_for_ml(settings)
+    failed_targets = 0
+    skipped_days = 0
+    completed_days: set[date] = {
+        date.fromisoformat(unit.split("|", 1)[0])
+        for unit in completed_units
+        if "|" in unit
+    }
+    started_at = monotonic()
+
+    def progress(message: str) -> None:
+        if cancel_event.is_set():
+            with _TRAINING_LOCK:
+                if job_id in _COLLECTION_PAUSE_REQUESTS:
+                    raise _TrainingPaused()
+            raise _TrainingCancelled()
+        with _TRAINING_LOCK:
+            job = _COLLECTION_JOBS.get(job_id)
+            if job is not None:
+                job["message"] = message
+                job["completed_days"] = len(completed_days)
+                job["remaining_days"] = max(total_days - len(completed_days), 0)
+                elapsed = monotonic() - started_at
+                job["estimated_remaining"] = (
+                    f"{int((elapsed / len(completed_days)) * (total_days - len(completed_days)))} sn"
+                    if completed_days else "hesaplaniyor"
+                )
+                job["current_date"] = message[:10] if len(message) >= 10 else ""
+                _persist_collection_jobs()
+
+    try:
+        for current in (end_date - timedelta(days=offset) for offset in range(total_days)):
+            progress(f"Hipodromlar aliniyor: {current.isoformat()}")
+            try:
+                hippodromes = source.get_available_hippodromes(current)
+            except DataSourceError as exc:
+                skipped_days += 1
+                failed_targets += 1
+                progress(f"Gun atlandi: {current.isoformat()} | {exc}")
+                continue
+            day_units = 0
+            for hippodrome in hippodromes:
+                try:
+                    races = source.get_daily_races(current, hippodrome)
+                except DataSourceError as exc:
+                    failed_targets += 1
+                    progress(f"Hipodrom atlandi: {current.isoformat()} / {hippodrome} | {exc}")
+                    continue
+                for race in races:
+                    unit = f"{current.isoformat()}|{hippodrome}|{race.race_no}"
+                    day_units += 1
+                    if unit in completed_units:
+                        continue
+                    progress(f"Yaris aliniyor: {unit}")
+                    last_error = None
+                    succeeded = False
+                    for attempt in range(1, 4):
+                        try:
+                            race_data = ingest_real_tjk_data(
+                                current,
+                                current,
+                                paths,
+                                progress_callback=progress,
+                                hippodrome=hippodrome,
+                                race_no=race.race_no,
+                            )
+                            append_frame(race_data)
+                            succeeded = True
+                            break
+                        except (DataSourceError, RuntimeError) as exc:
+                            last_error = exc
+                            if attempt < 3:
+                                progress(f"Tekrar deneme {attempt}/3: {unit}")
+                    if not succeeded:
+                        failed_targets += 1
+                        failed_units.add(unit)
+                        progress(f"Yaris basarisiz: {unit} | {last_error}")
+                    else:
+                        completed_units.add(unit)
+                    write_checkpoint()
+            if day_units == 0:
+                skipped_days += 1
+            else:
+                completed_days.add(current)
+            with _TRAINING_LOCK:
+                job = _COLLECTION_JOBS[job_id]
+                job["completed_days"] = len(completed_days)
+                job["remaining_days"] = max(total_days - len(completed_days), 0)
+                job["skipped_days"] = skipped_days
+                job["failed_targets"] = failed_targets
+                job["message"] = f"Gun tamamlandi: {current.isoformat()}"
+            _persist_collection_jobs()
+        with _TRAINING_LOCK:
+            _COLLECTION_JOBS[job_id]["status"] = "completed"
+            _COLLECTION_JOBS[job_id]["message"] = "Veri toplama tamamlandi"
+        _persist_collection_jobs()
+    except _TrainingPaused:
+        with _TRAINING_LOCK:
+            _COLLECTION_PAUSE_REQUESTS.discard(job_id)
+            _COLLECTION_JOBS[job_id]["status"] = "paused"
+            _COLLECTION_JOBS[job_id]["message"] = "Veri toplama duraklatildi; checkpoint korundu"
+        _persist_collection_jobs()
+    except _TrainingCancelled:
+        with _TRAINING_LOCK:
+            _COLLECTION_JOBS[job_id]["status"] = "cancelled"
+            _COLLECTION_JOBS[job_id]["message"] = "Veri toplama durduruldu"
+        _persist_collection_jobs()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Web collection job failed")
+        with _TRAINING_LOCK:
+            _COLLECTION_JOBS[job_id]["status"] = "failed"
+            _COLLECTION_JOBS[job_id]["message"] = str(exc)
+        _persist_collection_jobs()
 
 
 @dataclass
@@ -1177,17 +1390,179 @@ def _run_training_job(
                 "message": message,
             }
         _persist_training_jobs()
+
+
+def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> None:
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    try:
+        local_frame = build_local_raw_frame(paths)
+        if not local_frame.empty:
+            local_frame.to_csv(paths.raw_csv, index=False)
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id]["message"] = "Lokal ham arşiv okunuyor"
+        cleaned = preprocess_raw(paths)
+        if not cleaned.empty:
+            dates = pd.to_datetime(cleaned["date"], errors="coerce").dt.date
+            cleaned = cleaned[(dates >= start_date) & (dates <= end_date)].copy()
+            cleaned.to_csv(paths.clean_csv, index=False)
+        built = build_features(paths)
+        artifact = train_phase1_model(
+            paths,
+            holdout_days=settings.phase1_holdout_days,
+            calibration_days=settings.phase3_calibration_days,
+            calibration_method=settings.phase3_calibration_method,
+        )
+        model_version = register_training_run(
+            settings,
+            paths,
+            holdout_days=settings.phase1_holdout_days,
+            calibration_method=settings.phase3_calibration_method,
+            blend_weight=float(artifact.logistic_weight),
+            feature_frame=built.frame,
+            feature_columns=artifact.feature_columns,
+        )
+        backtest = run_phase1_backtest(
+            paths,
+            min_train_days=settings.phase1_min_train_days,
+            calibration_days=settings.phase3_calibration_days,
+            calibration_method=settings.phase3_calibration_method,
+            ev_probability_threshold=settings.ev_probability_threshold,
+            ev_min_edge=settings.ev_min_edge,
+            ev_min_value=settings.ev_min_value,
+        )
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id] = {
+                "status": "completed",
+                "message": "Lokal veriden egitim tamamlandi",
+                "model_version": model_version,
+                "backtest": backtest,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Local training job failed")
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id] = {"status": "failed", "message": f"Lokal egitim: {exc}"}
+    _persist_training_jobs()
+
+
+def _validate_training_date_range(start_date: date, end_date: date) -> None:
+    if end_date - start_date < timedelta(days=MIN_TRAINING_DATES - 1):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model egitimi icin en az {MIN_TRAINING_DATES} farkli tarih gerekli. "
+                f"En az {MIN_TRAINING_DATES} gunluk bir tarih araligi secin."
+            ),
+        )
+
+
 def create_app() -> FastAPI:
     """FastAPI uygulamasini olusturur (uvicorn factory olarak kullanilir)."""
     configure_logging()
     _restore_training_jobs()
+    _restore_collection_jobs()
     app = FastAPI(title="Turkiye At Yarisi Tahmin Araci", docs_url="/api/docs")
     templates.env.globals["active_training_job_id"] = _active_training_job_id
+
+    @app.get("/collect", response_class=RedirectResponse)
+    def start_collection(
+        start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ) -> RedirectResponse:
+        parsed_start = date.fromisoformat(start_date)
+        parsed_end = date.fromisoformat(end_date)
+        if parsed_start > parsed_end:
+            raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
+        with _TRAINING_LOCK:
+            active = next(
+                (job_id for job_id, job in _COLLECTION_JOBS.items() if job.get("status") == "running"),
+                None,
+            )
+            if active is not None:
+                job_id = active
+            else:
+                resumable = next(
+                    (
+                        job_id for job_id, job in _COLLECTION_JOBS.items()
+                        if job.get("status") == "paused"
+                        and job.get("start_date") == start_date
+                        and job.get("end_date") == end_date
+                    ),
+                    None,
+                )
+                if resumable is not None:
+                    job_id = resumable
+                else:
+                    job_id = uuid4().hex
+                    _COLLECTION_JOBS[job_id] = {
+                        "status": "running",
+                        "message": "Veri toplama siraya alindi",
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "completed_days": 0,
+                        "remaining_days": (parsed_end - parsed_start).days + 1,
+                        "skipped_days": 0,
+                        "failed_targets": 0,
+                    }
+                _COLLECTION_JOBS[job_id]["status"] = "running"
+                _COLLECTION_CANCEL_EVENTS[job_id] = Event()
+                Thread(
+                    target=_run_collection_job,
+                    args=(job_id, parsed_start, parsed_end),
+                    name=f"atyaris-collect-{job_id[:8]}",
+                    daemon=True,
+                ).start()
+                _persist_collection_jobs()
+        return RedirectResponse(url=f"/training?collection_job={job_id}", status_code=303)
+
+    @app.get("/collect/status/{job_id}")
+    def collection_status(job_id: str) -> JSONResponse:
+        with _TRAINING_LOCK:
+            job = _COLLECTION_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Veri toplama isi bulunamadi.")
+            return JSONResponse({"job_id": job_id, **job})
+
+    @app.post("/collect/{action}/{job_id}")
+    def collection_control(action: str, job_id: str) -> JSONResponse:
+        if action not in {"pause", "resume", "cancel"}:
+            raise HTTPException(status_code=404, detail="Gecersiz veri toplama islemi.")
+        with _TRAINING_LOCK:
+            job = _COLLECTION_JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="Veri toplama isi bulunamadi.")
+            if action == "pause" and job.get("status") == "running":
+                _COLLECTION_PAUSE_REQUESTS.add(job_id)
+                _COLLECTION_CANCEL_EVENTS[job_id].set()
+                job["message"] = "Veri toplama duraklatiliyor..."
+            elif action == "cancel":
+                _COLLECTION_PAUSE_REQUESTS.discard(job_id)
+                event = _COLLECTION_CANCEL_EVENTS.get(job_id)
+                if event is not None:
+                    event.set()
+                if job.get("status") != "running":
+                    job["status"] = "cancelled"
+                    job["message"] = "Veri toplama iptal edildi"
+            elif action == "resume" and job.get("status") == "paused":
+                job["status"] = "running"
+                job["message"] = "Veri toplama checkpointten devam ediyor"
+                _COLLECTION_CANCEL_EVENTS[job_id] = Event()
+                Thread(
+                    target=_run_collection_job,
+                    args=(job_id, date.fromisoformat(str(job["start_date"])), date.fromisoformat(str(job["end_date"]))),
+                    name=f"atyaris-collect-{job_id[:8]}",
+                    daemon=True,
+                ).start()
+            _persist_collection_jobs()
+            return JSONResponse({"job_id": job_id, **job})
 
     @app.get("/train", response_class=RedirectResponse)
     def start_training(
         start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
         end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        mode: str = Query("online", pattern="^(online|local)$"),
     ) -> RedirectResponse:
         try:
             parsed_start = date.fromisoformat(start_date)
@@ -1196,6 +1571,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Tarih YYYY-AA-GG formatinda olmali.") from exc
         if parsed_start > parsed_end:
             raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
+        _validate_training_date_range(parsed_start, parsed_end)
 
         with _TRAINING_LOCK:
             active = next(
@@ -1221,7 +1597,7 @@ def create_app() -> FastAPI:
                     _TRAINING_JOBS[job_id]["message"] = "Egitim checkpointten devam ediyor"
                     _TRAINING_CANCEL_EVENTS[job_id] = Event()
                     Thread(
-                        target=_run_training_job,
+                        target=_run_local_training_job if mode == "local" else _run_training_job,
                         args=(job_id, parsed_start, parsed_end),
                         name=f"atyaris-train-{job_id[:8]}",
                         daemon=True,
@@ -1237,7 +1613,7 @@ def create_app() -> FastAPI:
                 }
                 _TRAINING_CANCEL_EVENTS[job_id] = Event()
                 Thread(
-                    target=_run_training_job,
+                    target=_run_local_training_job if mode == "local" else _run_training_job,
                     args=(job_id, parsed_start, parsed_end),
                     name=f"atyaris-train-{job_id[:8]}",
                     daemon=True,
@@ -1382,6 +1758,21 @@ def create_app() -> FastAPI:
             if start_date and end_date and start_date > end_date:
                 raise ValueError("Baslangic tarihi bitis tarihinden sonra olamaz.")
             settings = get_settings()
+            paths = paths_from_settings(settings)
+            raw_maintenance = []
+            for path, collection in (
+                (paths.raw_daily_program_jsonl, "daily_program"),
+                (paths.raw_race_results_jsonl, "race_results"),
+                (paths.raw_history_jsonl, "horse_history"),
+                (paths.raw_workouts_jsonl, "workouts"),
+                (paths.raw_trainer_statistics_jsonl, "trainer_statistics"),
+            ):
+                try:
+                    store = JsonlRawStore(path, collection)
+                    recommendation = store.compact_recommendation()
+                    raw_maintenance.append({"name": collection, **recommendation.__dict__})
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    raw_maintenance.append({"name": collection, "recommended": False, "reason": f"uyumsuz/eski format: {exc}", "active_records": 0, "file_bytes": path.stat().st_size if path.exists() else 0})
             history = load_training_history(
                 settings.phase5_tracking_db_path,
                 limit=limit,
@@ -1409,8 +1800,30 @@ def create_app() -> FastAPI:
                     for job_id, job in reversed(list(_TRAINING_JOBS.items()))
                     if job.get("status") != "cancelled"
                 ],
+                "collection_jobs": [
+                    {"job_id": job_id, **job}
+                    for job_id, job in reversed(list(_COLLECTION_JOBS.items()))
+                    if job.get("status") != "cancelled"
+                ],
+                "raw_maintenance": raw_maintenance,
             },
         )
+
+    @app.post("/raw/compact")
+    def compact_raw_data() -> JSONResponse:
+        settings = get_settings()
+        paths = paths_from_settings(settings)
+        results = []
+        for path, collection in (
+            (paths.raw_daily_program_jsonl, "daily_program"),
+            (paths.raw_race_results_jsonl, "race_results"),
+            (paths.raw_history_jsonl, "horse_history"),
+            (paths.raw_workouts_jsonl, "workouts"),
+            (paths.raw_trainer_statistics_jsonl, "trainer_statistics"),
+        ):
+            store = JsonlRawStore(path, collection)
+            results.append({"name": collection, **store.compact().__dict__})
+        return JSONResponse({"status": "completed", "collections": results})
 
     @app.get("/training-history", response_class=RedirectResponse)
     def training_history_redirect(

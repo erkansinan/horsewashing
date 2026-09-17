@@ -26,6 +26,17 @@ from atyaris.models.entities import (
 from atyaris.ml.tracking import register_model_run
 from atyaris.config import Settings
 from atyaris.web.app import create_app
+def test_training_rejects_date_range_shorter_than_three_days() -> None:
+    client = _client()
+
+    response = client.get(
+        "/train",
+        params={"start_date": "2026-09-09", "end_date": "2026-09-09"},
+    )
+
+    assert response.status_code == 400
+    assert "en az 6 farkli tarih" in response.json()["detail"]
+
 
 
 def _client() -> TestClient:

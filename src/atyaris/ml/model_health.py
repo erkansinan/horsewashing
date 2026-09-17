@@ -181,6 +181,57 @@ def _log_loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
+def fixed_test_comparison(
+    artifact: BenterTwoStageArtifact,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    bootstrap_samples: int = 1000,
+    random_state: int = 42,
+) -> dict[str, Any]:
+    """Compare model and market on the fixed chronological test partition."""
+    if test_df.empty:
+        return {"status": "empty_test_set", "bootstrap_samples": bootstrap_samples, "test_dates": [], "test_races": 0}
+
+    market_col = "market_probability_norm" if "market_probability_norm" in train_df else "market_probability"
+    market_model = fit_conditional_logit(train_df, [market_col], max_iter=80, random_state=random_state)
+    market_probability = predict_conditional_logit_probability(market_model, test_df)
+    model_probability = predict_two_stage_probability(artifact, test_df)
+    scored = test_df.assign(model_probability=model_probability, market_probability=market_probability)
+    model_hits: list[float] = []
+    market_hits: list[float] = []
+    for _, group in scored.groupby("race_id"):
+        model_hits.append(float(group.nlargest(4, "model_probability")["is_winner"].max()))
+        market_hits.append(float(group.nlargest(4, "market_probability")["is_winner"].max()))
+
+    model_top4 = float(np.mean(model_hits)) if model_hits else 0.0
+    market_top4 = float(np.mean(market_hits)) if market_hits else 0.0
+    differences = np.asarray(model_hits) - np.asarray(market_hits)
+    rng = np.random.default_rng(random_state)
+    if differences.size and bootstrap_samples > 0:
+        bootstrap_means = [float(np.mean(rng.choice(differences, size=differences.size, replace=True))) for _ in range(bootstrap_samples)]
+        ci_low, ci_high = np.quantile(bootstrap_means, [0.025, 0.975])
+    else:
+        ci_low, ci_high = 0.0, 0.0
+    model_log_loss = _log_loss(test_df, model_probability)
+    market_log_loss = _log_loss(test_df, market_probability)
+    test_dates = pd.to_datetime(test_df["date"]).dt.date
+    return {
+        "status": "ok",
+        "test_dates": [min(test_dates).isoformat(), max(test_dates).isoformat()],
+        "test_races": int(test_df["race_id"].nunique()),
+        "test_rows": int(len(test_df)),
+        "model_top4": model_top4,
+        "market_top4": market_top4,
+        "top4_difference": model_top4 - market_top4,
+        "top4_difference_bootstrap_ci": [float(ci_low), float(ci_high)],
+        "bootstrap_samples": int(bootstrap_samples),
+        "model_log_loss": model_log_loss,
+        "market_log_loss": market_log_loss,
+        "log_loss_difference": model_log_loss - market_log_loss,
+        "edge_status": "supported" if ci_low > 0.0 else "not_established",
+    }
+
+
 def test_beats_market_baseline(
     artifact: BenterTwoStageArtifact,
     train_df: pd.DataFrame,
@@ -445,6 +496,7 @@ def run_model_health_checks(
             "validation": _metrics(validation_df, validation_probability),
             "test": _metrics(test_df, test_probability),
         },
+        "fixed_test_comparison": fixed_test_comparison(artifact, train_df, test_df),
         "calibration_curve": _calibration_curve(test_df, test_probability),
         "test_probability_variance": float(np.var(test_probability)) if not test_df.empty else 0.0,
         "test_rows": int(len(test_df)),

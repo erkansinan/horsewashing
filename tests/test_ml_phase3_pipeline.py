@@ -128,7 +128,7 @@ def test_phase3_training_rejects_single_day_window(tmp_path, monkeypatch) -> Non
     frame["date"] = "2025-04-30"
     frame.to_csv(paths.features_csv, index=False)
 
-    with pytest.raises(ValueError, match="en az 3 farkli tarih"):
+    with pytest.raises(ValueError, match="en az 6 farkli tarih"):
         train_phase1_model(
             paths,
             holdout_days=30,
