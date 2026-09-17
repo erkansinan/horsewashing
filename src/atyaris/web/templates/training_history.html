@@ -20,14 +20,18 @@
     <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
     <span class="collection-message">{{ job.message }}</span><br>
     <span>Gün: <b class="completed-days">{{ job.completed_days or 0 }}</b> tamamlandı / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı</span><br>
-    <span>Tahmini kalan süre: {{ job.estimated_remaining or 'hesaplaniyor' }}</span><br>
-    <span>Atlanan: {{ job.skipped_days or 0 }} | Başarısız hedef: {{ job.failed_targets or 0 }}</span>
+    <span>Tahmini kalan süre: <b class="estimated-remaining">{{ job.estimated_remaining or 'hesaplaniyor' }}</b></span><br>
+    <span>Şu an: <b class="current-target">{{ job.current_target or job.current_date or 'Başlatılıyor' }}</b></span><br>
+    <span>Eksik veri: <b class="missing-data-records">{{ job.missing_data_records or 0 }}</b> | Atlanan gün: <b class="skipped-days">{{ job.skipped_days or 0 }}</b> | Başarısız hedef: <b class="failed-targets">{{ job.failed_targets or 0 }}</b></span>
     {% if job.status == 'running' %}
     <button type="button" data-collection-action="pause" data-job-id="{{ job.job_id }}">Toplamayı duraklat</button>
     <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
     {% elif job.status == 'paused' %}
     <button type="button" data-collection-action="resume" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
     <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
+    {% endif %}
+    {% if job.status in ['failed', 'cancelled', 'completed'] %}
+    <button type="button" data-collection-action="remove" data-job-id="{{ job.job_id }}">Kayıt geçmişinden kaldır</button>
     {% endif %}
   </div>
   {% endfor %}
@@ -188,16 +192,27 @@
       status.querySelector(".collection-message").textContent = job.message || "";
       status.querySelector(".completed-days").textContent = job.completed_days || 0;
       status.querySelector(".remaining-days").textContent = job.remaining_days || 0;
-      if (job.status === "running" || job.status === "paused") window.setTimeout(() => update(status), 1500);
+      const estimate = status.querySelector(".estimated-remaining");
+      if (estimate) estimate.textContent = job.estimated_remaining || "hesaplaniyor";
+      const currentTarget = status.querySelector(".current-target");
+      if (currentTarget) currentTarget.textContent = job.current_target || job.current_date || "Başlatılıyor";
+      const missingData = status.querySelector(".missing-data-records");
+      if (missingData) missingData.textContent = job.missing_data_records || 0;
+      const skippedDays = status.querySelector(".skipped-days");
+      if (skippedDays) skippedDays.textContent = job.skipped_days || 0;
+      const failedTargets = status.querySelector(".failed-targets");
+      if (failedTargets) failedTargets.textContent = job.failed_targets || 0;
+      if (job.status === "running" || job.pause_requested) window.setTimeout(() => update(status), 1500);
     };
     document.querySelectorAll(".collection-status[data-job-id]").forEach((status) => {
-      if (["running", "paused"].includes(status.dataset.state)) update(status);
+      if (status.dataset.state === "running") update(status);
     });
     document.addEventListener("click", async (event) => {
       const button = event.target.closest("[data-collection-action]");
       if (!button) return;
       const action = button.dataset.collectionAction;
       if (action === "cancel" && !window.confirm("Veri toplama durdurulsun mu? Checkpoint korunur.")) return;
+      if (action === "remove" && !window.confirm("Bu veri toplama kaydi gecmis listesinden kaldirilsin mi?")) return;
       button.disabled = true;
       await fetch("/collect/" + action + "/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
       window.location.reload();

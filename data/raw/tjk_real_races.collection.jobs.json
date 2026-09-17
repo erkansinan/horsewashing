@@ -1,13 +1,18 @@
 [
   {
-    "job_id": "b7b4f23600354c1d9dfb58dc01a7efd9",
+    "job_id": "aef21cbed5c74ae48d8d2ff1b972f826",
     "status": "running",
-    "message": "Veri toplama duraklatiliyor...",
+    "message": "Tarihsel istatistik hesaplaniyor: 2026-09-15 / Ankara / 4. kosu / OSKAYBEY | gunluk at: 7/11 | gunluk uretilen satir: 6 | tahmini kalan: 24 sn",
     "start_date": "2026-09-09",
     "end_date": "2026-09-16",
-    "completed_days": 0,
-    "remaining_days": 8,
+    "completed_days": 2,
+    "remaining_days": 6,
     "skipped_days": 0,
-    "failed_targets": 0
+    "failed_targets": 0,
+    "estimated_remaining": "4.9 dk",
+    "current_date": "Tarihsel i",
+    "current_target": "Tarihsel istatistik hesaplaniyor: 2026-09-15 / Ankara / 4. kosu / OSKAYBEY | gunluk at: 7/11 | gunluk uretilen satir: 6 | tahmini kalan: 24 sn",
+    "missing_data_records": 0,
+    "pause_requested": true
   }
 ]

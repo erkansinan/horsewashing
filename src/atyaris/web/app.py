@@ -14,6 +14,7 @@ from threading import Event, RLock, Thread, Timer
 from pathlib import Path
 import re
 from types import SimpleNamespace
+from time import monotonic
 from urllib.parse import urlencode
 from uuid import uuid4
 from xml.sax.saxutils import escape
@@ -42,7 +43,7 @@ from atyaris.ml.pipeline import (
 from atyaris.ml.real_ingestion import ingest_real_tjk_data
 from atyaris.ml.raw_store import JsonlRawStore
 from atyaris.ml.local_pipeline import build_local_raw_frame
-from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
+from atyaris.ml.features import TJK_SELECTED_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.phase5 import register_training_run
@@ -294,6 +295,7 @@ def _restore_collection_jobs() -> None:
         return
     if not isinstance(payload, list):
         return
+    restored_running = False
     with _TRAINING_LOCK:
         for item in payload:
             if not isinstance(item, dict):
@@ -306,7 +308,14 @@ def _restore_collection_jobs() -> None:
             if restored.get("status") == "running":
                 restored["status"] = "paused"
                 restored["message"] = "Sunucu yeniden baslatildi; checkpointten devam edilebilir"
+                restored["pause_requested"] = False
+                restored_running = True
             _COLLECTION_JOBS[job_id] = restored
+            _COLLECTION_CANCEL_EVENTS[job_id] = Event()
+            if restored.get("status") == "paused":
+                _COLLECTION_CANCEL_EVENTS[job_id].set()
+    if restored_running:
+        _persist_collection_jobs()
 
 
 def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
@@ -358,19 +367,30 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     source = _bulletin_source_for_ml(settings)
     failed_targets = 0
     skipped_days = 0
+    missing_data_records = 0
     completed_days: set[date] = {
         date.fromisoformat(unit.split("|", 1)[0])
         for unit in completed_units
         if "|" in unit
     }
     started_at = monotonic()
+    processed_units = len(completed_units) + len(failed_units)
+    observed_units_by_day: dict[date, int] = {}
+    active_collection_date = end_date
+
+    def check_collection_control() -> None:
+        with _TRAINING_LOCK:
+            job = _COLLECTION_JOBS.get(job_id)
+            paused = job is not None and job.get("status") == "paused"
+            pause_requested = job_id in _COLLECTION_PAUSE_REQUESTS
+        if paused or pause_requested:
+            raise _TrainingPaused()
+        if cancel_event.is_set() or job is None or job.get("status") != "running":
+            raise _TrainingCancelled()
 
     def progress(message: str) -> None:
-        if cancel_event.is_set():
-            with _TRAINING_LOCK:
-                if job_id in _COLLECTION_PAUSE_REQUESTS:
-                    raise _TrainingPaused()
-            raise _TrainingCancelled()
+        nonlocal processed_units
+        check_collection_control()
         with _TRAINING_LOCK:
             job = _COLLECTION_JOBS.get(job_id)
             if job is not None:
@@ -378,15 +398,33 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 job["completed_days"] = len(completed_days)
                 job["remaining_days"] = max(total_days - len(completed_days), 0)
                 elapsed = monotonic() - started_at
+                units_per_second = processed_units / elapsed if processed_units and elapsed > 0 else 0.0
+                completed_day_units = [
+                    count for day, count in observed_units_by_day.items()
+                    if day in completed_days and count > 0
+                ]
+                average_units_per_day = (
+                    sum(completed_day_units) / len(completed_day_units)
+                    if completed_day_units
+                    else max(observed_units_by_day.get(active_collection_date, 1), 1)
+                )
+                remaining_units = max(
+                    (total_days * average_units_per_day) - processed_units,
+                    0,
+                )
                 job["estimated_remaining"] = (
-                    f"{int((elapsed / len(completed_days)) * (total_days - len(completed_days)))} sn"
-                    if completed_days else "hesaplaniyor"
+                    f"{max(remaining_units / units_per_second / 60.0, 0.1):.1f} dk"
+                    if units_per_second > 0 and remaining_units > 0
+                    else f"{max(elapsed / 60.0, 0.1):.1f} dk; ilk tamamlanan yaris bekleniyor"
                 )
                 job["current_date"] = message[:10] if len(message) >= 10 else ""
+                job["current_target"] = message
                 _persist_collection_jobs()
 
     try:
         for current in (end_date - timedelta(days=offset) for offset in range(total_days)):
+            active_collection_date = current
+            check_collection_control()
             progress(f"Hipodromlar aliniyor: {current.isoformat()}")
             try:
                 hippodromes = source.get_available_hippodromes(current)
@@ -397,6 +435,8 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 continue
             day_units = 0
             for hippodrome in hippodromes:
+                check_collection_control()
+                progress(f"Hipodrom okunuyor: {current.isoformat()} / {hippodrome}")
                 try:
                     races = source.get_daily_races(current, hippodrome)
                 except DataSourceError as exc:
@@ -404,14 +444,17 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     progress(f"Hipodrom atlandi: {current.isoformat()} / {hippodrome} | {exc}")
                     continue
                 for race in races:
+                    check_collection_control()
                     unit = f"{current.isoformat()}|{hippodrome}|{race.race_no}"
                     day_units += 1
+                    observed_units_by_day[current] = day_units
                     if unit in completed_units:
                         continue
                     progress(f"Yaris aliniyor: {unit}")
                     last_error = None
                     succeeded = False
                     for attempt in range(1, 4):
+                        check_collection_control()
                         try:
                             race_data = ingest_real_tjk_data(
                                 current,
@@ -421,7 +464,9 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                                 hippodrome=hippodrome,
                                 race_no=race.race_no,
                             )
+                            check_collection_control()
                             append_frame(race_data)
+                            missing_data_records += int(race_data.attrs.get("incomplete_workout_records", 0))
                             succeeded = True
                             break
                         except (DataSourceError, RuntimeError) as exc:
@@ -434,10 +479,12 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                         progress(f"Yaris basarisiz: {unit} | {last_error}")
                     else:
                         completed_units.add(unit)
+                    processed_units += 1
                     write_checkpoint()
             if day_units == 0:
                 skipped_days += 1
             else:
+                observed_units_by_day[current] = day_units
                 completed_days.add(current)
             with _TRAINING_LOCK:
                 job = _COLLECTION_JOBS[job_id]
@@ -445,6 +492,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 job["remaining_days"] = max(total_days - len(completed_days), 0)
                 job["skipped_days"] = skipped_days
                 job["failed_targets"] = failed_targets
+                job["missing_data_records"] = missing_data_records
                 job["message"] = f"Gun tamamlandi: {current.isoformat()}"
             _persist_collection_jobs()
         with _TRAINING_LOCK:
@@ -1159,9 +1207,10 @@ def _ml_model_loadable(paths) -> tuple[bool, str]:  # type: ignore[no-untyped-de
         return False, f"Model dosyasi bulunamadi: {paths.model_path}"
     try:
         artifact, _ = load_phase3_artifact(str(paths.model_path))
-        if artifact.feature_columns != TJK_STAGE1_FEATURE_COLUMNS:
-            missing = sorted(set(TJK_STAGE1_FEATURE_COLUMNS) - set(artifact.feature_columns))
-            obsolete = sorted(set(artifact.feature_columns) - set(TJK_STAGE1_FEATURE_COLUMNS))
+        expected_columns = TJK_SELECTED_STAGE1_FEATURE_COLUMNS
+        if artifact.feature_columns != expected_columns:
+            missing = sorted(set(expected_columns) - set(artifact.feature_columns))
+            obsolete = sorted(set(artifact.feature_columns) - set(expected_columns))
             return False, (
                 "Model eski TJK feature semasiyla kaydedilmis. "
                 f"Eksik: {missing}; artik kullanilmamasi gerekenler: {obsolete}"
@@ -1505,6 +1554,7 @@ def create_app() -> FastAPI:
                         "remaining_days": (parsed_end - parsed_start).days + 1,
                         "skipped_days": 0,
                         "failed_targets": 0,
+                        "missing_data_records": 0,
                     }
                 _COLLECTION_JOBS[job_id]["status"] = "running"
                 _COLLECTION_CANCEL_EVENTS[job_id] = Event()
@@ -1527,16 +1577,25 @@ def create_app() -> FastAPI:
 
     @app.post("/collect/{action}/{job_id}")
     def collection_control(action: str, job_id: str) -> JSONResponse:
-        if action not in {"pause", "resume", "cancel"}:
+        if action not in {"pause", "resume", "cancel", "remove"}:
             raise HTTPException(status_code=404, detail="Gecersiz veri toplama islemi.")
         with _TRAINING_LOCK:
             job = _COLLECTION_JOBS.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail="Veri toplama isi bulunamadi.")
+            if action == "remove":
+                if job.get("status") == "running":
+                    raise HTTPException(status_code=409, detail="Calisan veri toplama isi kaldirilamaz.")
+                _COLLECTION_JOBS.pop(job_id, None)
+                _COLLECTION_PAUSE_REQUESTS.discard(job_id)
+                _COLLECTION_CANCEL_EVENTS.pop(job_id, None)
+                _persist_collection_jobs()
+                return JSONResponse({"job_id": job_id, "status": "removed"})
             if action == "pause" and job.get("status") == "running":
                 _COLLECTION_PAUSE_REQUESTS.add(job_id)
                 _COLLECTION_CANCEL_EVENTS[job_id].set()
-                job["message"] = "Veri toplama duraklatiliyor..."
+                job["message"] = "Veri toplama duraklatiliyor; mevcut TJK istegi tamamlaninca duracak..."
+                job["pause_requested"] = True
             elif action == "cancel":
                 _COLLECTION_PAUSE_REQUESTS.discard(job_id)
                 event = _COLLECTION_CANCEL_EVENTS.get(job_id)

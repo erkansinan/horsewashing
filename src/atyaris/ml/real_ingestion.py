@@ -104,6 +104,7 @@ def ingest_real_tjk_data(
     raw_result_records: list[dict[str, object]] = []
     raw_workout_records: list[dict[str, object]] = []
     raw_trainer_records: list[dict[str, object]] = []
+    incomplete_workout_records = 0
     raw_history_path = getattr(paths, "raw_history_jsonl", None)
     daily_races: list[tuple[date, object, list[object], dict[int, dict[int, int]]]] = []
     unavailable_days: list[str] = []
@@ -369,10 +370,30 @@ def ingest_real_tjk_data(
                             }
                         )
                     for workout in stats.workout_records:
+                        workout_date = (
+                            workout.workout_date.isoformat() if workout.workout_date else None
+                        )
+                        if (
+                            workout_date is None
+                            or workout.distance_m is None
+                            or workout.time_seconds is None
+                            or workout.detail is None
+                        ):
+                            incomplete_workout_records += 1
+                            logger.warning(
+                                "Eksik anahtar alanli workout kaydi atlandi: horse_id=%s, "
+                                "date=%s, distance=%s, time=%s, detail=%s",
+                                entry.horse_id,
+                                workout_date,
+                                workout.distance_m,
+                                workout.time_seconds,
+                                workout.detail,
+                            )
+                            continue
                         raw_workout_records.append(
                             {
                                 "horse_id": str(entry.horse_id),
-                                "workout_date": workout.workout_date.isoformat() if workout.workout_date else None,
+                                "workout_date": workout_date,
                                 "distance_m": workout.distance_m,
                                 "time_seconds": workout.time_seconds,
                                 "detail": workout.detail,
@@ -719,6 +740,7 @@ def ingest_real_tjk_data(
         purpose = "ML egitimi" if require_results else "ML tahmini"
         if require_results and (unavailable_days or unavailable_result_sets):
             frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
+            frame.attrs["incomplete_workout_records"] = incomplete_workout_records
             return frame
         raise RuntimeError(
             f"Gercek TJK verisiyle {purpose} icin kullanilabilir satir bulunamadi. "
@@ -745,4 +767,5 @@ def ingest_real_tjk_data(
 
     if unavailable_days or unavailable_result_sets:
         frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
+    frame.attrs["incomplete_workout_records"] = incomplete_workout_records
     return frame

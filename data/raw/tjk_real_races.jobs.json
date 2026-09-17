@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "job_id": "pause-route-job",
+    "status": "running",
+    "message": "Egitim duraklatiliyor...",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-09-09",
+    "end_date": "2026-09-10"
+  }
+]
