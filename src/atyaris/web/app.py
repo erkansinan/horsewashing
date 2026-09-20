@@ -14,7 +14,7 @@ from threading import Event, RLock, Thread, Timer
 from pathlib import Path
 import re
 from types import SimpleNamespace
-from time import monotonic
+from time import monotonic, sleep
 from urllib.parse import urlencode
 from uuid import uuid4
 from xml.sax.saxutils import escape
@@ -42,7 +42,7 @@ from atyaris.ml.pipeline import (
 )
 from atyaris.ml.real_ingestion import ingest_real_tjk_data
 from atyaris.ml.raw_store import JsonlRawStore
-from atyaris.ml.local_pipeline import build_local_raw_frame
+from atyaris.ml.local_pipeline import build_local_raw_frame, find_missing_local_targets
 from atyaris.ml.features import TJK_SELECTED_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
@@ -118,6 +118,8 @@ _TRAINING_RETRY_TIMERS: dict[str, Timer] = {}
 _COLLECTION_JOBS: dict[str, dict[str, object]] = {}
 _COLLECTION_CANCEL_EVENTS: dict[str, Event] = {}
 _COLLECTION_PAUSE_REQUESTS: set[str] = set()
+_RAW_REPAIR_JOBS: dict[str, dict[str, object]] = {}
+_COLLECTION_MANIFEST_LOCK = RLock()
 
 
 class _TrainingCancelled(Exception):
@@ -156,23 +158,34 @@ def _persist_training_jobs() -> None:
             if job.get("status") in {"running", "paused", "awaiting_decision", "retrying", "completed_with_warnings"}
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
 def _persist_collection_jobs() -> None:
     path = _collection_jobs_manifest_path()
-    with _TRAINING_LOCK:
-        jobs = [
-            {"job_id": job_id, **job}
-            for job_id, job in _COLLECTION_JOBS.items()
-            if job.get("status") in {"running", "paused", "completed", "failed"}
-        ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    with _COLLECTION_MANIFEST_LOCK:
+        with _TRAINING_LOCK:
+            jobs = [
+                {"job_id": job_id, **job}
+                for job_id, job in _COLLECTION_JOBS.items()
+                if job.get("status") in {"running", "paused", "completed", "failed"}
+            ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
+        try:
+            for attempt in range(5):
+                try:
+                    temporary.replace(path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    sleep(0.05 * (attempt + 1))
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _restore_training_jobs() -> None:
@@ -329,12 +342,23 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     if collection_checkpoint.exists():
         try:
             payload = json.loads(collection_checkpoint.read_text(encoding="utf-8"))
-            if (
-                payload.get("start_date") == start_date.isoformat()
-                and payload.get("end_date") == end_date.isoformat()
-            ):
-                completed_units = {str(value) for value in payload.get("completed_units", [])}
-                failed_units = {str(value) for value in payload.get("failed_units", [])}
+            def in_range(unit: object) -> bool:
+                try:
+                    unit_date = date.fromisoformat(str(unit).split("|", 1)[0])
+                except (TypeError, ValueError):
+                    return False
+                return start_date <= unit_date <= end_date
+
+            completed_units = {
+                str(value)
+                for value in payload.get("completed_units", [])
+                if in_range(value)
+            }
+            failed_units = {
+                str(value)
+                for value in payload.get("failed_units", [])
+                if in_range(value)
+            }
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             completed_units = set()
 
@@ -346,7 +370,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             "completed_units": sorted(completed_units),
             "failed_units": sorted(failed_units),
         }
-        temporary = collection_checkpoint.with_suffix(collection_checkpoint.suffix + ".tmp")
+        temporary = collection_checkpoint.with_name(f"{collection_checkpoint.name}.{uuid4().hex}.tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         temporary.replace(collection_checkpoint)
@@ -952,12 +976,27 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
         "data_summary": [],
         "horse_stats": [],
         "backtest_summary": None,
+        "evidence_status": "not_established",
         "method_notes": [
             "Cekirdek model: Benter iki asamali conditional logit.",
             "Sira olasiliklari: Harville formulu.",
             "Karar katmani: kalibrasyon + EV + fractional Kelly.",
         ],
     }
+
+    try:
+        comparison_path = paths.model_path.with_name("phase1_feature_comparison.json")
+        if comparison_path.exists():
+            comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+            context["evidence_status"] = str(comparison.get("conclusion", "not_established"))
+            nested = comparison.get("nested_holdout_bonferroni", {})
+            context["data_summary"] = context.get("data_summary", []) + [
+                f"Yeni feature nested/Bonferroni etiketi: {context['evidence_status']}",
+                f"Nested validation paired Top-4 farki: {float(nested.get('paired_top4_delta', 0.0)):.3f}",
+                f"Nested validation paired log-loss iyilesmesi: {float(nested.get('paired_log_loss_improvement', 0.0)):.4f}",
+            ]
+    except Exception:
+        pass
 
     try:
         if paths.features_csv.exists():
@@ -1034,6 +1073,11 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
                     "workout_avg_time_seconds": rec.get("workout_avg_time_seconds", "-"),
                     "workout_best_time_seconds": rec.get("workout_best_time_seconds", "-"),
                     "days_since_last_workout": rec.get("days_since_last_workout", "-"),
+                    "jockey_change_upgrade": rec.get("jockey_change_upgrade", "-"),
+                    "trainer_change_upgrade": rec.get("trainer_change_upgrade", "-"),
+                    "class_drop_flag": rec.get("class_drop_flag", "-"),
+                    "workout_sudden_improvement": rec.get("workout_sudden_improvement", "-"),
+                    "rest_optimal_fit": rec.get("rest_optimal_fit", "-"),
                     "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
                     "edge": rec.get("edge", "-"),
                     "ev": rec.get("ev", "-"),
@@ -1445,6 +1489,10 @@ def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> No
     settings = get_settings()
     paths = paths_from_settings(settings)
     try:
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id]["message"] = (
+                "Lokal JSONL arşivi okunuyor; eksik kayıtlar internetten tamamlanmayacak"
+            )
         local_frame = build_local_raw_frame(paths)
         if not local_frame.empty:
             local_frame.to_csv(paths.raw_csv, index=False)
@@ -1806,6 +1854,7 @@ def create_app() -> FastAPI:
         end_date: str = Query("", alias="end_date"),
         limit: int = Query(10, ge=1, le=100),
         train_job: str = Query(""),
+        raw_repair: str = Query(""),
     ) -> HTMLResponse:
         error = None
         history = {"latest_training": None, "runs": [], "count": 0}
@@ -1865,6 +1914,7 @@ def create_app() -> FastAPI:
                     if job.get("status") != "cancelled"
                 ],
                 "raw_maintenance": raw_maintenance,
+                "raw_repair": raw_repair,
             },
         )
 
@@ -1883,6 +1933,187 @@ def create_app() -> FastAPI:
             store = JsonlRawStore(path, collection)
             results.append({"name": collection, **store.compact().__dict__})
         return JSONResponse({"status": "completed", "collections": results})
+
+    def _repair_raw_data_job(job_id: str, settings: object, paths: object) -> None:
+        collections = (
+            (paths.raw_daily_program_jsonl, "daily_program"),
+            (paths.raw_race_results_jsonl, "race_results"),
+            (paths.raw_history_jsonl, "horse_history"),
+            (paths.raw_workouts_jsonl, "workouts"),
+            (paths.raw_trainer_statistics_jsonl, "trainer_statistics"),
+        )
+        job = _RAW_REPAIR_JOBS[job_id]
+        results = []
+        try:
+            for index, (path, collection) in enumerate(collections, start=1):
+                job.update(
+                    status="running",
+                    phase="scan",
+                    current_file=collection,
+                    files_completed=index - 1,
+                    message=f"{collection} dosyası taranıyor ({index}/5)",
+                )
+                stats = JsonlRawStore(path, collection).repair()
+                results.append(
+                    f"{collection}: {stats.records} kayit, {stats.malformed_records} bozuk, "
+                    f"{stats.missing_key_records} eksik anahtarli, {stats.duplicates_removed} tekrar kayit temizlendi"
+                )
+                job.update(
+                    files_completed=index,
+                    records_scanned=int(job.get("records_scanned", 0)) + stats.records,
+                    malformed_records=int(job.get("malformed_records", 0)) + stats.malformed_records,
+                    missing_key_records=int(job.get("missing_key_records", 0)) + stats.missing_key_records,
+                    duplicates_removed=int(job.get("duplicates_removed", 0)) + stats.duplicates_removed,
+                )
+
+            job.update(phase="missing_targets", current_file="", message="Eksik yarış kayıtları aranıyor")
+            missing_targets = find_missing_local_targets(paths)
+            job.update(missing_targets=len(missing_targets), targets_completed=0, targets_resolved=0, targets_failed=0)
+            for target_index, target in enumerate(missing_targets, start=1):
+                target_label = f"{target.get('date')} {target.get('hippodrome')}/{target.get('race_no')}"
+                job.update(
+                    phase="download",
+                    current_target=target_label,
+                    message=f"Eksik yarış tamamlanıyor ({target_index}/{len(missing_targets)}): {target_label}",
+                )
+                try:
+                    target_date = date.fromisoformat(str(target["date"]))
+                    target_city = str(target.get("hippodrome") or "")
+                    race_no = int(target["race_no"])
+                    ingest_real_tjk_data(target_date, target_date, paths, require_results=False, hippodrome=target_city or None, race_no=race_no)
+                    if target.get("missing_results", 0):
+                        ingest_real_tjk_data(target_date, target_date, paths, require_results=True, hippodrome=target_city or None, race_no=race_no)
+                    current_missing = find_missing_local_targets(paths, target_date, target_date)
+                    target_key = (str(target["date"]), target_city, race_no)
+                    still_missing = any(
+                        (str(item["date"]), str(item.get("hippodrome") or ""), int(item["race_no"])) == target_key
+                        for item in current_missing
+                    )
+                    job["targets_completed"] = int(job.get("targets_completed", 0)) + 1
+                    if still_missing:
+                        job["targets_failed"] = int(job.get("targets_failed", 0)) + 1
+                        job.setdefault("errors", []).append(f"{target_label}: indirme sonrasi hedef hala eksik")
+                    else:
+                        job["targets_resolved"] = int(job.get("targets_resolved", 0)) + 1
+                except Exception as exc:  # noqa: BLE001
+                    job["targets_failed"] = int(job.get("targets_failed", 0)) + 1
+                    job.setdefault("errors", []).append(f"{target_label}: {exc}")
+
+            job.update(phase="verify", current_target="", message="Son doğrulama taraması yapılıyor")
+            for path, collection in collections:
+                JsonlRawStore(path, collection).repair()
+            remaining_targets = find_missing_local_targets(paths)
+            job.update(
+                status="completed",
+                phase="completed",
+                message="JSONL taraması ve düzeltme tamamlandı",
+                remaining_targets=len(remaining_targets),
+                targets_resolved=max(0, len(missing_targets) - len(remaining_targets)),
+                results=results,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Raw repair job failed")
+            job.update(status="failed", phase="failed", message=f"Onarım başarısız: {exc}")
+
+    @app.post("/raw/repair")
+    def repair_raw_data(request: Request) -> Response:
+        settings = get_settings()
+        paths = paths_from_settings(settings)
+        if request.headers.get("x-repair-async") == "1":
+            job_id = uuid4().hex
+            _RAW_REPAIR_JOBS[job_id] = {
+                "status": "queued", "phase": "queued", "message": "Onarım kuyruğa alındı",
+                "files_total": 5, "files_completed": 0, "records_scanned": 0,
+                "malformed_records": 0, "missing_key_records": 0, "duplicates_removed": 0,
+                "missing_targets": 0, "targets_completed": 0, "targets_failed": 0,
+                "remaining_targets": 0, "targets_resolved": 0,
+                "current_file": "", "current_target": "", "errors": [],
+            }
+            Thread(target=_repair_raw_data_job, args=(job_id, settings, paths), daemon=True).start()
+            return JSONResponse({"status": "started", "job_id": job_id})
+
+        collections = (
+            (paths.raw_daily_program_jsonl, "daily_program"),
+            (paths.raw_race_results_jsonl, "race_results"),
+            (paths.raw_history_jsonl, "horse_history"),
+            (paths.raw_workouts_jsonl, "workouts"),
+            (paths.raw_trainer_statistics_jsonl, "trainer_statistics"),
+        )
+        results = []
+        for path, collection in collections:
+            stats = JsonlRawStore(path, collection).repair()
+            results.append(
+                f"{collection}: {stats.records} kayit, "
+                f"{stats.malformed_records} bozuk, "
+                f"{stats.missing_key_records} eksik anahtarli, "
+                f"{stats.duplicates_removed} tekrar kayit temizlendi"
+            )
+        missing_targets = find_missing_local_targets(paths)
+        redownloaded = 0
+        failed_targets = 0
+        failed_messages: list[str] = []
+        for target in missing_targets:
+            try:
+                target_date = date.fromisoformat(str(target["date"]))
+                target_city = str(target.get("hippodrome") or "")
+                race_no = int(target["race_no"])
+                ingest_real_tjk_data(
+                    target_date,
+                    target_date,
+                    paths,
+                    require_results=False,
+                    hippodrome=target_city or None,
+                    race_no=race_no,
+                )
+                if target.get("missing_results", 0):
+                    ingest_real_tjk_data(
+                        target_date,
+                        target_date,
+                        paths,
+                        require_results=True,
+                        hippodrome=target_city or None,
+                        race_no=race_no,
+                    )
+                current_missing = find_missing_local_targets(paths, target_date, target_date)
+                target_key = (str(target["date"]), str(target.get("hippodrome") or ""), int(target["race_no"]))
+                if any(
+                    (str(item["date"]), str(item.get("hippodrome") or ""), int(item["race_no"])) == target_key
+                    for item in current_missing
+                ):
+                    failed_targets += 1
+                    failed_messages.append(
+                        f"{target.get('date')} {target.get('hippodrome')}/{target.get('race_no')}: indirme sonrasi hedef hala eksik"
+                    )
+                else:
+                    redownloaded += 1
+            except Exception as exc:  # noqa: BLE001
+                failed_targets += 1
+                failed_messages.append(
+                    f"{target.get('date')} {target.get('hippodrome')}/{target.get('race_no')}: {exc}"
+                )
+
+        # Ingestion uses upserts, but run the same five-file repair once more so
+        # a partially returned response can never leave malformed rows behind.
+        for path, collection in collections:
+            JsonlRawStore(path, collection).repair()
+        remaining_targets = find_missing_local_targets(paths)
+        message = (
+            "Ham JSONL taramasi tamamlandi. "
+            + " | ".join(results)
+            + f" | Baslangic eksik hedef: {len(missing_targets)}, kalan eksik hedef: {len(remaining_targets)}, "
+            + f"yeniden indirilen: {redownloaded}, "
+            f"basarisiz: {failed_targets}."
+        )
+        if failed_messages:
+            message += " Ayrintilar: " + " ; ".join(failed_messages[:5])
+        return RedirectResponse(url=f"/training?{urlencode({'raw_repair': message})}", status_code=303)
+
+    @app.get("/raw/repair/status/{job_id}")
+    def repair_raw_status(job_id: str) -> JSONResponse:
+        job = _RAW_REPAIR_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Onarım işi bulunamadı")
+        return JSONResponse({"job_id": job_id, **job})
 
     @app.get("/training-history", response_class=RedirectResponse)
     def training_history_redirect(

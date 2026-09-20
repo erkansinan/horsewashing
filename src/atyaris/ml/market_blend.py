@@ -159,3 +159,22 @@ def predict_form_probability(artifact: BenterTwoStageArtifact, frame: pd.DataFra
 
 def extract_market_reference_probability(frame: pd.DataFrame) -> np.ndarray:
     return _normalized_market_probability(frame)
+
+
+def predict_mixed_probability(
+    artifact: BenterTwoStageArtifact,
+    frame: pd.DataFrame,
+    alpha: float,
+) -> np.ndarray:
+    """Mix the independent Stage-1 signal with normalized market probability.
+
+    ``alpha`` is the Stage-1 weight: 0.0 is market-only and 1.0 is form-only.
+    This diagnostic path intentionally bypasses the learned Stage-2 coefficient.
+    """
+    if frame.empty:
+        return np.array([], dtype=float)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha 0 ile 1 arasinda olmali")
+    form_probability = predict_form_probability(artifact, frame)
+    market_probability = extract_market_reference_probability(frame)
+    return alpha * form_probability + (1.0 - alpha) * market_probability

@@ -37,6 +37,8 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "days_since_last_workout",
     "history_missing", "career_summary_missing", "workout_missing",
     "age_missing", "handicap_missing", "odds_missing",
+    "jockey_change_upgrade", "trainer_change_upgrade", "class_drop_flag",
+    "workout_sudden_improvement", "rest_optimal_fit",
 ]
 
 TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
@@ -48,6 +50,11 @@ TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
     "history_avg_finish_position",
     "draw",
     "weight",
+    "jockey_change_upgrade",
+    "trainer_change_upgrade",
+    "class_drop_flag",
+    "workout_sudden_improvement",
+    "rest_optimal_fit",
 ]
 
 MISSINGNESS_INDICATOR_COLUMNS = {
@@ -109,6 +116,36 @@ def _smoothed_mean(values: list[float], prior: float = 0.45, prior_strength: flo
     if not values:
         return prior
     return float((sum(values) + prior * prior_strength) / (len(values) + prior_strength))
+
+
+def _class_level(value: object) -> float | None:
+    text = str(value or "").upper()
+    if not text or text == "NAN":
+        return None
+    for token in text.replace("/", " ").split():
+        try:
+            return float(token)
+        except ValueError:
+            continue
+    order = ("G1", "G2", "G3", "A", "B", "C", "ŞARTLI", "HANDİKAP", "MAIDEN")
+    for index, label in enumerate(order):
+        if label in text:
+            return float(len(order) - index)
+    return None
+
+
+def _change_upgrade(history: list[dict[str, object]], current: object, key: str) -> float:
+    current_name = str(current or "").strip()
+    if not current_name or current_name.lower() == "nan" or not history:
+        return 0.0
+    previous_name = str(history[-1].get(key) or "").strip()
+    if not previous_name or previous_name == current_name:
+        return 0.0
+    current_perf = [float(item["perf"]) for item in history if str(item.get(key) or "") == current_name]
+    previous_perf = [float(item["perf"]) for item in history if str(item.get(key) or "") == previous_name]
+    if not current_perf or not previous_perf:
+        return 0.0
+    return float(np.clip(np.mean(current_perf) - np.mean(previous_perf), -1.0, 1.0))
 
 
 def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = None) -> FeatureBuildResult:
@@ -230,6 +267,17 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
         intensity_proxy = 1.0 - last_run_perf
         short_rest_flag = 1.0 if days_since_last < 8 else 0.0
         long_layoff_flag = 1.0 if days_since_last > 75 else 0.0
+        jockey_change_upgrade = _change_upgrade(h, getattr(row, "jockey_name", ""), "jockey_name")
+        trainer_change_upgrade = _change_upgrade(h, getattr(row, "trainer_name", ""), "trainer_name")
+        current_class = _class_level(getattr(row, "race_class", ""))
+        previous_classes = [_class_level(item.get("race_class")) for item in h]
+        previous_class = next((value for value in reversed(previous_classes) if value is not None), None)
+        class_drop_flag = float(max(previous_class - current_class, 0.0)) if current_class is not None and previous_class is not None else 0.0
+        latest_workout = float(getattr(row, "workout_latest_speed_index", 0.0) or 0.0)
+        prior_workout = float(getattr(row, "workout_prior_avg_speed_index", 0.0) or 0.0)
+        workout_sudden_improvement = float(latest_workout - prior_workout) if latest_workout and prior_workout else 0.0
+        prior_gaps = [race_days[index] - race_days[index - 1] for index in range(1, len(race_days))]
+        rest_optimal_fit = float(np.exp(-abs(days_since_last - np.median(prior_gaps)) / max(float(np.median(prior_gaps)), 7.0))) if prior_gaps else 0.0
 
         fatigue_load = (
             1.8 * short_rest_flag
@@ -324,6 +372,11 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "implied_probability": implied_prob,
                 "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
                 "is_winner": int(getattr(row, "is_winner", 0)) if pd.notnull(getattr(row, "is_winner", 0)) else 0,
+                "jockey_change_upgrade": jockey_change_upgrade,
+                "trainer_change_upgrade": trainer_change_upgrade,
+                "class_drop_flag": class_drop_flag,
+                "workout_sudden_improvement": workout_sudden_improvement,
+                "rest_optimal_fit": rest_optimal_fit,
             }
         )
 
@@ -340,6 +393,9 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                     "track": str(getattr(row, "track", "")),
                     "condition": str(getattr(row, "track_condition", "")),
                     "early_pace": float(getattr(row, "early_pace", 0.0)),
+                    "jockey_name": str(getattr(row, "jockey_name", "") or ""),
+                    "trainer_name": str(getattr(row, "trainer_name", "") or ""),
+                    "race_class": str(getattr(row, "race_class", "") or ""),
                 }
             )
 

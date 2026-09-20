@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from atyaris.config import Settings
-from atyaris.ml.backtest import WalkForwardResult, walk_forward_backtest
+from atyaris.ml.backtest import WalkForwardResult, compare_longshot_features, walk_forward_backtest
 from atyaris.ml.calibration import (
     apply_calibrator,
     apply_probability_floor,
@@ -604,6 +604,35 @@ def run_phase1_backtest(
     payload = asdict(result)
     payload["fold_max_train_date"] = [d.isoformat() for d in result.fold_max_train_date]
     payload["fold_test_date"] = [d.isoformat() for d in result.fold_test_date]
+    available_days = int(pd.to_datetime(frame["date"], errors="coerce").dt.date.nunique())
+    comparison_min_train_days = min_train_days if available_days > min_train_days + 7 else min(14, max(1, available_days - 8))
+    feature_comparison = compare_longshot_features(
+        frame,
+        min_train_days=comparison_min_train_days,
+        calibration_days=min(calibration_days, max(1, comparison_min_train_days // 2)),
+        calibration_method=calibration_method,
+    )
+    def _jsonable(value):
+        if isinstance(value, (date, pd.Timestamp)):
+            return value.isoformat()
+        if isinstance(value, np.generic):
+            return value.item()
+        if hasattr(value, "__dataclass_fields__"):
+            return {key: _jsonable(item) for key, item in asdict(value).items()}
+        if isinstance(value, dict):
+            return {key: _jsonable(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_jsonable(item) for item in value]
+        return value
+
+    feature_comparison = _jsonable(feature_comparison)
+    payload["feature_comparison"] = feature_comparison
+    payload["feature_comparison_data_days"] = available_days
+    payload["feature_comparison_min_train_days"] = comparison_min_train_days
+    paths.model_path.with_name("phase1_feature_comparison.json").write_text(
+        json.dumps(feature_comparison, ensure_ascii=True, indent=2, default=lambda value: asdict(value) if hasattr(value, "__dataclass_fields__") else str(value)),
+        encoding="utf-8",
+    )
     return payload
 
 

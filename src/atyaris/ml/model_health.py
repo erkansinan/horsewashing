@@ -16,7 +16,13 @@ import numpy as np
 import pandas as pd
 
 from atyaris.ml.fundamental_model import fit_conditional_logit, predict_conditional_logit_probability
-from atyaris.ml.market_blend import BenterTwoStageArtifact, predict_form_probability, predict_two_stage_probability
+from atyaris.ml.market_blend import (
+    BenterTwoStageArtifact,
+    extract_market_reference_probability,
+    predict_form_probability,
+    predict_mixed_probability,
+    predict_two_stage_probability,
+)
 
 
 POST_RACE_COLUMNS = {
@@ -181,6 +187,40 @@ def _log_loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
+def _alpha_top4_metrics(
+    frame: pd.DataFrame,
+    probabilities: np.ndarray,
+) -> tuple[float, float, list[float], list[float]]:
+    work = frame.assign(probability=probabilities)
+    all_hits: list[float] = []
+    longshot_hits: list[float] = []
+    for _, group in work.groupby("race_id"):
+        all_hits.append(float(group.nlargest(4, "probability")["is_winner"].max()))
+        odds_rank = group["odds"].rank(method="first", ascending=True)
+        winner = group[group["is_winner"] == 1]
+        if not winner.empty and float(odds_rank.loc[winner.index[0]]) >= max(3.0, float(np.ceil(len(group) * 0.75))):
+            longshot_hits.append(float(group.nlargest(4, "probability")["is_winner"].max()))
+    return (
+        float(np.mean(all_hits)) if all_hits else 0.0,
+        float(np.mean(longshot_hits)) if longshot_hits else 0.0,
+        all_hits,
+        longshot_hits,
+    )
+
+
+def _bootstrap_difference_ci(
+    values: list[float],
+    bootstrap_samples: int,
+    random_state: int,
+) -> tuple[float, float]:
+    if not values or bootstrap_samples <= 0:
+        return 0.0, 0.0
+    rng = np.random.default_rng(random_state)
+    values_array = np.asarray(values, dtype=float)
+    samples = rng.choice(values_array, size=(bootstrap_samples, len(values_array)), replace=True).mean(axis=1)
+    return tuple(float(value) for value in np.quantile(samples, [0.025, 0.975]))
+
+
 def fixed_test_comparison(
     artifact: BenterTwoStageArtifact,
     train_df: pd.DataFrame,
@@ -196,6 +236,7 @@ def fixed_test_comparison(
     market_model = fit_conditional_logit(train_df, [market_col], max_iter=80, random_state=random_state)
     market_probability = predict_conditional_logit_probability(market_model, test_df)
     model_probability = predict_two_stage_probability(artifact, test_df)
+    market_reference_probability = extract_market_reference_probability(test_df)
     scored = test_df.assign(model_probability=model_probability, market_probability=market_probability)
     model_hits: list[float] = []
     market_hits: list[float] = []
@@ -214,6 +255,29 @@ def fixed_test_comparison(
         ci_low, ci_high = 0.0, 0.0
     model_log_loss = _log_loss(test_df, model_probability)
     market_log_loss = _log_loss(test_df, market_probability)
+    alpha_rows = []
+    for alpha in (0.0, 0.2, 0.4, 0.6):
+        probabilities = predict_mixed_probability(artifact, test_df, alpha)
+        top4, longshot_top4, hits, longshot_hits = _alpha_top4_metrics(test_df, probabilities)
+        market_top4_reference, _, market_hits, _ = _alpha_top4_metrics(test_df, market_reference_probability)
+        difference_ci = _bootstrap_difference_ci(
+            [model_hit - market_hit for model_hit, market_hit in zip(hits, market_hits)],
+            bootstrap_samples,
+            random_state,
+        )
+        alpha_rows.append({
+            "alpha_stage1": alpha,
+            "market_weight": 1.0 - alpha,
+            "top4_hit_rate": top4,
+            "longshot_top4_hit_rate": longshot_top4,
+            "longshot_races": len(longshot_hits),
+            "longshot_top4_bootstrap_ci": list(
+                _bootstrap_difference_ci(longshot_hits, bootstrap_samples, random_state)
+            ),
+            "log_loss": _log_loss(test_df, probabilities),
+            "top4_vs_market_reference": top4 - market_top4_reference,
+            "top4_vs_market_reference_bootstrap_ci": list(difference_ci),
+        })
     test_dates = pd.to_datetime(test_df["date"]).dt.date
     return {
         "status": "ok",
@@ -229,6 +293,7 @@ def fixed_test_comparison(
         "market_log_loss": market_log_loss,
         "log_loss_difference": model_log_loss - market_log_loss,
         "edge_status": "supported" if ci_low > 0.0 else "not_established",
+        "alpha_comparison": alpha_rows,
     }
 
 

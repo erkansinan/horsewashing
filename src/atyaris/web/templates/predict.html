@@ -16,6 +16,9 @@
     At Sayisi: {{ ml_prediction.summary.horse_count }} |
     BET Sinyali: {{ ml_prediction.summary.bet_count }} |
     Top P(win): {{ "%.2f"|format(ml_prediction.summary.top_probability * 100) }}%
+    {% if ml_prediction.analysis and ml_prediction.analysis.evidence_status %}
+    <p class="disclaimer">Model kanit etiketi: <strong>{{ ml_prediction.analysis.evidence_status }}</strong>. EV/value-bet sinyali, bu etiketten bagimsiz olarak garanti degildir.</p>
+    {% endif %}
   </div>
 
   <table>
@@ -121,6 +124,11 @@
         <th>Idman Ort. (sn)</th>
         <th>En Iyi Idman (sn)</th>
         <th>Son Idman (gun)</th>
+        <th>Jokey Degisim</th>
+        <th>Antrenor Degisim</th>
+        <th>Sinif Dususu</th>
+        <th>Idman Iyilesme</th>
+        <th>Dinlenme Uyum</th>
         <th>Market Prob</th>
         <th>Edge</th>
         <th>EV</th>
@@ -231,6 +239,11 @@
         <td>{{ item.workout_avg_time_seconds }}</td>
         <td>{{ item.workout_best_time_seconds }}</td>
         <td>{{ item.days_since_last_workout }}</td>
+        <td>{{ item.jockey_change_upgrade }}</td>
+        <td>{{ item.trainer_change_upgrade }}</td>
+        <td>{{ item.class_drop_flag }}</td>
+        <td>{{ item.workout_sudden_improvement }}</td>
+        <td>{{ item.rest_optimal_fit }}</td>
         <td>{{ item.market_probability_norm }}</td>
         <td>{{ item.edge }}</td>
         <td>{{ item.ev }}</td>

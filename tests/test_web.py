@@ -4,6 +4,8 @@ kullanir; canli TJK sitesine bagimli degildir.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+import time
 
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
@@ -172,6 +174,76 @@ def test_training_page_exposes_pause_and_resume_controls() -> None:
     finally:
         web_app_module._TRAINING_JOBS.pop("running-training", None)
         web_app_module._TRAINING_JOBS.pop("paused-training", None)
+
+
+def test_raw_repair_redownloads_missing_target(monkeypatch, tmp_path) -> None:
+    paths = SimpleNamespace(
+        raw_csv=tmp_path / "races.csv",
+        raw_daily_program_jsonl=tmp_path / "program.jsonl",
+        raw_race_results_jsonl=tmp_path / "results.jsonl",
+        raw_history_jsonl=tmp_path / "history.jsonl",
+        raw_workouts_jsonl=tmp_path / "workouts.jsonl",
+        raw_trainer_statistics_jsonl=tmp_path / "trainers.jsonl",
+    )
+    paths.raw_daily_program_jsonl.write_text(
+        '{"race_id":"race-1","horse_id":"horse-1","race_date":"2026-09-16",'
+        '"hippodrome":"Ankara","race_no":1}\n',
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+    monkeypatch.setattr(
+        web_app_module,
+        "ingest_real_tjk_data",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+
+    response = _client().post("/raw/repair")
+
+    assert response.status_code == 200
+    assert response.url.path == "/training"
+    assert len(calls) == 2
+    assert calls[0]["require_results"] is False
+    assert calls[1]["require_results"] is True
+    assert calls[0]["hippodrome"] == "Ankara"
+    assert calls[0]["race_no"] == 1
+
+
+def test_raw_repair_reports_target_still_missing_after_noop_download(monkeypatch, tmp_path) -> None:
+    paths = SimpleNamespace(
+        raw_csv=tmp_path / "races.csv",
+        raw_daily_program_jsonl=tmp_path / "program.jsonl",
+        raw_race_results_jsonl=tmp_path / "results.jsonl",
+        raw_history_jsonl=tmp_path / "history.jsonl",
+        raw_workouts_jsonl=tmp_path / "workouts.jsonl",
+        raw_trainer_statistics_jsonl=tmp_path / "trainers.jsonl",
+    )
+    paths.raw_daily_program_jsonl.write_text(
+        '{"race_id":"race-1","horse_id":"horse-1","race_date":"2026-09-16",'
+        '"hippodrome":"Ankara","race_no":1}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+    monkeypatch.setattr(web_app_module, "ingest_real_tjk_data", lambda *args, **kwargs: None)
+
+    response = _client().post("/raw/repair", headers={"X-Repair-Async": "1"})
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    job = None
+    for _ in range(50):
+        job = _client().get(f"/raw/repair/status/{job_id}").json()
+        if job["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+
+    assert job is not None
+    assert job["status"] == "completed"
+    assert job["missing_targets"] == 1
+    assert job["remaining_targets"] == 1
+    assert job["targets_completed"] == 1
+    assert job["targets_resolved"] == 0
+    assert job["targets_failed"] == 1
+    assert "hala eksik" in job["errors"][0]
 
 
 def test_pause_and_resume_training_job(monkeypatch) -> None:

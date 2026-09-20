@@ -3,6 +3,7 @@
 {% block content %}
 <h2>ML Eğitim</h2>
 <p>Veriyi önce kesintili olarak toplayın, ardından aşağıdaki akıştan modeli yeniden eğitin.</p>
+{% if raw_repair %}<p class="training-status" data-state="completed">{{ raw_repair }}</p>{% endif %}
 
 <section class="training-panel" aria-labelledby="collection-start-title">
   <h2 id="collection-start-title">TJK verisi toplama</h2>
@@ -48,7 +49,76 @@
   <form method="post" action="/raw/compact">
     <button type="submit">Ham veriyi compact et</button>
   </form>
+  <form id="raw-repair-form" method="post" action="/raw/repair">
+    <button id="raw-repair-button" type="submit">JSON dosyalarını tara ve düzelt</button>
+  </form>
+  <div id="raw-repair-status" class="training-status" data-state="idle" hidden aria-live="polite">
+    <strong>İşlem başlatılıyor</strong>
+    <ol>
+      <li data-repair-step="scan">Beş JSONL dosyası taranıyor</li>
+      <li data-repair-step="clean">Bozuk, eksik anahtarlı ve tekrar kayıtlar temizleniyor</li>
+      <li data-repair-step="download">Eksik yarış kayıtları TJK'dan tamamlanıyor</li>
+      <li data-repair-step="verify">Son doğrulama taraması yapılıyor</li>
+    </ol>
+    <span id="raw-repair-message">Lütfen pencereyi kapatmayın.</span>
+  </div>
+  <p>Bu işlem beş raw JSONL dosyasını tarar, bozuk ve eksik anahtarlı kayıtları temizler; program kayıtlarında sonuç veya at geçmişi eksikse ilgili koşuyu TJK'dan tekrar indirir. İnternetten eksik bilgi uydurmaz.</p>
 </section>
+
+<script>
+  (function () {
+    const form = document.getElementById("raw-repair-form");
+    const button = document.getElementById("raw-repair-button");
+    const status = document.getElementById("raw-repair-status");
+    const message = document.getElementById("raw-repair-message");
+    if (!form || !button || !status) return;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      button.textContent = "JSON dosyaları taranıyor...";
+      status.hidden = false;
+      status.dataset.state = "running";
+      message.textContent = "Dosyalar okunuyor; bozuk kayıtlar kontrol ediliyor.";
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { "X-Repair-Async": "1" }
+        });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const started = await response.json();
+        const poll = async () => {
+          const statusResponse = await fetch("/raw/repair/status/" + encodeURIComponent(started.job_id));
+          if (!statusResponse.ok) throw new Error("Durum alınamadı");
+          const job = await statusResponse.json();
+          status.dataset.state = job.status;
+          status.querySelector("strong").textContent = job.message || job.status;
+          message.textContent = `Dosya: ${job.current_file || "-"} | Dosya: ${job.files_completed || 0}/${job.files_total || 5} | `
+            + `Taranan kayıt: ${job.records_scanned || 0} | Bozuk: ${job.malformed_records || 0} | `
+            + `Eksik anahtar: ${job.missing_key_records || 0} | Tekrar: ${job.duplicates_removed || 0} | `
+            + `Başlangıç eksik koşu: ${job.missing_targets || 0} | Kalan eksik koşu: ${job.remaining_targets || 0} | `
+            + `Çözülen: ${job.targets_resolved || 0} | Denenen: ${job.targets_completed || 0} | Başarısız: ${job.targets_failed || 0}`;
+          if (job.status === "completed" || job.status === "failed") {
+            if (job.status === "completed") window.location.reload();
+            else {
+              button.disabled = false;
+              button.textContent = "JSON dosyalarını tara ve düzelt";
+            }
+            return;
+          }
+          window.setTimeout(poll, 700);
+        };
+        poll();
+      } catch (error) {
+        status.dataset.state = "failed";
+        status.querySelector("strong").textContent = "İşlem tamamlanamadı";
+        message.textContent = "Hata oluştu. Sayfayı yenileyip tekrar deneyin.";
+        button.disabled = false;
+        button.textContent = "JSON dosyalarını tara ve düzelt";
+      }
+    });
+  })();
+</script>
 
 <section class="training-panel" aria-labelledby="training-start-title">
   <h2 id="training-start-title">Yeni eğitim başlat</h2>
@@ -71,7 +141,7 @@
     </label>
     <button type="submit">Lokal veriden eğit</button>
   </form>
-  <p>Lokal eğitim internetten veri çekmez; mevcut yerel ham arşivi kullanır.</p>
+  <p>Lokal eğitim yalnızca mevcut beş JSONL arşivini kullanır. Eksik sonuç veya at geçmişi bulunan kayıtlar internetten tamamlanmaz ve mevcut veriyle devam edilir.</p>
   <p>Model eğitimi için en az 6 farklı tarih içeren bir aralık seçin.</p>
 </section>
 

@@ -5,10 +5,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import shutil
 import sqlite3
+import time
 from typing import Any, Iterable
+from uuid import uuid4
+
+
+logger = logging.getLogger(__name__)
 
 
 RAW_STORE_THRESHOLDS = {
@@ -46,9 +52,31 @@ class CompactRecommendation:
     file_bytes: int
 
 
+@dataclass(frozen=True)
+class RawRepairStats:
+    scanned: int = 0
+    valid_records: int = 0
+    malformed_records: int = 0
+    missing_key_records: int = 0
+    duplicates_removed: int = 0
+    records: int = 0
+    bytes: int = 0
+
+
 def _atomic_replace(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    source.replace(target)
+    for attempt in range(4):
+        try:
+            source.replace(target)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) != 32 or attempt == 3:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def _temporary_path(path: Path, suffix: str = ".tmp") -> Path:
+    return path.with_name(f"{path.name}.{uuid4().hex}{suffix}")
 
 
 def _record_key(record: dict[str, Any], fields: tuple[str, ...]) -> str:
@@ -82,12 +110,72 @@ class JsonlRawStore:
         if not self.path.exists():
             return latest
         with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
+            for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
                     continue
-                record = json.loads(line)
-                latest[_record_key(record, self.key_fields)] = (record, _record_hash(record))
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Gecersiz ham JSONL satiri atlandi: %s:%s", self.path, line_number)
+                    continue
+                if not isinstance(record, dict):
+                    logger.warning("JSON nesnesi olmayan ham satir atlandi: %s:%s", self.path, line_number)
+                    continue
+                try:
+                    latest[_record_key(record, self.key_fields)] = (record, _record_hash(record))
+                except (TypeError, ValueError):
+                    logger.warning("Eksik anahtarli ham JSONL satiri atlandi: %s:%s", self.path, line_number)
         return latest
+
+    def repair(self) -> RawRepairStats:
+        """Scan and rewrite one collection, dropping only unrecoverable rows."""
+        latest: dict[str, tuple[dict[str, Any], str]] = {}
+        scanned = malformed = missing_key = duplicates = 0
+        if self.path.exists():
+            with self.path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    scanned += 1
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed += 1
+                        logger.warning("Gecersiz ham JSONL satiri kaldirildi: %s:%s", self.path, line_number)
+                        continue
+                    if not isinstance(record, dict):
+                        malformed += 1
+                        logger.warning("JSON nesnesi olmayan ham satir kaldirildi: %s:%s", self.path, line_number)
+                        continue
+                    try:
+                        key = _record_key(record, self.key_fields)
+                    except (TypeError, ValueError):
+                        missing_key += 1
+                        logger.warning("Eksik anahtarli ham JSONL satiri kaldirildi: %s:%s", self.path, line_number)
+                        continue
+                    if key in latest:
+                        duplicates += 1
+                    latest[key] = (record, _record_hash(record))
+
+        temporary = _temporary_path(self.path, ".repair.tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            for record, _digest in latest.values():
+                handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+        _atomic_replace(temporary, self.path)
+        if self.index_path.exists():
+            self.index_path.unlink(missing_ok=True)
+            self.migration_state_path.unlink(missing_ok=True)
+            self.migration_temp_path.unlink(missing_ok=True)
+        return RawRepairStats(
+            scanned=scanned,
+            valid_records=len(latest),
+            malformed_records=malformed,
+            missing_key_records=missing_key,
+            duplicates_removed=duplicates,
+            records=len(latest),
+            bytes=self.path.stat().st_size,
+        )
 
     def upsert(self, records: Iterable[dict[str, Any]]) -> RawStoreStats:
         incoming: dict[str, dict[str, Any]] = {}
@@ -110,7 +198,7 @@ class JsonlRawStore:
             else:
                 updated += 1
             latest[key] = (record, digest)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary = _temporary_path(self.path)
         temporary.parent.mkdir(parents=True, exist_ok=True)
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             for record, _digest in latest.values():
@@ -144,7 +232,7 @@ class JsonlRawStore:
 
     def compact(self) -> RawStoreStats:
         latest = self._read_latest()
-        temporary = self.path.with_suffix(self.path.suffix + ".compact.tmp")
+        temporary = _temporary_path(self.path, ".compact.tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             for record, _digest in latest.values():
@@ -203,7 +291,7 @@ class JsonlRawStore:
             connection.close()
 
     def _write_migration_state(self, line: int, status: str = "migration_in_progress") -> None:
-        temporary = self.migration_state_path.with_suffix(".tmp")
+        temporary = _temporary_path(self.migration_state_path)
         temporary.write_text(json.dumps({"status": status, "line": line}, ensure_ascii=True), encoding="utf-8")
         _atomic_replace(temporary, self.migration_state_path)
 
