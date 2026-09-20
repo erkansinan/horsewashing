@@ -32,16 +32,14 @@
   {
     "job_id": "2797542c9b364655b39022104530ba86",
     "status": "running",
-    "message": "Tarihsel istatistik hesaplaniyor: 2026-08-12 / \u0130stanbul / 1. kosu / MR HERMES | gunluk at: 8/9 | gunluk uretilen satir: 7 | tahmini kalan: 8 sn",
+    "message": "Tarihsel istatistik hesaplaniyor: 2026-07-18 / Diyarbak\u0131r / 2. kosu / HIGH SYMPHONY | gunluk at: 1/15 | gunluk uretilen satir: 0 | tahmini kalan: 0 sn",
     "start_date": "2026-01-25",
     "end_date": "2026-08-12",
-    "completed_days": 0,
-    "remaining_days": 200,
-    "skipped_days": 0,
-    "failed_targets": 0,
-    "missing_data_records": 0,
-    "estimated_remaining": "1.5 dk; ilk tamamlanan yaris bekleniyor",
+    "completed_days": 5,
+    "remaining_days": 195,
+    "skipped_days": 20,
+    "failed_targets": 21,
+    "missing_data_records": 395,
+    "estimated_remaining": "5183.8 dk",
     "current_date": "Tarihsel i",
-    "current_target": "Tarihsel istatistik hesaplaniyor: 2026-08-12 / \u0130stanbul / 1. kosu / MR HERMES | gunluk at: 8/9 | gunluk uretilen satir: 7 | tahmini kalan: 8 sn"
-  }
-]
+    "current_target": "Tarihsel istatistik hesaplaniyor: 2026-07-18 / Diyarbak\u0131r / 2. kosu / HIGH SYMPHONY | gunluk
