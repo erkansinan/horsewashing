@@ -79,6 +79,7 @@ def fit_conditional_logit(
     regularization_strength: float = 0.05,
     random_state: int = 42,
     validation_frame: pd.DataFrame | None = None,
+    coefficient_sign_constraints: dict[str, int] | None = None,
     checkpoint_path: str | Path | None = None,
     checkpoint_interval: int = 50,
 ) -> ConditionalLogitModel:
@@ -110,6 +111,13 @@ def fit_conditional_logit(
     penalty_norm = penalty.lower().strip()
     if penalty_norm not in {"l1", "l2", "none"}:
         penalty_norm = "l2"
+    sign_constraints: dict[int, int] = {}
+    for feature, sign in (coefficient_sign_constraints or {}).items():
+        if feature not in feature_columns:
+            raise ValueError(f"Katsayi kisiti olmayan feature: {feature}")
+        if sign not in {-1, 1}:
+            raise ValueError("Katsayi isaret kisiti -1 veya 1 olmali")
+        sign_constraints[feature_columns.index(feature)] = sign
 
     def _loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
         labels = frame["is_winner"].to_numpy(dtype=float)
@@ -142,6 +150,12 @@ def fit_conditional_logit(
             grad_coef = grad_coef + reg * np.sign(coef)
 
         coef = coef - learning_rate * grad_coef / max(len(frame), 1)
+        for feature_index, sign in sign_constraints.items():
+            coef[feature_index] = (
+                max(coef[feature_index], 1e-8)
+                if sign > 0
+                else min(coef[feature_index], -1e-8)
+            )
         intercept = intercept - learning_rate * grad_intercept / max(len(frame), 1)
 
         loss_history.append(_loss(frame, p))

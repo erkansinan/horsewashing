@@ -2,10 +2,15 @@
 # Data source / HTTP / cache
 # ------------------------------------------------------------
 tjk_base_url: "https://www.tjk.org"
-request_timeout_seconds: 15
+request_timeout_seconds: 30
 min_request_interval_seconds: 1.0
 cache_ttl_seconds: 600
 cache_path: ".cache/atyaris_cache.sqlite3"
+prediction_data_request_timeout_seconds: 5
+prediction_data_request_max_retries: 0
+prediction_trainer_cache_max_age_days: 7
+prediction_program_request_timeout_seconds: 30
+prediction_program_request_max_retries: 2
 
 # ------------------------------------------------------------
 # Classic score engine windows (non-ML path)

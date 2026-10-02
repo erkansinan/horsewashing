@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
+import pytest
 
 from atyaris.ml.fundamental_model import fit_conditional_logit
 from atyaris.ml.market_blend import BenterTwoStageArtifact
@@ -31,6 +33,48 @@ def _splits() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
 def _artifact(train: pd.DataFrame, features: list[str]) -> BenterTwoStageArtifact:
     model = fit_conditional_logit(train, features, max_iter=40)
     return BenterTwoStageArtifact(stage1_model=model, stage2_model=model, feature_columns=features)
+
+
+def test_log_loss_uses_race_winner_probability_mass() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["single", "single", "single", "dead_heat", "dead_heat", "dead_heat"],
+            "is_winner": [1, 0, 0, 1, 1, 0],
+        }
+    )
+
+    result = health._log_loss(frame, [0.8, 0.1, 0.1, 0.2, 0.3, 0.5])
+
+    assert result == pytest.approx((-np.log(0.8) - np.log(0.5)) / 2)
+
+
+def test_health_metrics_name_race_loss_and_row_bce_separately() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["R1", "R1", "R2", "R2"],
+            "is_winner": [1, 0, 0, 1],
+        }
+    )
+    probabilities = np.array([0.8, 0.2, 0.3, 0.7])
+
+    metrics = health._metrics(frame, probabilities)
+
+    assert metrics["race_based_log_loss"] == pytest.approx((-np.log(0.8) - np.log(0.7)) / 2)
+    assert metrics["row_based_bce"] == pytest.approx((-2 * np.log(0.8) - 2 * np.log(0.7)) / 4)
+
+
+def test_market_health_comparison_reports_same_units_and_normalized_probabilities() -> None:
+    train, _, test, features = _splits()
+    artifact = _artifact(train, features)
+
+    result = health.test_beats_market_baseline(artifact, train, test, features)
+
+    assert "full_race_based_log_loss" in result.details
+    assert "market_only_race_based_log_loss" in result.details
+    assert "full_row_based_bce" in result.details
+    assert "market_only_row_based_bce" in result.details
+    assert result.details["full_max_race_probability_sum_error"] < 1e-12
+    assert result.details["market_max_race_probability_sum_error"] < 1e-12
 
 
 def test_no_leakage_detects_temporal_and_group_contract() -> None:
@@ -65,6 +109,28 @@ def test_reproducibility() -> None:
     train, _, test, features = _splits()
     result = health.test_reproducibility(train, test, features)
     assert result.passed
+
+
+def test_conditional_logit_enforces_requested_coefficient_sign() -> None:
+    rows = []
+    for race_no in range(8):
+        for weight in (50.0, 55.0, 60.0):
+            rows.append(
+                {
+                    "race_id": f"R{race_no}",
+                    "weight": weight,
+                    "is_winner": int(weight == 60.0),
+                }
+            )
+
+    model = fit_conditional_logit(
+        pd.DataFrame(rows),
+        ["weight"],
+        max_iter=40,
+        coefficient_sign_constraints={"weight": -1},
+    )
+
+    assert model.coef_[0] < 0.0
 
 
 def test_dataset_quality_report_deduplicates_fallback_splits() -> None:

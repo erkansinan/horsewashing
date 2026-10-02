@@ -39,7 +39,6 @@ def test_phase2_feature_columns_exist() -> None:
         "history_avg_handicap_points",
         "history_avg_race_time_seconds",
         "history_avg_prize",
-        "history_avg_s20",
         "workout_count",
         "workout_avg_distance",
         "workout_avg_speed_index",
@@ -58,6 +57,9 @@ def test_phase2_feature_columns_exist() -> None:
 
     assert required.issubset(set(built.feature_columns))
     assert built.feature_columns == TJK_FEATURE_COLUMNS
+    assert "history_avg_s20" not in built.feature_columns
+    assert "finish_position" in built.frame.columns
+    assert "finish_position" not in built.feature_columns
     assert "workout_avg_time_seconds" not in built.feature_columns
     assert "workout_best_time_seconds" not in built.feature_columns
 
@@ -88,3 +90,20 @@ def test_prediction_reliability_shrinks_sparse_and_missing_workout_horses() -> N
     assert result.sum() == pytest.approx(1.0)
     assert abs(result[0] - market_probability[0]) < abs(result[1] - market_probability[1])
     assert abs(result[2] - market_probability[2]) < abs(result[0] - market_probability[0])
+
+
+def test_prediction_reliability_preserves_model_signal_without_market_odds() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["race", "race", "race"],
+            "career_starts": [0, 0, 0],
+            "workout_missing": [1, 1, 1],
+            "odds_missing": [1, 1, 1],
+        }
+    )
+    model_probability = np.array([0.70, 0.20, 0.10])
+    market_probability = np.array([1 / 3, 1 / 3, 1 / 3])
+
+    result = _apply_prediction_reliability(frame, model_probability, market_probability)
+
+    assert result == pytest.approx(model_probability)

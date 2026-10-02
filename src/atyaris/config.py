@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,11 +42,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ATYARIS_", env_file=".env", extra="ignore")
 
     tjk_base_url: str = "https://www.tjk.org"
-    request_timeout_seconds: float = 15.0
+    request_timeout_seconds: float = 30.0
     min_request_interval_seconds: float = 1.0
     user_agent: str = "atyaris-tahmin/1.0 (+iletisim@example.com; arastirma/egitim amacli)"
     cache_ttl_seconds: int = 600
     cache_path: str = ".cache/atyaris_cache.sqlite3"
+    prediction_data_request_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    prediction_data_request_max_retries: int = Field(default=0, ge=0)
+    prediction_data_min_request_interval_seconds: float = Field(default=0.5, ge=0.0)
+    prediction_program_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    prediction_program_request_max_retries: int = Field(default=2, ge=0)
+    prediction_trainer_cache_max_age_days: int = Field(default=7, ge=0)
     recent_form_window: int = 8
     ideal_rest_days_min: int = 14
     ideal_rest_days_max: int = 45
@@ -72,6 +78,7 @@ class Settings(BaseSettings):
     phase1_raw_history_jsonl_path: str = "data/raw/tjk_horse_history.jsonl"
     phase1_raw_daily_program_jsonl_path: str = "data/raw/tjk_daily_program.jsonl"
     phase1_raw_race_results_jsonl_path: str = "data/raw/tjk_race_results.jsonl"
+    phase1_raw_horse_id_mapping_jsonl_path: str = "data/raw/tjk_horse_id_mapping.jsonl"
     phase1_raw_workouts_jsonl_path: str = "data/raw/tjk_workouts.jsonl"
     phase1_raw_trainer_statistics_jsonl_path: str = "data/raw/tjk_trainer_statistics.jsonl"
     phase1_clean_csv_path: str = "data/processed/clean_races.csv"

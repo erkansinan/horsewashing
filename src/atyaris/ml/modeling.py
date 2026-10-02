@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -54,7 +55,22 @@ def save_phase3_artifact(artifact: BenterTwoStageArtifact, calibrator_payload: d
     temporary_path.replace(output_path)
 
 
-def load_phase3_artifact(path: str) -> tuple[BenterTwoStageArtifact, dict[str, object]]:
+def load_phase3_artifact(
+    path: str,
+    *,
+    require_health_pass: bool = False,
+) -> tuple[BenterTwoStageArtifact, dict[str, object]]:
+    if require_health_pass:
+        health_path = Path(path).with_suffix(".health.json")
+        try:
+            health_report = json.loads(health_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Model health raporu okunamadi: {health_path}") from exc
+        if not isinstance(health_report, dict) or health_report.get("passed") is not True:
+            raise RuntimeError(
+                f"Health kontrolu gecmeyen model servis edilemez: {health_path}"
+            )
+
     payload = _safe_joblib_load(path)
     # New format
     if "stage1_model" in payload and "stage2_model" in payload:

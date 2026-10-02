@@ -11,6 +11,8 @@ from rich.table import Table
 from atyaris.config import get_settings
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
 from atyaris.ml.feedback import compare_predictions
+from atyaris.ml.horse_id_backfill import backfill_horse_ids
+from atyaris.ml.horse_id_mapping import HorseIdMappingStore, validate_random_mappings
 from atyaris.ml.phase5 import register_training_run, run_phase5_report
 from atyaris.ml.pipeline import (
     build_features,
@@ -150,6 +152,49 @@ def results_cmd(
             ensure_ascii=True,
         )
     )
+
+
+@app.command("backfill-horse-ids")
+def backfill_horse_ids_cmd(
+    batch_units: int = typer.Option(10, "--batch-units", min=1, max=100),
+    retry_unresolved: bool = typer.Option(False, "--retry-unresolved"),
+) -> None:
+    """Resolve IDs for existing TJK raw and training records, resumably."""
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    source = _tjk_source(settings)
+    try:
+        report = backfill_horse_ids(
+            paths,
+            source,
+            progress_callback=console.print,
+            batch_units=batch_units,
+            retry_unresolved=retry_unresolved,
+        )
+    finally:
+        source.close()
+    console.print_json(json.dumps(report, ensure_ascii=True))
+
+
+@app.command("validate-horse-ids")
+def validate_horse_ids_cmd(
+    sample_size: int = typer.Option(20, "--sample-size", min=1, max=100),
+    seed: int = typer.Option(20260924, "--seed"),
+) -> None:
+    """Verify a reproducible random sample of mapped IDs on AtKosuBilgileri."""
+    settings = get_settings()
+    paths = paths_from_settings(settings)
+    mapping = HorseIdMappingStore(paths.raw_horse_id_mapping_jsonl)
+    source = _tjk_source(settings)
+    try:
+        report = validate_random_mappings(source, mapping, sample_size, seed)
+    finally:
+        source.close()
+    report_path = paths.raw_horse_id_mapping_jsonl.with_suffix(".validation-report.json")
+    temporary = report_path.with_name(f"{report_path.name}.tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+    temporary.replace(report_path)
+    console.print_json(json.dumps(report, ensure_ascii=True))
 
 
 @app.command("preprocess")

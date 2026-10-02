@@ -9,6 +9,26 @@
   <p class="error">{{ error }}</p>
 {% endif %}
 
+{% if model_health_status %}
+  <section class="model-health-status" role="status" data-testid="model-health-status">
+    <strong>Model health.json:</strong>
+    {% if model_health_status.passed is sameas true %}
+      <span>passed: true</span>
+    {% elif model_health_status.passed is sameas false %}
+      <span class="error">passed: false; ML tahmini servis edilmez.</span>
+    {% else %}
+      <span class="error">passed: bilinmiyor; ML tahmini servis edilmez.</span>
+    {% endif %}
+    <span>{{ model_health_status.model_file }} · SHA-256 {{ model_health_status.sha256 or 'yok' }}</span>
+    {% if model_health_status.failed_checks %}
+      <span>Başarısız kontroller: {{ model_health_status.failed_checks | join(', ') }}</span>
+    {% endif %}
+    {% if model_health_status.error %}
+      <span>{{ model_health_status.error }}</span>
+    {% endif %}
+  </section>
+{% endif %}
+
 {% if ml_prediction %}
   <h2>ML Tahmin - {{ ml_prediction.race_name }} (Benter)</h2>
 
@@ -20,6 +40,13 @@
     <p class="disclaimer">Model kanit etiketi: <strong>{{ ml_prediction.analysis.evidence_status }}</strong>. EV/value-bet sinyali, bu etiketten bagimsiz olarak garanti degildir.</p>
     {% endif %}
   </div>
+  {% if ml_prediction.rows | selectattr('history_missing') | list %}
+  {% if ml_prediction.rows | selectattr('history_lookup_status', 'equalto', 'unresolved_id') | list or ml_prediction.rows | selectattr('history_lookup_status', 'equalto', 'fetch_failed') | list %}
+  <p class="error"><strong>Bazı atların geçmişi TJK’dan alınamadı.</strong> ID’si çözülemeyen veya HTML isteği başarısız olan kayıtlar yaklaşık 10 dakika sonra yeniden denenir. Geçmişi olmayan ve Edge değeri sıfır olan satırlar odds/piyasa fallback’idir.</p>
+  {% else %}
+  <p class="error"><strong>Geçmiş verisi olmayan atlar var.</strong> Bu atların sıralaması form verisine dayanmıyor; geçmişi olmayan ve Edge değeri sıfır olan satırlar odds/piyasa fallback’idir.</p>
+  {% endif %}
+  {% endif %}
 
   <table>
     <thead>
@@ -27,11 +54,13 @@
         <th><a href="{{ sort_urls.rank }}">Rank{% if sort_by == 'rank' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>No</th>
         <th>At</th>
+        <th>Model Verisi</th>
         <th title="TJK programındaki at oranı; sonuç sayfasındaki GANYAN ödeme tutarı değildir"><a href="{{ sort_urls.odds }}">Ganyan (oran){% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.calibrated_probability }}">P(win){% if sort_by == 'calibrated_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.place2_probability }}">P(2.){% if sort_by == 'place2_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.place3_probability }}">P(3.){% if sort_by == 'place3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
-        <th><a href="{{ sort_urls.top3_probability }}">P(Top3){% if sort_by == 'top3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.top3_probability }}">P(Top3, kalibre){% if sort_by == 'top3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th>Seçim</th>
         <th><a href="{{ sort_urls.confidence }}">Guven{% if sort_by == 'confidence' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.edge }}">Edge{% if sort_by == 'edge' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.ev }}">EV{% if sort_by == 'ev' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
@@ -45,11 +74,13 @@
         <td>{{ row.rank }}</td>
         <td>{% if row.number is defined and row.number is not none %}{{ row.number }}{% else %}-{% endif %}</td>
         <td>{{ row.horse_name if row.horse_name else row.horse_id }}</td>
+        <td>{% if row.history_missing %}<strong class="data-warning">{% if row.history_lookup_status == 'unresolved_id' %}AT ID ÇÖZÜLEMEDİ{% elif row.history_lookup_status == 'fetch_failed' %}TJK GEÇMİŞ İSTEĞİ BAŞARISIZ{% elif row.history_lookup_status == 'empty' %}GEÇMİŞ KAYDI YOK{% elif row.odds_only_fallback %}GEÇMİŞ YOK · ORAN BAZLI{% else %}GEÇMİŞ VERİ EKSİK{% endif %}</strong>{% else %}Geçmiş mevcut{% endif %}</td>
         <td>{% if row.odds is not none %}{{ "%.2f"|format(row.odds) }}{% else %}-{% endif %}</td>
         <td>{{ "%.2f"|format(row.calibrated_probability * 100) }}%</td>
         <td>{{ "%.2f"|format((row.place2_probability|default(0.0)) * 100) }}%</td>
         <td>{{ "%.2f"|format((row.place3_probability|default(0.0)) * 100) }}%</td>
-        <td>{{ "%.2f"|format((row.top3_probability|default(0.0)) * 100) }}%</td>
+        <td>{{ "%.2f"|format((row.place_probability|default(row.top3_probability|default(0.0))) * 100) }}%</td>
+        <td>{% if row.predicted_highest_odds_placer|default(false) %}<strong>En yüksek oranlı Top-3</strong>{% elif row.predicted_top3|default(false) %}Top-3 adayı{% else %}-{% endif %}</td>
         <td>{{ "%.3f"|format(row.confidence) }}</td>
         <td>{% if row.edge is not none %}{{ "%.3f"|format(row.edge) }}{% else %}-{% endif %}</td>
         <td>{% if row.ev is not none %}{{ "%.3f"|format(row.ev) }}{% else %}-{% endif %}</td>
@@ -101,10 +132,14 @@
   {% endif %}
   {% if ml_prediction.analysis.horse_stats %}
   <h4>At Bazinda Kullanilan Istatistikler</h4>
+  {% if ml_prediction.analysis.horse_stats | selectattr('history_missing') | list %}
+  <p class="error"><strong>Geçmiş verisi olmayan atlar var.</strong> Bu atlarda form temelli tahmin güvenilir değildir; oran mevcutsa sonuç piyasa olasılığına dayanabilir. Her atın veri durumu aşağıda işaretlenmiştir.</p>
+  {% endif %}
   <table>
     <thead>
       <tr>
         <th>At</th>
+        <th>Veri Durumu</th>
         <th>No</th>
         <th>Kilo</th>
         <th>Mesafe</th>
@@ -219,6 +254,14 @@
             {% endif %}
             {% endif %}
           </details>
+        </td>
+        <td>
+          {% if item.history_missing %}
+            <strong class="data-warning">{% if item.odds_only_fallback %}GEÇMİŞ YOK · ORAN BAZLI{% else %}GEÇMİŞ VERİ EKSİK{% endif %}</strong>
+          {% else %}
+            <span>Model geçmiş girdisi var</span>
+          {% endif %}
+          <br><small>{{ item.tjk_status }}</small>
         </td>
         <td>{{ item.number }}</td>
         <td>{{ item.weight }}</td>

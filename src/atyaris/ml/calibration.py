@@ -75,22 +75,58 @@ def smooth_race_probabilities(
 def recover_collapsed_calibration(
     calibrated: np.ndarray,
     raw_probability: np.ndarray,
+    group_ids: np.ndarray | None = None,
     collapse_tolerance: float = 1e-12,
 ) -> np.ndarray:
-    """Preserve raw ranking when a calibrator maps every row to one value."""
+    """Preserve raw ranking when calibration collapses most rows in a group."""
     calibrated_array = np.asarray(calibrated, dtype=float)
     raw_array = np.asarray(raw_probability, dtype=float)
-    if calibrated_array.size > 1 and np.ptp(calibrated_array) <= collapse_tolerance:
-        return apply_probability_floor(raw_array)
+    groups = (
+        np.zeros(calibrated_array.size, dtype=int)
+        if group_ids is None
+        else np.asarray(group_ids)
+    )
+    if groups.size != calibrated_array.size or raw_array.size != calibrated_array.size:
+        raise ValueError("calibrated, raw_probability, and group_ids must have equal sizes")
+
     recovered = calibrated_array.copy()
+    for group_id in np.unique(groups):
+        positions = np.flatnonzero(groups == group_id)
+        group_calibrated = calibrated_array[positions]
+        group_raw = raw_array[positions]
+        _, counts = np.unique(group_calibrated, return_counts=True)
+        dominant_plateau = counts.max() / len(positions) >= 0.8
+        if (
+            len(positions) > 1
+            and dominant_plateau
+            and np.ptp(group_raw) > collapse_tolerance
+        ):
+            recovered[positions] = group_raw
+
     collapsed_rows = recovered <= collapse_tolerance
     recovered[collapsed_rows] = raw_array[collapsed_rows]
     return apply_probability_floor(recovered)
 
 
-def to_payload(calibrator: Calibrator) -> dict[str, object]:
-    return {"method": calibrator.method, "model": calibrator.model}
+def to_payload(
+    calibrator: Calibrator,
+    place_calibrator: Calibrator | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"method": calibrator.method, "model": calibrator.model}
+    if place_calibrator is not None:
+        payload["place_calibrator"] = {
+            "method": place_calibrator.method,
+            "model": place_calibrator.model,
+        }
+    return payload
 
 
 def from_payload(payload: dict[str, object]) -> Calibrator:
     return Calibrator(method=str(payload.get("method", "none")), model=payload.get("model"))
+
+
+def place_from_payload(payload: dict[str, object]) -> Calibrator:
+    place_payload = payload.get("place_calibrator")
+    if not isinstance(place_payload, dict):
+        return Calibrator(method="none", model=None)
+    return from_payload(place_payload)

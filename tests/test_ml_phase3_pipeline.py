@@ -13,9 +13,12 @@ from atyaris.ml.pipeline import (
     predict_for_date,
     prepare_prediction_features,
     preprocess_raw,
+    read_csv_cached,
     run_phase1_backtest,
     train_phase1_model,
 )
+from atyaris.ml.ev_kelly import add_ev_kelly_columns
+from atyaris.ml.modeling import load_phase3_artifact
 
 
 def _setup_phase3_artifacts(tmp_path, monkeypatch) -> Phase1Paths:
@@ -37,6 +40,27 @@ def _setup_phase3_artifacts(tmp_path, monkeypatch) -> Phase1Paths:
     build_features(paths)
     train_phase1_model(paths, holdout_days=20, calibration_days=14, calibration_method="isotonic")
     return paths
+
+
+def test_read_csv_cached_reuses_unchanged_file_without_sharing_mutations(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "features.csv"
+    csv_path.write_text("value\n1\n", encoding="utf-8")
+    original_read_csv = pd.read_csv
+    reads = 0
+
+    def counting_read_csv(path, *args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", counting_read_csv)
+
+    first = read_csv_cached(csv_path)
+    first.loc[0, "value"] = 99
+    second = read_csv_cached(csv_path)
+
+    assert reads == 1
+    assert second.loc[0, "value"] == 1
 
 
 def test_phase3_predict_has_calibrated_and_ev_outputs(tmp_path, monkeypatch) -> None:
@@ -63,9 +87,37 @@ def test_phase3_predict_has_calibrated_and_ev_outputs(tmp_path, monkeypatch) -> 
         "bet_decision",
         "confidence",
     }.issubset(pred.columns)
+    _, calibration_payload = load_phase3_artifact(str(paths.model_path))
+    assert "place2_gamma" in calibration_payload
+    assert "place3_gamma" in calibration_payload
+    assert 0.05 <= calibration_payload["place2_gamma"] <= 5.0
+    assert 0.05 <= calibration_payload["place3_gamma"] <= 5.0
 
     race_sums = pred.groupby("race_id")["calibrated_probability"].sum().round(6)
     assert (race_sums == 1.0).all()
+
+
+def test_ev_is_unavailable_and_no_bet_without_valid_odds() -> None:
+    frame = pd.DataFrame(
+        {
+            "calibrated_probability": [0.7, 0.2],
+            "market_probability": [0.5, 0.5],
+            "odds": [0.0, float("nan")],
+        }
+    )
+
+    result = add_ev_kelly_columns(
+        frame,
+        min_probability=0.18,
+        min_edge=0.03,
+        min_ev=0.02,
+        fractional_kelly=0.35,
+        max_kelly_fraction=0.25,
+    )
+
+    assert result["ev"].isna().all()
+    assert result["kelly_fraction"].eq(0.0).all()
+    assert result["bet_decision"].eq("NO_BET").all()
 
 
 def test_phase3_backtest_reports_calibration_and_roi(tmp_path, monkeypatch) -> None:
@@ -141,23 +193,43 @@ def test_prediction_features_are_separate_from_labelled_training_features(tmp_pa
     paths = _setup_phase3_artifacts(tmp_path, monkeypatch)
     provider = __import__("atyaris.ml.provider", fromlist=["SyntheticRacingDataProvider"]).SyntheticRacingDataProvider()
     target_date = date(2025, 5, 1)
+    ingestion_calls = []
 
-    monkeypatch.setattr(
-        "atyaris.ml.pipeline.ingest_real_tjk_data",
-        lambda start_date, end_date, paths_arg, progress_callback=None, require_results=True: provider.get_dataset(
+    def fake_ingest(start_date, end_date, paths_arg, progress_callback=None, require_results=True, **kwargs):
+        ingestion_calls.append(kwargs)
+        return provider.get_dataset(
             start_date, end_date
-        ).drop(columns=["finish_position", "is_winner"], errors="ignore"),
-    )
+        ).drop(columns=["finish_position", "is_winner"], errors="ignore")
+
+    monkeypatch.setattr("atyaris.ml.pipeline.ingest_real_tjk_data", fake_ingest)
 
     prediction = prepare_prediction_features(target_date, paths)
 
     assert not prediction.empty
+    assert ingestion_calls[0]["program_from_html"] is True
+    assert "program_from_csv" not in ingestion_calls[0]
     assert set(pd.to_datetime(prediction["date"]).dt.date) == {target_date}
     assert paths.prediction_features_csv.exists()
     training_dates = set(pd.to_datetime(pd.read_csv(paths.features_csv)["date"]).dt.date)
     assert target_date not in training_dates
     assert "is_winner" in prediction.columns
     assert prediction["is_winner"].eq(0).all()
+
+    other_city = prediction.iloc[[0]].copy()
+    other_city["race_id"] = f"{target_date:%Y%m%d}_99"
+    other_city["track"] = "IZMIR"
+    earlier_date = prediction.iloc[[0]].copy()
+    earlier_date["date"] = date(2025, 4, 30)
+    paths.prediction_features_csv.write_text(
+        pd.concat([other_city, earlier_date], ignore_index=True).to_csv(index=False),
+        encoding="utf-8",
+    )
+
+    prepare_prediction_features(target_date, paths)
+
+    snapshot = pd.read_csv(paths.prediction_features_csv)
+    assert ((snapshot["date"] == target_date.isoformat()) & (snapshot["track"] == "IZMIR")).any()
+    assert (pd.to_datetime(snapshot["date"]).dt.date == date(2025, 4, 30)).any()
 
 
 def test_training_ingestion_resumes_from_completed_day_checkpoint(tmp_path, monkeypatch) -> None:

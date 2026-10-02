@@ -43,7 +43,9 @@ def _safe_logit(p: np.ndarray) -> np.ndarray:
 
 
 def _normalized_market_probability(frame: pd.DataFrame) -> np.ndarray:
-    if "odds" in frame.columns:
+    if "market_probability_norm" in frame.columns:
+        implied = pd.to_numeric(frame["market_probability_norm"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    elif "odds" in frame.columns:
         odds = pd.to_numeric(frame["odds"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         implied = np.divide(
             1.0,
@@ -58,6 +60,25 @@ def _normalized_market_probability(frame: pd.DataFrame) -> np.ndarray:
 
     temp = frame[["race_id"]].copy()
     temp["implied"] = implied
+    no_market_odds = temp.groupby("race_id")["implied"].transform("sum") <= 0.0
+    if no_market_odds.any():
+        if "market_probability" in frame.columns:
+            fallback = pd.to_numeric(frame["market_probability"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            fallback_total = pd.Series(fallback, index=frame.index).groupby(frame["race_id"]).transform("sum").to_numpy()
+            has_fallback = no_market_odds.to_numpy() & (fallback_total > 0.0)
+            implied[has_fallback] = fallback[has_fallback]
+            no_fallback = no_market_odds.to_numpy() & ~has_fallback
+        elif "market_probability_norm" in frame.columns and "odds" in frame.columns:
+            odds = pd.to_numeric(frame["odds"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            fallback = np.divide(1.0, odds, out=np.zeros_like(odds), where=odds > 1.0)
+            fallback_total = pd.Series(fallback, index=frame.index).groupby(frame["race_id"]).transform("sum").to_numpy()
+            has_fallback = no_market_odds.to_numpy() & (fallback_total > 0.0)
+            implied[has_fallback] = fallback[has_fallback]
+            no_fallback = no_market_odds.to_numpy() & ~has_fallback
+        else:
+            no_fallback = no_market_odds.to_numpy()
+        implied[no_fallback] = 1.0
+        temp["implied"] = implied
     denom = temp.groupby("race_id")["implied"].transform("sum").replace(0.0, 1.0)
     return (temp["implied"] / denom).to_numpy(dtype=float)
 
@@ -71,6 +92,7 @@ def fit_two_stage_benter(
     stage1_regularization: float = 0.05,
     stage2_penalty: str = "l2",
     stage2_regularization: float = 0.02,
+    stage1_coefficient_sign_constraints: dict[str, int] | None = None,
     checkpoint_dir: str | Path | None = None,
 ) -> BenterTwoStageArtifact:
     stage1 = fit_conditional_logit(
@@ -78,6 +100,7 @@ def fit_two_stage_benter(
         feature_columns,
         penalty=stage1_penalty,
         regularization_strength=stage1_regularization,
+        coefficient_sign_constraints=stage1_coefficient_sign_constraints,
         validation_frame=calibration_df,
         checkpoint_path=(Path(checkpoint_dir) / "stage1.npz") if checkpoint_dir is not None else None,
     )
@@ -159,6 +182,16 @@ def predict_form_probability(artifact: BenterTwoStageArtifact, frame: pd.DataFra
 
 def extract_market_reference_probability(frame: pd.DataFrame) -> np.ndarray:
     return _normalized_market_probability(frame)
+
+
+def extract_odds_implied_probability(frame: pd.DataFrame) -> np.ndarray:
+    """Return race-normalized probabilities derived strictly from decimal odds."""
+    if frame.empty:
+        return np.array([], dtype=float)
+    odds = pd.to_numeric(frame["odds"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    implied = np.divide(1.0, odds, out=np.zeros_like(odds), where=odds > 1.0)
+    totals = pd.Series(implied, index=frame.index).groupby(frame["race_id"]).transform("sum").to_numpy()
+    return np.divide(implied, totals, out=np.zeros_like(implied), where=totals > 0.0)
 
 
 def predict_mixed_probability(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from collections.abc import Callable
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,7 @@ from atyaris.ml.calibration import (
     apply_calibrator,
     apply_probability_floor,
     fit_calibrator,
+    place_from_payload,
     recover_collapsed_calibration,
     from_payload,
     smooth_race_probabilities,
@@ -25,6 +27,7 @@ from atyaris.ml.calibration import (
 )
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
+    FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS,
     MISSINGNESS_INDICATOR_COLUMNS,
     TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
     TJK_STAGE1_FEATURE_COLUMNS,
@@ -33,7 +36,11 @@ from atyaris.ml.features import (
     build_leakage_safe_features,
     preprocess_dataset,
 )
-from atyaris.ml.harville import add_harville_columns
+from atyaris.ml.harville import (
+    add_harville_columns,
+    fit_harville_gammas,
+    mark_highest_odds_placer_predictions,
+)
 from atyaris.ml.market_blend import (
     BenterTwoStageArtifact,
     extract_market_reference_probability,
@@ -54,12 +61,25 @@ class Phase1Paths:
     raw_history_jsonl: Path = Path("data/raw/tjk_horse_history.jsonl")
     raw_daily_program_jsonl: Path = Path("data/raw/tjk_daily_program.jsonl")
     raw_race_results_jsonl: Path = Path("data/raw/tjk_race_results.jsonl")
+    raw_horse_id_mapping_jsonl: Path = Path("data/raw/tjk_horse_id_mapping.jsonl")
     raw_workouts_jsonl: Path = Path("data/raw/tjk_workouts.jsonl")
     raw_trainer_statistics_jsonl: Path = Path("data/raw/tjk_trainer_statistics.jsonl")
     clean_csv: Path = Path("data/processed/clean_races.csv")
     features_csv: Path = Path("data/processed/features_phase1.csv")
     prediction_features_csv: Path = Path("data/processed/prediction_features_phase1.csv")
     model_path: Path = Path("models/phase1_logreg.joblib")
+
+
+@lru_cache(maxsize=4)
+def _read_csv_snapshot(path: str, modified_ns: int, size_bytes: int) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+def read_csv_cached(path: Path) -> pd.DataFrame:
+    """Read an unchanged CSV from memory; callers receive an isolated copy."""
+    stat = path.stat()
+    cached = _read_csv_snapshot(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    return cached.copy()
 
 
 def _apply_prediction_reliability(
@@ -79,6 +99,10 @@ def _apply_prediction_reliability(
     ).fillna(1.0).to_numpy(dtype=float)
     reliability *= np.where(workout_missing >= 0.5, 0.5, 1.0)
     blended = market_probability + reliability * (model_probability - market_probability)
+    if "odds_missing" in frame.columns:
+        odds_missing = pd.to_numeric(frame["odds_missing"], errors="coerce").fillna(1.0) >= 0.5
+        no_market_by_race = odds_missing.groupby(frame["race_id"]).transform("all").to_numpy(dtype=bool)
+        blended = np.where(no_market_by_race, model_probability, blended)
     for race_id, indices in frame.groupby("race_id", sort=False).indices.items():
         del race_id
         total = float(np.sum(blended[indices]))
@@ -93,6 +117,7 @@ def paths_from_settings(settings: Settings) -> Phase1Paths:
         raw_history_jsonl=Path(settings.phase1_raw_history_jsonl_path),
         raw_daily_program_jsonl=Path(settings.phase1_raw_daily_program_jsonl_path),
         raw_race_results_jsonl=Path(settings.phase1_raw_race_results_jsonl_path),
+        raw_horse_id_mapping_jsonl=Path(settings.phase1_raw_horse_id_mapping_jsonl_path),
         raw_workouts_jsonl=Path(settings.phase1_raw_workouts_jsonl_path),
         raw_trainer_statistics_jsonl=Path(settings.phase1_raw_trainer_statistics_jsonl_path),
         clean_csv=Path(settings.phase1_clean_csv_path),
@@ -302,7 +327,10 @@ def preprocess_raw(paths: Phase1Paths) -> pd.DataFrame:
 def build_features(paths: Phase1Paths) -> FeatureBuildResult:
     frame = pd.read_csv(paths.clean_csv)
     _require_rows(frame, "Temiz veri")
-    built = build_leakage_safe_features(frame)
+    built = build_leakage_safe_features(
+        frame,
+        recompute_precomputed_columns=FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS,
+    )
     _require_rows(built.frame, "Feature uretimi")
     assert_no_leakage_columns(built.feature_columns)
     _write_csv_atomically(built.frame, paths.features_csv)
@@ -320,6 +348,7 @@ def prepare_prediction_features(
     ingestion_kwargs = {
         "progress_callback": progress_callback,
         "require_results": False,
+        "program_from_html": True,
     }
     if hippodrome:
         ingestion_kwargs["hippodrome"] = hippodrome
@@ -336,14 +365,54 @@ def prepare_prediction_features(
     built = build_leakage_safe_features(combined, as_of_date=target_date)
     prediction = built.frame[pd.to_datetime(built.frame["date"]).dt.date == target_date].copy()
     _require_rows(prediction, "Tahmin feature uretimi")
-    _write_csv_atomically(prediction, paths.prediction_features_csv)
+    if "track" not in prediction.columns:
+        if hippodrome:
+            prediction["track"] = hippodrome.strip().upper().replace("İ", "I")
+        elif {"race_id", "track"}.issubset(raw.columns):
+            track_by_race = raw.drop_duplicates("race_id").set_index("race_id")["track"]
+            prediction["track"] = prediction["race_id"].map(track_by_race)
+        else:
+            prediction["track"] = ""
+    snapshot = prediction
+    if paths.prediction_features_csv.exists():
+        existing = pd.read_csv(paths.prediction_features_csv)
+        if {"date", "race_id"}.issubset(existing.columns):
+            if "track" not in existing.columns:
+                existing["track"] = ""
+            incoming_keys = {
+                (row_date, str(race_id), str(track).strip().upper().replace("İ", "I"))
+                for row_date, race_id, track in zip(
+                    pd.to_datetime(prediction["date"], errors="coerce").dt.date,
+                    prediction["race_id"],
+                    prediction["track"],
+                )
+            }
+            existing_keys = [
+                (row_date, str(race_id), str(track).strip().upper().replace("İ", "I"))
+                for row_date, race_id, track in zip(
+                    pd.to_datetime(existing["date"], errors="coerce").dt.date,
+                    existing["race_id"],
+                    existing["track"],
+                )
+            ]
+            preserved = existing.loc[
+                [key not in incoming_keys for key in existing_keys]
+            ]
+            snapshot = pd.concat([preserved, prediction], ignore_index=True, sort=False)
+            snapshot = snapshot.drop_duplicates(
+                subset=["date", "track", "race_id", "horse_id"], keep="last"
+            )
+    _write_csv_atomically(snapshot, paths.prediction_features_csv)
     return prediction
 
 
-def _benter_feature_columns(frame: pd.DataFrame) -> list[str]:
+def _benter_feature_columns(
+    frame: pd.DataFrame,
+    feature_columns: list[str] | None = None,
+) -> list[str]:
     selected = [
         column
-        for column in TJK_SELECTED_STAGE1_FEATURE_COLUMNS
+        for column in (feature_columns or TJK_SELECTED_STAGE1_FEATURE_COLUMNS)
         if column not in MISSINGNESS_INDICATOR_COLUMNS
     ]
     missing = [column for column in selected if column not in frame.columns]
@@ -430,11 +499,13 @@ def train_phase1_model(
     holdout_days: int = 30,
     calibration_days: int = 21,
     calibration_method: str = "isotonic",
+    feature_columns: list[str] | None = None,
+    stage1_coefficient_sign_constraints: dict[str, int] | None = None,
 ) -> BenterTwoStageArtifact:
     frame = pd.read_csv(paths.features_csv)
     _require_rows(frame, "Feature verisi")
     frame["date"] = pd.to_datetime(frame["date"]).dt.date
-    feature_columns = _benter_feature_columns(frame)
+    feature_columns = _benter_feature_columns(frame, feature_columns)
 
     train_df, calibration_df, test_df = _split_temporal_frames(frame)
 
@@ -447,6 +518,7 @@ def train_phase1_model(
         stage1_regularization=stage1_regularization,
         stage2_penalty="l2",
         stage2_regularization=0.02,
+        stage1_coefficient_sign_constraints=stage1_coefficient_sign_constraints,
         checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",
     )
 
@@ -456,9 +528,36 @@ def train_phase1_model(
         raw_prob=raw_cal,
         method=calibration_method,
     )
+    calibrated_win = recover_collapsed_calibration(
+        apply_calibrator(calibrator, raw_cal),
+        raw_cal,
+        group_ids=calibration_df["race_id"].to_numpy(),
+    )
+    calibrated_win = smooth_race_probabilities(
+        calibrated_win,
+        calibration_df.groupby("race_id")["race_id"].transform("size").to_numpy(),
+    )
+    calibrated_win /= calibration_df.assign(_p=calibrated_win).groupby("race_id")["_p"].transform("sum").to_numpy()
+    place_calibration_frame = calibration_df.copy()
+    place_calibration_frame["calibrated_probability"] = calibrated_win
+    place_gammas = fit_harville_gammas(place_calibration_frame)
+    place_calibration_frame = add_harville_columns(
+        place_calibration_frame,
+        place2_gamma=float(place_gammas["place2_gamma"]),
+        place3_gamma=float(place_gammas["place3_gamma"]),
+    )
+    placed_labels = pd.to_numeric(calibration_df["is_placed"], errors="coerce")
+    place_label_mask = placed_labels.notna().to_numpy()
+    place_calibrator = fit_calibrator(
+        y_true=placed_labels.to_numpy(dtype=float)[place_label_mask].astype(int),
+        raw_prob=place_calibration_frame["place_probability"].to_numpy(dtype=float)[place_label_mask],
+        method=calibration_method,
+    )
 
     _ensure_parent(paths.model_path)
-    save_phase3_artifact(artifact, to_payload(calibrator), str(paths.model_path))
+    calibration_payload = to_payload(calibrator, place_calibrator)
+    calibration_payload.update(place_gammas)
+    save_phase3_artifact(artifact, calibration_payload, str(paths.model_path))
     run_model_health_checks(
         artifact,
         train_df,
@@ -484,10 +583,11 @@ def predict_for_date(
     ev_probability_threshold: float = 0.18,
     ev_min_edge: float = 0.03,
     ev_min_value: float = 0.02,
+    require_health_pass: bool = False,
 ) -> pd.DataFrame:
-    training_frame = pd.read_csv(paths.features_csv)
+    training_frame = read_csv_cached(paths.features_csv)
     prediction_frame = (
-        pd.read_csv(paths.prediction_features_csv)
+        read_csv_cached(paths.prediction_features_csv)
         if paths.prediction_features_csv.exists()
         else pd.DataFrame()
     )
@@ -518,6 +618,10 @@ def predict_for_date(
             "place2_probability",
             "place3_probability",
             "top3_probability",
+            "place_probability",
+            "predicted_place_rank",
+            "predicted_top3",
+            "predicted_highest_odds_placer",
             "rank",
             "confidence",
         ]:
@@ -532,8 +636,11 @@ def predict_for_date(
                         out[col] = pd.Series(dtype="float64")
         return out
 
-    artifact, calibrator_payload = load_phase3_artifact(str(paths.model_path))
+    artifact, calibrator_payload = load_phase3_artifact(
+        str(paths.model_path), require_health_pass=require_health_pass
+    )
     calibrator = from_payload(calibrator_payload)
+    place_calibrator = place_from_payload(calibrator_payload)
 
     out = day_df.copy()
     form_probability = predict_form_probability(artifact, out)
@@ -544,6 +651,7 @@ def predict_for_date(
     calibrated_probability = recover_collapsed_calibration(
         apply_calibrator(calibrator, raw_probability),
         raw_probability,
+        group_ids=out["race_id"].to_numpy(),
     )
     out["calibrated_probability"] = smooth_race_probabilities(
         calibrated_probability,
@@ -560,7 +668,19 @@ def predict_for_date(
     out["calibrated_probability"] = out["calibrated_probability"] / denom
     out["market_probability_used"] = market_probability
     out["rank"] = out.groupby("race_id")["calibrated_probability"].rank(ascending=False, method="dense")
-    out = add_harville_columns(out, win_col="calibrated_probability")
+    out = add_harville_columns(
+        out,
+        win_col="calibrated_probability",
+        place2_gamma=float(calibrator_payload.get("place2_gamma", 1.0)),
+        place3_gamma=float(calibrator_payload.get("place3_gamma", 1.0)),
+    )
+    raw_place_probability = out["place_probability"].to_numpy(dtype=float)
+    out["place_probability"] = recover_collapsed_calibration(
+        apply_calibrator(place_calibrator, raw_place_probability),
+        raw_place_probability,
+        group_ids=out["race_id"].to_numpy(),
+    )
+    out = mark_highest_odds_placer_predictions(out)
 
     if enable_ev:
         out = add_ev_kelly_columns(

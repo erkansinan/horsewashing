@@ -7,7 +7,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Dict, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class TrackSurface(str, Enum):
@@ -140,6 +140,9 @@ class RaceEntry(BaseModel):
     number: int
     horse_id: str
     source_horse_id: Optional[int] = None
+    id_unresolved: bool = True
+    id_resolution_status: str = "unresolved"
+    id_candidate_ids: list[int] = Field(default_factory=list)
     horse_name: str
     age: Optional[int] = None
     jockey: Jockey
@@ -151,6 +154,13 @@ class RaceEntry(BaseModel):
     form_raw: Optional[str] = None
     is_scratched: bool = False  # kosmaz
     actual_finish_position: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _set_id_resolution_defaults(self) -> "RaceEntry":
+        if self.source_horse_id is not None and self.id_resolution_status == "unresolved":
+            self.id_unresolved = False
+            self.id_resolution_status = "html_program_link"
+        return self
 
 
 class Race(BaseModel):

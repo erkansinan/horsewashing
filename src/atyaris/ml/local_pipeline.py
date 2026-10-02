@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,7 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
     results = _load_jsonl(paths.raw_race_results_jsonl)
     histories = _load_jsonl(paths.raw_history_jsonl)
     workouts = _load_jsonl(getattr(paths, "raw_workouts_jsonl", None)) if getattr(paths, "raw_workouts_jsonl", None) else []
+    trainer_statistics = _load_jsonl(getattr(paths, "raw_trainer_statistics_jsonl", None)) if getattr(paths, "raw_trainer_statistics_jsonl", None) else []
     if not programs:
         return pd.read_csv(paths.raw_csv) if paths.raw_csv.exists() else pd.DataFrame()
 
@@ -107,6 +109,12 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
         horse_id = str(row.get("horse_id") or "")
         if horse_id:
             workouts_by_horse[horse_id].append(row)
+    trainers_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in trainer_statistics:
+        trainer_id = str(row.get("trainer_id") or "")
+        as_of_date = _date(row.get("as_of_date"))
+        if trainer_id and as_of_date is not None:
+            trainers_by_id[trainer_id].append(row)
 
     rows: list[dict[str, Any]] = []
     for program in programs:
@@ -133,6 +141,33 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             for item in past_workouts
             if float(item.get("time_seconds") or 0.0) > 0.0
         ]
+        trainer_id = str(program.get("trainer_id") or "")
+        trainer_snapshots = [
+            item for item in trainers_by_id.get(trainer_id, [])
+            if (_date(item.get("as_of_date")) or date.max) < target_date
+        ]
+        trainer_stats = max(
+            trainer_snapshots,
+            key=lambda item: str(item.get("as_of_date", "")),
+            default=None,
+        )
+        trainer_starts = int(float((trainer_stats or {}).get("total_starts") or 0))
+        trainer_strength = min(max(trainer_starts, 0), 1000) / (min(max(trainer_starts, 0), 1000) + 30.0)
+        trainer_win_rate = (
+            (float(trainer_stats.get("first_rate") or 0.0) / 100.0) * trainer_strength
+            + 0.10 * (1.0 - trainer_strength)
+            if trainer_stats else 0.0
+        )
+        trainer_top3_rate = (
+            sum(float(trainer_stats.get(key) or 0.0) for key in ("first_rate", "second_rate", "third_rate")) / 100.0 * trainer_strength
+            + 0.30 * (1.0 - trainer_strength)
+            if trainer_stats else 0.0
+        )
+        trainer_top5_rate = (
+            sum(float(trainer_stats.get(key) or 0.0) for key in ("first_rate", "second_rate", "third_rate", "fourth_rate", "fifth_rate")) / 100.0 * trainer_strength
+            + 0.50 * (1.0 - trainer_strength)
+            if trainer_stats else 0.0
+        )
         finishes = [float(item["finish_position"]) for item in history if item.get("finish_position") is not None]
         performance = [1.0 - ((value - 1.0) / max(float(item.get("field_size") or 10) - 1.0, 1.0)) for value, item in zip(finishes, history)]
         recent = performance[-10:]
@@ -175,8 +210,18 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             "history_avg_odds": sum(float(item.get("odds") or 0) for item in history) / len(history) if history else 0.0,
             "history_missing": float(not history),
             "career_summary_missing": float(not history),
-            "workout_missing": 1.0,
-            "trainer_stats_missing": 1.0,
+            "workout_missing": float(not past_workouts),
+            "trainer_starts": trainer_starts,
+            "trainer_first_place": int(float((trainer_stats or {}).get("first_place") or 0)),
+            "trainer_second_place": int(float((trainer_stats or {}).get("second_place") or 0)),
+            "trainer_third_place": int(float((trainer_stats or {}).get("third_place") or 0)),
+            "trainer_fourth_place": int(float((trainer_stats or {}).get("fourth_place") or 0)),
+            "trainer_fifth_place": int(float((trainer_stats or {}).get("fifth_place") or 0)),
+            "trainer_win_rate": trainer_win_rate,
+            "trainer_top3_rate": trainer_top3_rate,
+            "trainer_top5_rate": trainer_top5_rate,
+            "trainer_experience_log": math.log1p(trainer_starts),
+            "trainer_stats_missing": float(trainer_stats is None),
             "odds_missing": float(not program.get("odds")),
             "jockey_name": program.get("jockey_name", ""),
             "trainer_name": program.get("trainer_name", ""),

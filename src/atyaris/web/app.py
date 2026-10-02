@@ -6,6 +6,7 @@ ile paylasir; boylece iki arayuz arasinda is mantigi tekrarlanmaz.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -13,6 +14,7 @@ import json
 from threading import Event, RLock, Thread, Timer
 from pathlib import Path
 import re
+import sqlite3
 from types import SimpleNamespace
 from time import monotonic, sleep
 from urllib.parse import urlencode
@@ -37,19 +39,29 @@ from atyaris.ml.pipeline import (
     prepare_prediction_features,
     predict_for_date,
     preprocess_raw,
+    read_csv_cached,
     run_phase1_backtest,
     train_phase1_model,
 )
 from atyaris.ml.real_ingestion import ingest_real_tjk_data
-from atyaris.ml.raw_store import JsonlRawStore
+from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
+from atyaris.ml.raw_store import RAW_STORE_THRESHOLDS, JsonlRawStore
 from atyaris.ml.local_pipeline import build_local_raw_frame, find_missing_local_targets
-from atyaris.ml.features import TJK_SELECTED_STAGE1_FEATURE_COLUMNS
+from atyaris.ml.features import TJK_SELECTED_STAGE1_FEATURE_COLUMNS, TJK_STAGE1_FEATURE_COLUMNS
+from atyaris.ml.harville import mark_highest_odds_placer_predictions
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.phase5 import register_training_run
 from atyaris.ml.tracking import load_training_history
 from atyaris.prediction.engine import PredictionEngine
-from atyaris.services import InvalidSourceError, build_data_source, fetch_races, parse_date
+from atyaris.services import (
+    InvalidSourceError,
+    build_data_source,
+    build_prediction_data_source,
+    build_training_data_source,
+    fetch_races,
+    parse_date,
+)
 from atyaris.utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -130,6 +142,11 @@ class _TrainingPaused(Exception):
     pass
 
 
+def _manual_url_from_message(message: str) -> str:
+    match = re.search(r"Manuel kontrol URL:\s*(https?://[^\s|]+)", message)
+    return match.group(1) if match else ""
+
+
 def _training_jobs_manifest_path() -> Path:
     settings = get_settings()
     return paths_from_settings(settings).raw_csv.with_suffix(".jobs.json")
@@ -148,6 +165,7 @@ def _persist_training_jobs() -> None:
             {
                 "job_id": job_id,
                 "status": str(job.get("status")),
+                "mode": str(job.get("mode", "online")),
                 "message": str(job.get("message", "")),
                 "retry_targets": list(job.get("retry_targets", [])),
                 "can_accept_partial": bool(job.get("can_accept_partial", False)),
@@ -155,7 +173,15 @@ def _persist_training_jobs() -> None:
                 "end_date": str(job.get("end_date", "")),
             }
             for job_id, job in _TRAINING_JOBS.items()
-            if job.get("status") in {"running", "paused", "awaiting_decision", "retrying", "completed_with_warnings"}
+            if job.get("status") in {
+                "running",
+                "paused",
+                "awaiting_decision",
+                "retrying",
+                "completed",
+                "completed_with_warnings",
+                "failed",
+            }
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -170,7 +196,7 @@ def _persist_collection_jobs() -> None:
             jobs = [
                 {"job_id": job_id, **job}
                 for job_id, job in _COLLECTION_JOBS.items()
-                if job.get("status") in {"running", "paused", "completed", "failed"}
+                if job.get("status") in {"running", "paused", "completed", "completed_with_warnings", "failed"}
             ]
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
@@ -227,6 +253,7 @@ def _restore_training_jobs() -> None:
                         if item.get("status") == "awaiting_decision"
                         else str(item.get("status", "paused"))
                     ),
+                    "mode": str(item.get("mode", "online")),
                     "message": (
                         "Atlanan veri parcalari icin otomatik tekrar denemesi bekleniyor"
                         if item.get("status") == "running" and item.get("retry_targets")
@@ -331,6 +358,27 @@ def _restore_collection_jobs() -> None:
         _persist_collection_jobs()
 
 
+def _prepare_collection_indexes(paths, progress_callback) -> None:  # type: ignore[no-untyped-def]
+    collections = (
+        (getattr(paths, "raw_daily_program_jsonl", None), "daily_program"),
+        (getattr(paths, "raw_race_results_jsonl", None), "race_results"),
+        (getattr(paths, "raw_history_jsonl", None), "horse_history"),
+        (getattr(paths, "raw_workouts_jsonl", None), "workouts"),
+        (getattr(paths, "raw_trainer_statistics_jsonl", None), "trainer_statistics"),
+    )
+    for path, collection in collections:
+        if path is None or not path.exists():
+            continue
+        store = JsonlRawStore(path, collection)
+        if store.index_path.exists() or store.count_records() < RAW_STORE_THRESHOLDS["warning_records"]:
+            continue
+        try:
+            progress_callback(f"Ham arsiv indeksi hazirlaniyor: {collection}")
+            store.migrate_to_index()
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            logger.warning("Ham arsiv indekslenemedi; normal upsert ile devam edilecek | %s | %s", path, exc)
+
+
 def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
@@ -349,22 +397,23 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     return False
                 return start_date <= unit_date <= end_date
 
-            completed_units = {
-                str(value)
-                for value in payload.get("completed_units", [])
-                if in_range(value)
-            }
-            failed_units = {
-                str(value)
-                for value in payload.get("failed_units", [])
-                if in_range(value)
-            }
+            if payload.get("collection_version") == 2:
+                completed_units = {
+                    str(value)
+                    for value in payload.get("completed_units", [])
+                    if in_range(value)
+                }
+                failed_units = {
+                    str(value)
+                    for value in payload.get("failed_units", [])
+                    if in_range(value)
+                }
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             completed_units = set()
 
     def write_checkpoint() -> None:
         payload = {
-            "collection_version": 1,
+            "collection_version": 2,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "completed_units": sorted(completed_units),
@@ -388,7 +437,16 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
         combined.to_csv(temporary, index=False)
         temporary.replace(paths.raw_csv)
 
-    source = _bulletin_source_for_ml(settings)
+    source = build_training_data_source(settings)
+    mapping_path = getattr(
+        paths,
+        "raw_horse_id_mapping_jsonl",
+        paths.raw_daily_program_jsonl.with_name("tjk_horse_id_mapping.jsonl"),
+    )
+    horse_id_mapping = HorseIdMappingStore(mapping_path)
+    cached_program_records = JsonlRawStore(
+        paths.raw_daily_program_jsonl, "daily_program"
+    ).read_latest_records()
     failed_targets = 0
     skipped_days = 0
     missing_data_records = 0
@@ -443,72 +501,178 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 )
                 job["current_date"] = message[:10] if len(message) >= 10 else ""
                 job["current_target"] = message
+                manual_url = _manual_url_from_message(message)
+                if manual_url:
+                    job["manual_url"] = manual_url
+                if any(marker in message.casefold() for marker in ("hata", "timeout", "basarisiz", "atlandi")):
+                    job["last_error"] = message
                 _persist_collection_jobs()
 
     try:
+        _prepare_collection_indexes(paths, progress)
         for current in (end_date - timedelta(days=offset) for offset in range(total_days)):
             active_collection_date = current
             check_collection_control()
             progress(f"Hipodromlar aliniyor: {current.isoformat()}")
-            try:
-                hippodromes = source.get_available_hippodromes(current)
-            except DataSourceError as exc:
-                skipped_days += 1
-                failed_targets += 1
-                progress(f"Gun atlandi: {current.isoformat()} | {exc}")
-                continue
+            hippodromes = KNOWN_HIPPODROMES
+            day_failures_before = failed_targets
             day_units = 0
+            day_unit_keys: set[str] = set()
             for hippodrome in hippodromes:
                 check_collection_control()
-                progress(f"Hipodrom okunuyor: {current.isoformat()} / {hippodrome}")
+                progress(f"CSV programi aliniyor: {current.isoformat()} / {hippodrome}")
                 try:
-                    races = source.get_daily_races(current, hippodrome)
+                    races = source.get_daily_races_csv(current, hippodrome)
                 except DataSourceError as exc:
                     failed_targets += 1
                     progress(f"Hipodrom atlandi: {current.isoformat()} / {hippodrome} | {exc}")
                     continue
-                for race in races:
-                    check_collection_control()
-                    unit = f"{current.isoformat()}|{hippodrome}|{race.race_no}"
-                    day_units += 1
-                    observed_units_by_day[current] = day_units
-                    if unit in completed_units:
-                        continue
-                    progress(f"Yaris aliniyor: {unit}")
-                    last_error = None
-                    succeeded = False
-                    for attempt in range(1, 4):
-                        check_collection_control()
-                        try:
-                            race_data = ingest_real_tjk_data(
-                                current,
-                                current,
-                                paths,
-                                progress_callback=progress,
-                                hippodrome=hippodrome,
-                                race_no=race.race_no,
-                            )
-                            check_collection_control()
-                            append_frame(race_data)
-                            missing_data_records += int(race_data.attrs.get("incomplete_workout_records", 0))
-                            succeeded = True
-                            break
-                        except (DataSourceError, RuntimeError) as exc:
-                            last_error = exc
-                            if attempt < 3:
-                                progress(f"Tekrar deneme {attempt}/3: {unit}")
-                    if not succeeded:
-                        failed_targets += 1
-                        failed_units.add(unit)
-                        progress(f"Yaris basarisiz: {unit} | {last_error}")
-                    else:
-                        completed_units.add(unit)
-                    processed_units += 1
-                    write_checkpoint()
-            if day_units == 0:
-                skipped_days += 1
-            else:
+                id_resolution = resolve_race_horse_ids(
+                    source,
+                    races,
+                    current,
+                    hippodrome,
+                    horse_id_mapping,
+                    cached_program_records,
+                )
+                if id_resolution["collision_names"] or id_resolution["unresolved"]:
+                    logger.warning(
+                        "TJK at ID durumu | tarih=%s | hipodrom=%s | unresolved=%d | isim-cakismasi=%d",
+                        current.isoformat(),
+                        hippodrome,
+                        id_resolution["unresolved"],
+                        len(id_resolution["collision_names"]),
+                    )
+                cached_program_records.extend(
+                    {
+                        "race_id": str(race.id),
+                        "horse_id": str(entry.horse_id),
+                        "race_date": current.isoformat(),
+                        "race_no": race.race_no,
+                        "hippodrome": hippodrome,
+                        "horse_name": entry.horse_name,
+                        "source_horse_id": entry.source_horse_id,
+                    }
+                    for race in races
+                    for entry in race.entries
+                    if entry.source_horse_id is not None
+                )
+                pending_races = [
+                    race
+                    for race in races
+                    if f"{current.isoformat()}|{hippodrome}|{race.race_no}" not in completed_units
+                ]
+                day_units += len(races)
+                day_unit_keys.update(
+                    f"{current.isoformat()}|{hippodrome}|{race.race_no}"
+                    for race in races
+                )
                 observed_units_by_day[current] = day_units
+                if not pending_races:
+                    continue
+
+                unit_prefix = f"{current.isoformat()}|{hippodrome}|"
+                program_records = [
+                    {
+                        "race_id": str(race.id),
+                        "horse_id": str(entry.horse_id),
+                        "race_date": current.isoformat(),
+                        "race_datetime": race.start_time.isoformat() if race.start_time else None,
+                        "hippodrome": hippodrome,
+                        "race_no": race.race_no,
+                        "field_size": len(race.entries),
+                        "horse_name": entry.horse_name,
+                        "source_horse_id": entry.source_horse_id,
+                        "id_unresolved": entry.id_unresolved,
+                        "id_resolution_status": entry.id_resolution_status,
+                        "id_candidate_ids": entry.id_candidate_ids,
+                        "draw": entry.number,
+                        "age": entry.age,
+                        "jockey_name": entry.jockey.name,
+                        "trainer_id": entry.trainer.source_trainer_id,
+                        "trainer_name": entry.trainer.name,
+                        "weight_kg": entry.weight_kg,
+                        "handicap_points": entry.handicap_points,
+                        "odds": entry.odds,
+                        "distance_m": race.distance_m,
+                        "surface": race.surface.value if hasattr(race.surface, "value") else str(race.surface),
+                        "group_info": race.group_info,
+                        "form_raw": entry.form_raw,
+                        "recent_form_positions": entry.recent_form_positions,
+                        "source": "tjk_daily_program_csv",
+                    }
+                    for race in pending_races
+                    for entry in race.entries
+                ]
+                JsonlRawStore(paths.raw_daily_program_jsonl, "daily_program").upsert(
+                    program_records
+                )
+                progress(f"Sonuc ve at verileri tamamlayici olarak aliniyor: {current.isoformat()} / {hippodrome}")
+                last_error = None
+                race_data = pd.DataFrame()
+                succeeded = False
+                for attempt in range(1, 4):
+                    check_collection_control()
+                    try:
+                        race_data = ingest_real_tjk_data(
+                            current,
+                            current,
+                            paths,
+                            progress_callback=progress,
+                            hippodrome=hippodrome,
+                            program_from_csv=True,
+                        )
+                        check_collection_control()
+                        append_frame(race_data)
+                        missing_history_records = int(
+                            race_data.attrs.get("missing_horse_history_records", 0)
+                        )
+                        missing_data_records += int(
+                            race_data.attrs.get("incomplete_workout_records", 0)
+                        ) + missing_history_records
+                        succeeded = True
+                        break
+                    except (DataSourceError, RuntimeError) as exc:
+                        last_error = exc
+                        if attempt < 3:
+                            progress(f"Tamamlayici veri tekrar deneme {attempt}/3: {current.isoformat()}|{hippodrome}")
+                if not succeeded:
+                    failed_targets += len(pending_races)
+                    failed_units.update(
+                        f"{unit_prefix}{race.race_no}" for race in pending_races
+                    )
+                    write_checkpoint()
+                    progress(f"Tamamlayici veri basarisiz: {current.isoformat()} / {hippodrome} | {last_error}")
+                    continue
+
+                if missing_history_records:
+                    failed_targets += len(pending_races)
+                    failed_units.update(
+                        f"{unit_prefix}{race.race_no}" for race in pending_races
+                    )
+                    write_checkpoint()
+                    progress(
+                        f"At gecmisi eksik: {current.isoformat()} / {hippodrome} | "
+                        f"{missing_history_records} at; kosular yeniden denenecek"
+                    )
+                    continue
+
+                # Keep the full program fields from the CSV when the labelled
+                # ingestion upserts its narrower record for the same horse.
+                JsonlRawStore(paths.raw_daily_program_jsonl, "daily_program").upsert(
+                    program_records
+                )
+                successful_units = {
+                    f"{unit_prefix}{race.race_no}" for race in pending_races
+                }
+                failed_units.difference_update(successful_units)
+                completed_units.update(successful_units)
+                processed_units += len(pending_races)
+                write_checkpoint()
+
+            if day_unit_keys and day_unit_keys.issubset(completed_units):
+                completed_days.add(current)
+            elif not day_unit_keys and failed_targets == day_failures_before:
                 completed_days.add(current)
             with _TRAINING_LOCK:
                 job = _COLLECTION_JOBS[job_id]
@@ -520,8 +684,15 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 job["message"] = f"Gun tamamlandi: {current.isoformat()}"
             _persist_collection_jobs()
         with _TRAINING_LOCK:
-            _COLLECTION_JOBS[job_id]["status"] = "completed"
-            _COLLECTION_JOBS[job_id]["message"] = "Veri toplama tamamlandi"
+            has_warnings = skipped_days > 0 or failed_targets > 0 or missing_data_records > 0
+            _COLLECTION_JOBS[job_id]["status"] = (
+                "completed_with_warnings" if has_warnings else "completed"
+            )
+            _COLLECTION_JOBS[job_id]["message"] = (
+                "Veri toplama tamamlandi; eksik gun/hedefler icin yeniden deneyebilirsiniz"
+                if has_warnings
+                else "Veri toplama tamamlandi"
+            )
         _persist_collection_jobs()
     except _TrainingPaused:
         with _TRAINING_LOCK:
@@ -556,7 +727,23 @@ class MLRaceSummary:
 
 def _bulletin_source_for_ml(settings):  # type: ignore[no-untyped-def]
     """ML web flow uses real daily bulletin for date/city/race selection."""
-    return build_data_source("tjk", settings)
+    return build_prediction_data_source(settings)
+
+
+def _fetch_ml_bulletin_races(
+    data_source,
+    target_date: date,
+    city: str,
+    *,
+    race_no: int | None = None,
+):  # type: ignore[no-untyped-def]
+    if isinstance(data_source, TJKHtmlDataSource):
+        if not city:
+            return []
+        races = data_source.get_daily_races_html(target_date, city, race_no=race_no)
+        return [race for race in races if race_no is None or race.race_no == race_no]
+    races = fetch_races(data_source, target_date, city or None, None)
+    return [race for race in races if race_no is None or race.race_no == race_no]
 
 
 def _safe_metric(value: float | None, fallback: float) -> float:
@@ -776,7 +963,7 @@ def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
     if sort_by == "place3_probability":
         return _safe_float(row.get("place3_probability"), -1.0)
     if sort_by == "top3_probability":
-        return _safe_float(row.get("top3_probability"), -1.0)
+        return _safe_float(row.get("place_probability"), _safe_float(row.get("top3_probability"), -1.0))
     if sort_by == "confidence":
         return _safe_float(row.get("confidence"), -1.0)
     if sort_by == "edge":
@@ -970,7 +1157,7 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
         "data_notes": [
             "Gunluk bulten, kosu sonucu ve at gecmisi TJK canli sayfalarindan cekilir.",
             "Gercek veri eksikse model bu ekranda uydurma deger uretmez.",
-            "Harville sira olasiliklari, ayni kosudaki gercek kazanma olasiliklarindan turetilir.",
+            "Sira olasiliklari Harville'den turetilir; ikinci ve ucuncu sira ayarlari gecmis kalibrasyon pencerelerinden ogrenilir.",
         ],
         "feature_notes": [],
         "data_summary": [],
@@ -979,7 +1166,7 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
         "evidence_status": "not_established",
         "method_notes": [
             "Cekirdek model: Benter iki asamali conditional logit.",
-            "Sira olasiliklari: Harville formulu.",
+            "Sira olasiliklari: walk-forward veriden ogrenilmis yere ozel gamma katsayili Harville formulu.",
             "Karar katmani: kalibrasyon + EV + fractional Kelly.",
         ],
     }
@@ -1000,7 +1187,7 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
 
     try:
         if paths.features_csv.exists():
-            features = pd.read_csv(paths.features_csv)
+            features = read_csv_cached(paths.features_csv)
             context["data_summary"] = [
                 f"Toplam feature satiri: {len(features)}",
                 f"Benzersiz kosu sayisi: {int(features['race_id'].nunique()) if 'race_id' in features.columns else 0}",
@@ -1010,7 +1197,9 @@ def _build_ml_analysis_context(paths, pred: pd.DataFrame, records: list[dict]) -
         pass
 
     try:
-        artifact, _ = load_phase3_artifact(str(paths.model_path))
+        artifact, _ = load_phase3_artifact(
+            str(paths.model_path), require_health_pass=True
+        )
         feature_cols = artifact.feature_columns
         sample = pred.head(200).copy()
         if "is_winner" not in sample.columns:
@@ -1144,21 +1333,23 @@ def _overlay_bulletin_horse_names(
     target_date: date,
     city: str,
     requested_race_id: str,
+    bulletin_races: list | None = None,
 ) -> list[dict]:  # type: ignore[no-untyped-def]
     """Replace synthetic horse labels with bulletin names using race+number mapping."""
     if not records or not city:
         return records
 
-    try:
-        data_source = _bulletin_source_for_ml(settings)
-        races = fetch_races(data_source, target_date, city, None)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Bulletin name overlay skipped: %s", exc)
-        return records
+    if bulletin_races is None:
+        try:
+            data_source = _bulletin_source_for_ml(settings)
+            bulletin_races = _fetch_ml_bulletin_races(data_source, target_date, city)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Bulletin name overlay skipped: %s", exc)
+            return records
 
     requested_no = _parse_race_no(requested_race_id)
     target_race = None
-    for race in races:
+    for race in bulletin_races:
         race_id = str(race.id)
         if race_id == requested_race_id:
             target_race = race
@@ -1231,7 +1422,16 @@ def _ml_has_date(
         try:
             dates = pd.read_csv(
                 feature_path,
-                usecols=lambda column: column in {"date", "track", "race_id"},
+                usecols=lambda column: column
+                in {
+                    "date",
+                    "track",
+                    "race_id",
+                    "career_starts",
+                    "history_missing",
+                    "history_lookup_status",
+                    "history_checked_at",
+                },
             )
         except Exception:  # noqa: BLE001
             continue
@@ -1242,7 +1442,26 @@ def _ml_has_date(
         if race_no is not None and "race_id" in dates.columns:
             matching &= dates["race_id"].astype(str).map(_parse_race_no) == race_no
         if bool(matching.any()):
-            return True
+            if not {"career_starts", "history_missing"}.issubset(dates.columns):
+                continue
+            selected = dates.loc[matching]
+            if {"history_lookup_status", "history_checked_at"}.issubset(selected.columns):
+                lookup_status = selected["history_lookup_status"].fillna("").astype(str)
+                retryable = lookup_status.isin({"fetch_failed", "unresolved_id"})
+                if bool(retryable.any()):
+                    checked_at = pd.to_datetime(
+                        selected["history_checked_at"], utc=True, errors="coerce"
+                    )
+                    age_seconds = (pd.Timestamp.now(tz="UTC") - checked_at).dt.total_seconds()
+                    retry_due = retryable & (checked_at.isna() | age_seconds.ge(600.0))
+                    if bool(retry_due.any()):
+                        return False
+            career_starts = pd.to_numeric(selected["career_starts"], errors="coerce").fillna(-1.0)
+            history_missing = pd.to_numeric(selected["history_missing"], errors="coerce").fillna(-1.0)
+            has_history = career_starts.gt(0.0) & history_missing.lt(0.5)
+            no_history = career_starts.le(0.0) & history_missing.ge(0.5)
+            if bool((has_history | no_history).all()):
+                return True
     return False
 
 
@@ -1250,29 +1469,56 @@ def _ml_model_loadable(paths) -> tuple[bool, str]:  # type: ignore[no-untyped-de
     if not paths.model_path.exists():
         return False, f"Model dosyasi bulunamadi: {paths.model_path}"
     try:
-        artifact, _ = load_phase3_artifact(str(paths.model_path))
-        expected_columns = TJK_SELECTED_STAGE1_FEATURE_COLUMNS
-        if artifact.feature_columns != expected_columns:
-            missing = sorted(set(expected_columns) - set(artifact.feature_columns))
-            obsolete = sorted(set(artifact.feature_columns) - set(expected_columns))
+        artifact, _ = load_phase3_artifact(
+            str(paths.model_path), require_health_pass=True
+        )
+        supported_columns = set(TJK_STAGE1_FEATURE_COLUMNS)
+        unsupported = sorted(set(artifact.feature_columns) - supported_columns)
+        if unsupported:
             return False, (
-                "Model eski TJK feature semasiyla kaydedilmis. "
-                f"Eksik: {missing}; artik kullanilmamasi gerekenler: {obsolete}"
+                "Model desteklenmeyen TJK feature'lari kullaniyor: "
+                f"{unsupported}"
             )
     except Exception as exc:  # noqa: BLE001
         return False, f"Model artifact'i yuklenemedi: {exc}"
     return True, ""
 
 
-def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> tuple[list[str], str | None]:
+def _model_health_status(model_path: Path) -> dict[str, object]:
+    health_path = model_path.with_suffix(".health.json")
+    status: dict[str, object] = {
+        "model_file": model_path.name,
+        "health_file": health_path.name,
+        "sha256": None,
+        "passed": None,
+        "failed_checks": [],
+        "error": None,
+    }
+    if model_path.is_file():
+        status["sha256"] = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    if not health_path.is_file():
+        status["error"] = "Health raporu bulunamadi"
+        return status
     try:
-        return data_source.get_available_hippodromes(target_date), None
-    except DataSourceError as exc:
-        logger.warning("TJK hipodrom listesi alinamadi, bilinen listeyle devam edilecek: %s", exc)
-        return list(KNOWN_HIPPODROMES), (
-            "TJK'ya su an ulasilamiyor (DNS/ag gecici hatasi). "
-            "Bilinen hipodrom listesi gosteriliyor; birazdan tekrar deneyin."
-        )
+        report = json.loads(health_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        status["error"] = f"Health raporu okunamadi: {exc}"
+        return status
+    if not isinstance(report, dict):
+        status["error"] = "Health raporu JSON nesnesi degil"
+        return status
+    status["passed"] = report.get("passed") is True
+    status["failed_checks"] = [
+        str(check.get("name", "unnamed"))
+        for check in report.get("checks", [])
+        if isinstance(check, dict) and check.get("passed") is not True
+    ]
+    return status
+
+
+def _safe_tjk_hippodromes(data_source: TJKHtmlDataSource, target_date: date) -> tuple[list[str], str | None]:
+    """Return only hippodromes with a bulletin on the selected date."""
+    return data_source.get_available_hippodromes(target_date), None
 
 
 def _ensure_ml_ready_for_date(
@@ -1348,6 +1594,7 @@ def _predict_ml_for_date_with_recovery(
             ev_probability_threshold=settings.ev_probability_threshold,
             ev_min_edge=settings.ev_min_edge,
             ev_min_value=settings.ev_min_value,
+            require_health_pass=True,
         )
         return _attach_ml_labels(paths, target_date, pred)
     except Exception as exc:  # noqa: BLE001
@@ -1385,6 +1632,7 @@ def _run_training_job(
             with _TRAINING_LOCK:
                 _TRAINING_JOBS[job_id] = {
                     "status": "retrying",
+                    "mode": "online",
                     "message": (
                         f"{len(retry_targets)} veri parcasi alinamadi. "
                         "Otomatik olarak 30 saniye sonra tekrar denenecek."
@@ -1438,6 +1686,7 @@ def _run_training_job(
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "completed_with_warnings" if retry_targets else "completed",
+                "mode": "online",
                 "message": (
                     "Egitim tamamlandi; bazi veri parcalari atlandi."
                     if retry_targets else "Egitim tamamlandi"
@@ -1457,6 +1706,7 @@ def _run_training_job(
             _TRAINING_PAUSE_REQUESTS.discard(job_id)
             _TRAINING_JOBS[job_id] = {
                 "status": "paused",
+                "mode": "online",
                 "message": "Egitim duraklatildi; checkpoint korundu",
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
@@ -1466,6 +1716,7 @@ def _run_training_job(
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "cancelled",
+                "mode": "online",
                 "message": "Egitim kullanici istegiyle durduruldu",
             }
             _persist_training_jobs()
@@ -1480,6 +1731,7 @@ def _run_training_job(
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "failed",
+                "mode": "online",
                 "message": message,
             }
         _persist_training_jobs()
@@ -1488,28 +1740,40 @@ def _run_training_job(
 def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
-    try:
+    cancel_event = _TRAINING_CANCEL_EVENTS.get(job_id, Event())
+
+    def progress(message: str) -> None:
+        if cancel_event.is_set():
+            with _TRAINING_LOCK:
+                if job_id in _TRAINING_PAUSE_REQUESTS:
+                    raise _TrainingPaused()
+            raise _TrainingCancelled()
         with _TRAINING_LOCK:
-            _TRAINING_JOBS[job_id]["message"] = (
-                "Lokal JSONL arşivi okunuyor; eksik kayıtlar internetten tamamlanmayacak"
-            )
+            if job_id in _TRAINING_JOBS:
+                _TRAINING_JOBS[job_id]["message"] = message
+
+    try:
+        progress("Lokal JSONL arsivi okunuyor; eksik kayitlar internetten tamamlanmayacak")
         local_frame = build_local_raw_frame(paths)
+        progress("Lokal JSONL verisinden ham egitim tablosu olusturuldu")
         if not local_frame.empty:
             local_frame.to_csv(paths.raw_csv, index=False)
-        with _TRAINING_LOCK:
-            _TRAINING_JOBS[job_id]["message"] = "Lokal ham arşiv okunuyor"
+        progress("Lokal ham arsiv preprocess ediliyor")
         cleaned = preprocess_raw(paths)
+        progress("Feature uretimi basliyor")
         if not cleaned.empty:
             dates = pd.to_datetime(cleaned["date"], errors="coerce").dt.date
             cleaned = cleaned[(dates >= start_date) & (dates <= end_date)].copy()
             cleaned.to_csv(paths.clean_csv, index=False)
         built = build_features(paths)
+        progress("Model egitimi basliyor")
         artifact = train_phase1_model(
             paths,
             holdout_days=settings.phase1_holdout_days,
             calibration_days=settings.phase3_calibration_days,
             calibration_method=settings.phase3_calibration_method,
         )
+        progress("Walk-forward backtest basliyor")
         model_version = register_training_run(
             settings,
             paths,
@@ -1528,19 +1792,34 @@ def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> No
             ev_min_edge=settings.ev_min_edge,
             ev_min_value=settings.ev_min_value,
         )
+        progress("Lokal egitim tamamlandi")
         with _TRAINING_LOCK:
             _TRAINING_JOBS[job_id] = {
                 "status": "completed",
                 "message": "Lokal veriden egitim tamamlandi",
+            "mode": "local",
                 "model_version": model_version,
                 "backtest": backtest,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
             }
+    except _TrainingPaused:
+        with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
+            _TRAINING_JOBS[job_id].update(
+                status="paused",
+                message="Lokal egitim duraklatildi; tekrar baslatilabilir",
+            )
+    except _TrainingCancelled:
+        with _TRAINING_LOCK:
+            _TRAINING_JOBS[job_id].update(
+                status="cancelled",
+                message="Lokal egitim kullanici istegiyle durduruldu",
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Local training job failed")
         with _TRAINING_LOCK:
-            _TRAINING_JOBS[job_id] = {"status": "failed", "message": f"Lokal egitim: {exc}"}
+            _TRAINING_JOBS[job_id].update(status="failed", message=f"Lokal egitim: {exc}")
     _persist_training_jobs()
 
 
@@ -1652,7 +1931,7 @@ def create_app() -> FastAPI:
                 if job.get("status") != "running":
                     job["status"] = "cancelled"
                     job["message"] = "Veri toplama iptal edildi"
-            elif action == "resume" and job.get("status") == "paused":
+            elif action == "resume" and job.get("status") in {"paused", "completed_with_warnings"}:
                 job["status"] = "running"
                 job["message"] = "Veri toplama checkpointten devam ediyor"
                 _COLLECTION_CANCEL_EVENTS[job_id] = Event()
@@ -1669,7 +1948,7 @@ def create_app() -> FastAPI:
     def start_training(
         start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
         end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-        mode: str = Query("online", pattern="^(online|local)$"),
+        mode: str = Query("local", pattern="^(online|local)$"),
     ) -> RedirectResponse:
         try:
             parsed_start = date.fromisoformat(start_date)
@@ -1695,11 +1974,13 @@ def create_app() -> FastAPI:
                         if job.get("status") == "paused"
                         and job.get("start_date") == start_date
                         and job.get("end_date") == end_date
+                        and job.get("mode", "online") == mode
                     ),
                     None,
                 )
                 if resumable is not None:
                     job_id = resumable
+                    _TRAINING_JOBS[job_id]["mode"] = mode
                     _TRAINING_JOBS[job_id]["status"] = "running"
                     _TRAINING_JOBS[job_id]["message"] = "Egitim checkpointten devam ediyor"
                     _TRAINING_CANCEL_EVENTS[job_id] = Event()
@@ -1715,6 +1996,7 @@ def create_app() -> FastAPI:
                 _TRAINING_JOBS[job_id] = {
                     "status": "running",
                     "message": "Egitim siraya alindi",
+                    "mode": mode,
                     "start_date": start_date,
                     "end_date": end_date,
                 }
@@ -1783,7 +2065,7 @@ def create_app() -> FastAPI:
             job["message"] = "Egitim checkpointten devam ediyor"
             _TRAINING_CANCEL_EVENTS[job_id] = Event()
             Thread(
-                target=_run_training_job,
+                target=_run_local_training_job if job.get("mode") == "local" else _run_training_job,
                 args=(job_id, date.fromisoformat(str(job["start_date"])), date.fromisoformat(str(job["end_date"]))),
                 name=f"atyaris-train-{job_id[:8]}",
                 daemon=True,
@@ -1803,7 +2085,7 @@ def create_app() -> FastAPI:
             job["message"] = "Mevcut verilerle egitim devam ediyor"
             _TRAINING_CANCEL_EVENTS[job_id] = Event()
             Thread(
-                target=_run_training_job,
+                target=_run_local_training_job if job.get("mode") == "local" else _run_training_job,
                 args=(
                     job_id,
                     date.fromisoformat(str(job["start_date"])),
@@ -2153,7 +2435,7 @@ def create_app() -> FastAPI:
                     hippodromes = sorted({r.hippodrome for r in all_races})
 
                 if city:
-                    races = fetch_races(data_source, parsed_date, city, None)
+                    races = _fetch_ml_bulletin_races(data_source, parsed_date, city)
                     ml_races = _ml_race_summaries_from_races(races, data_source, settings)
                     if ml_races:
                         quick_info = "Bulten listesi hazir. Tahminler yalnizca kosu secildiginde hesaplanir."
@@ -2188,7 +2470,12 @@ def create_app() -> FastAPI:
                 if source_info:
                     info = source_info
                 if city:
-                    races = fetch_races(data_source, parsed_date, city, None)
+                    races = data_source.get_daily_races(
+                        parsed_date,
+                        city,
+                        resolve_missing_ids=False,
+                        include_odds=False,
+                    )
                     if not races:
                         info = (
                             "Secili hipodrom icin kosu listesi alinmadi. "
@@ -2239,6 +2526,17 @@ def create_app() -> FastAPI:
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
         settings = get_settings()
+        model_paths = paths_from_settings(settings)
+        model_health_status = _model_health_status(model_paths.model_path)
+        logger.info(
+            "Model health status for /predict: artifact=%s sha256=%s health_json=%s passed=%s failed_checks=%s error=%s",
+            model_health_status["model_file"],
+            model_health_status["sha256"],
+            model_health_status["health_file"],
+            model_health_status["passed"],
+            model_health_status["failed_checks"],
+            model_health_status["error"],
+        )
         error = None
         prediction = None
         ml_prediction = None
@@ -2284,10 +2582,12 @@ def create_app() -> FastAPI:
 
                 data_source = _bulletin_source_for_ml(settings)
                 try:
-                    if city:
-                        bulletin_races = fetch_races(data_source, parsed_date, city, None)
-                    else:
-                        bulletin_races = fetch_races(data_source, parsed_date, None, None)
+                    bulletin_races = _fetch_ml_bulletin_races(
+                        data_source,
+                        parsed_date,
+                        city,
+                        race_no=requested_race_no,
+                    )
                 except Exception:  # noqa: BLE001
                     bulletin_races = []
 
@@ -2333,17 +2633,44 @@ def create_app() -> FastAPI:
                     ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                     reverse = sort_order == "desc"
                     records = race_df.to_dict(orient="records")
+                    bulletin_odds_by_number = (
+                        {
+                            int(entry.number): entry.odds
+                            for entry in selected_race.entries
+                            if entry.odds is not None
+                        }
+                        if selected_race is not None
+                        else {}
+                    )
                     for rec in records:
                         horse_name = rec.get("horse_name")
                         if horse_name in (None, "", "nan"):
                             rec["horse_name"] = str(rec.get("horse_id", "-"))
 
-                        if rec.get("number") is None:
+                        if rec.get("number") is None or pd.isna(rec.get("number")):
                             draw_val = rec.get("draw")
                             try:
                                 rec["number"] = int(draw_val) if draw_val is not None and not pd.isna(draw_val) else None
                             except (TypeError, ValueError):
                                 rec["number"] = None
+
+                        live_odds = bulletin_odds_by_number.get(rec.get("number"))
+                        if live_odds is not None:
+                            rec["odds"] = live_odds
+
+                        odds_value = _safe_float(rec.get("odds"), 0.0)
+                        odds_missing = (
+                            _safe_float(rec.get("odds_missing"), 0.0) >= 0.5
+                            or pd.isna(rec.get("odds"))
+                            or odds_value <= 1.0
+                        )
+                        if odds_missing:
+                            if live_odds is None:
+                                rec["odds"] = None
+                            rec["edge"] = None
+                            rec["ev"] = None
+                            rec["kelly_fraction"] = 0.0
+                            rec["bet_decision"] = "NO_BET"
 
                     records = _overlay_bulletin_horse_names(
                         records,
@@ -2351,6 +2678,7 @@ def create_app() -> FastAPI:
                         target_date=parsed_date,
                         city=city,
                         requested_race_id=race_id,
+                        bulletin_races=bulletin_races,
                     )
 
                     p2_fallback, p3_fallback = _place_probabilities_from_records(records)
@@ -2362,10 +2690,22 @@ def create_app() -> FastAPI:
                             rec["place3_probability"] = p3_fallback[hid]
                         rec["top3_probability"] = min(
                             1.0,
-                            _safe_float(rec.get("calibrated_probability"), 0.0)
-                            + _safe_float(rec.get("place2_probability"), 0.0)
-                            + _safe_float(rec.get("place3_probability"), 0.0),
+                            _safe_float(
+                                rec.get("place_probability"),
+                                _safe_float(rec.get("calibrated_probability"), 0.0)
+                                + _safe_float(rec.get("place2_probability"), 0.0)
+                                + _safe_float(rec.get("place3_probability"), 0.0),
+                            ),
                         )
+                        rec["place_probability"] = rec["top3_probability"]
+
+                    marked_records = mark_highest_odds_placer_predictions(pd.DataFrame(records))
+                    for record, marked_record in zip(records, marked_records.to_dict(orient="records")):
+                        record["predicted_place_rank"] = marked_record["predicted_place_rank"]
+                        record["predicted_top3"] = marked_record["predicted_top3"]
+                        record["predicted_highest_odds_placer"] = marked_record[
+                            "predicted_highest_odds_placer"
+                        ]
 
                     records.sort(key=lambda r: _ml_sort_value(r, ml_sort_by), reverse=reverse)
                     for idx, rec in enumerate(records, start=1):
@@ -2373,6 +2713,17 @@ def create_app() -> FastAPI:
 
                     horse_stats_rows: list[dict[str, object]] = []
                     for rec in records:
+                        career_starts = _safe_float(rec.get("career_starts"), 0.0)
+                        rec["history_missing"] = (
+                            _safe_float(rec.get("history_missing"), 0.0) >= 0.5
+                            or career_starts <= 0.0
+                        )
+                        rec["odds_only_fallback"] = (
+                            career_starts <= 0.0
+                            and _safe_float(rec.get("odds_missing"), 0.0) < 0.5
+                            and _safe_float(rec.get("odds"), 0.0) > 1.0
+                            and abs(_safe_float(rec.get("edge"), 1.0)) <= 1e-8
+                        )
                         horse_stats_rows.append(
                             {
                                 "horse": str(rec.get("horse_name") or rec.get("horse_id") or "-"),
@@ -2406,6 +2757,15 @@ def create_app() -> FastAPI:
                                 "workout_best_time_seconds": rec.get("workout_best_time_seconds", "-"),
                                 "days_since_last_workout": rec.get("days_since_last_workout", "-"),
                                 "market_probability_norm": rec.get("market_probability_norm", rec.get("market_probability_used", "-")),
+                                "history_missing": rec["history_missing"],
+                                "odds_only_fallback": rec["odds_only_fallback"],
+                                "history_lookup_status": str(rec.get("history_lookup_status") or "unknown"),
+                                "tjk_status": {
+                                    "unresolved_id": "TJK at ID'si cozumlenemedi",
+                                    "fetch_failed": "TJK gecmis istegi basarisiz",
+                                    "empty": "TJK gecmis kaydi yok",
+                                    "available": "TJK gecmisi mevcut",
+                                }.get(str(rec.get("history_lookup_status") or ""), "TJK gecmisi bekleniyor"),
                                 "edge": rec.get("edge", "-"),
                                 "ev": rec.get("ev", "-"),
                                 "kelly_fraction": rec.get("kelly_fraction", "-"),
@@ -2437,16 +2797,24 @@ def create_app() -> FastAPI:
                             for entry in selected_race.entries
                         }
                         stats_by_entry_key: dict[str, object] = {}
+                        stats_attempted_keys: set[str] = set()
+                        stats_errors_by_entry_key: dict[str, str] = {}
                         horse_history_map: dict[str, list] = {}
                         combo_counter: dict[tuple[int, str], int] = {}
                         for entry in selected_race.entries:
+                            entry_keys = [f"horse:{entry.horse_id}"]
+                            if entry.source_horse_id is not None:
+                                entry_keys.append(f"source:{entry.source_horse_id}")
+                            stats_attempted_keys.update(entry_keys)
                             try:
                                 stats = data_source.get_horse_statistics(entry)
-                            except Exception:
+                            except Exception as exc:
+                                stats_errors_by_entry_key.update(
+                                    {key: str(exc) for key in entry_keys}
+                                )
                                 continue
-                            stats_by_entry_key[f"horse:{entry.horse_id}"] = stats
-                            if entry.source_horse_id is not None:
-                                stats_by_entry_key[f"source:{entry.source_horse_id}"] = stats
+                            for key in entry_keys:
+                                stats_by_entry_key[key] = stats
                             horse_history_map[str(entry.horse_id)] = stats.past_performances
                             for perf in stats.past_performances:
                                 if perf.race_date >= target_date_value:
@@ -2498,13 +2866,30 @@ def create_app() -> FastAPI:
                                 stats = stats_by_entry_key.get(f"source:{matching_entry.source_horse_id}")
                                 if stats is None:
                                     stats = stats_by_entry_key.get(f"horse:{matching_entry.horse_id}")
-                                if stats is None:
+                                entry_keys = [f"horse:{matching_entry.horse_id}"]
+                                if matching_entry.source_horse_id is not None:
+                                    entry_keys.append(f"source:{matching_entry.source_horse_id}")
+                                if stats is None and not stats_attempted_keys.intersection(entry_keys):
                                     try:
                                         stats = data_source.get_horse_statistics(matching_entry)
+                                        for key in entry_keys:
+                                            stats_by_entry_key[key] = stats
                                     except Exception as exc:
                                         row["tjk_error"] = str(exc)
                                         stats = None
+                                if stats is None and not row["tjk_error"]:
+                                    row["tjk_error"] = next(
+                                        (stats_errors_by_entry_key[key] for key in entry_keys if key in stats_errors_by_entry_key),
+                                        "At istatistikleri bu istekte alinmadi.",
+                                    )
+                                if stats is None:
+                                    row["tjk_status"] = "TJK gecmisi cekilemedi"
                                 if stats is not None:
+                                    row["tjk_status"] = (
+                                        "TJK gecmis kaydi bulundu"
+                                        if stats.past_performances
+                                        else "TJK gecmis kaydi yok"
+                                    )
                                     row.update(
                                         _derive_horse_stats_metrics(
                                             stats,
@@ -2618,32 +3003,21 @@ def create_app() -> FastAPI:
 
                     bulletin_by_race_no_and_number: dict[tuple[int, int], str] = {}
                     if city:
-                        try:
-                            data_source = _bulletin_source_for_ml(settings)
-                            bulletin_races = fetch_races(data_source, parsed_date, city, None)
-                            for race in bulletin_races:
-                                race_no = int(race.race_no)
-                                for entry in race.entries:
-                                    bulletin_by_race_no_and_number[(race_no, int(entry.number))] = str(entry.horse_name)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug("Ticket preview bulletin overlay skipped: %s", exc)
+                        for race in bulletin_races:
+                            race_no = int(race.race_no)
+                            for entry in race.entries:
+                                bulletin_by_race_no_and_number[(race_no, int(entry.number))] = str(entry.horse_name)
 
                     opt = optimize_for_date(
                         paths,
                         parsed_date,
                         settings,
                         budget=settings.phase4_default_budget,
-                        prediction=pred,
+                        prediction=race_df,
                     )
                     ticket_preview = []
                     selected_race_id = str(race_df["race_id"].iloc[0]) if not race_df.empty else race_id
-                    allowed_combo_race_ids = set(scoped_pred["race_id"].astype(str).tolist())
-                    if requested_race_no is not None:
-                        allowed_combo_race_ids = {
-                            rid
-                            for rid in allowed_combo_race_ids
-                            if (_parse_race_no(rid) is not None and _parse_race_no(rid) >= requested_race_no)
-                        }
+                    allowed_combo_race_ids = set(race_df["race_id"].astype(str).tolist())
 
                     for c in opt.get("columns", []):
                         combo = c.get("combination", {})
@@ -2685,7 +3059,7 @@ def create_app() -> FastAPI:
                             **_build_ml_analysis_context(paths, pred, records),
                             "horse_stats": horse_stats_rows,
                         },
-                        "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
+                        "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + gamma ayarli Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
                     }
                     if shared_combo_label:
                         ml_prediction["analysis"].setdefault("data_summary", []).append(shared_combo_label)
@@ -2739,6 +3113,17 @@ def create_app() -> FastAPI:
                                 + _safe_float(rec.get("place2_probability"), 0.0)
                                 + _safe_float(rec.get("place3_probability"), 0.0),
                             )
+                            rec["place_probability"] = rec["top3_probability"]
+
+                        marked_records = mark_highest_odds_placer_predictions(pd.DataFrame(records))
+                        for record, marked_record in zip(
+                            records, marked_records.to_dict(orient="records")
+                        ):
+                            record["predicted_place_rank"] = marked_record["predicted_place_rank"]
+                            record["predicted_top3"] = marked_record["predicted_top3"]
+                            record["predicted_highest_odds_placer"] = marked_record[
+                                "predicted_highest_odds_placer"
+                            ]
 
                         ml_sort_by = sort_by if sort_by in _ML_SORTABLE_FIELDS else "calibrated_probability"
                         reverse = sort_order == "desc"
@@ -2785,14 +3170,24 @@ def create_app() -> FastAPI:
                                     "Sentetik veri ile doldurma yapilmaz.",
                                 ],
                             },
-                            "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
+                            "disclaimer": "Bu tahminler istatistiksel analize dayanir (Benter + gamma ayarli Harville + fractional Kelly), kesinlik tasimaz; sorumlu bahis oynayin.",
                         }
 
                         combo_counter: dict[tuple[int, str], int] = {}
+                        ranked_by_horse_id = {
+                            str(hp.entry.horse_id): hp for hp in race_pred.ranked
+                        }
+                        stats_by_horse_id: dict[str, object | None] = {}
+                        stats_errors_by_horse_id: dict[str, str] = {}
                         for hp in race_pred.ranked:
+                            horse_id = str(hp.entry.horse_id)
                             try:
                                 stats = data_source.get_horse_statistics(hp.entry)
-                            except Exception:
+                            except Exception as exc:
+                                stats = None
+                                stats_errors_by_horse_id[horse_id] = str(exc)
+                            stats_by_horse_id[horse_id] = stats
+                            if stats is None:
                                 continue
                             for perf in stats.past_performances:
                                 if perf.race_date >= parsed_date:
@@ -2808,7 +3203,8 @@ def create_app() -> FastAPI:
                             )
 
                         for r in records:
-                            hp = next((x for x in race_pred.ranked if x.entry.horse_id == r.get("horse_id")), None)
+                            horse_id = str(r.get("horse_id", ""))
+                            hp = ranked_by_horse_id.get(horse_id)
                             row = {
                                 "horse": r.get("horse_name", r.get("horse_id", "-")),
                                 "horse_id": r.get("horse_id", "-"),
@@ -2849,12 +3245,11 @@ def create_app() -> FastAPI:
                             elif hp:
                                 row["tjk_error"] = "AtKosuBilgileri icin gerekli AtId (QueryParameter_AtId) bulunamadi."
 
-                            stats = None
-                            if hp:
-                                try:
-                                    stats = data_source.get_horse_statistics(hp.entry)
-                                except Exception as exc:
-                                    row["tjk_error"] = str(exc)
+                            stats = stats_by_horse_id.get(horse_id)
+                            if hp and stats is None:
+                                row["tjk_error"] = stats_errors_by_horse_id.get(
+                                    horse_id, "At istatistikleri bu istekte alinmadi."
+                                )
 
                             if stats is not None:
                                 row.update(
@@ -2982,7 +3377,14 @@ def create_app() -> FastAPI:
                     },
                 )
 
-            races = fetch_races(data_source, parsed_date, city or None, None)
+            if isinstance(data_source, TJKHtmlDataSource) and city:
+                races = data_source.get_daily_races_html(
+                    parsed_date,
+                    city,
+                    race_no=_parse_race_no(race_id),
+                )
+            else:
+                races = fetch_races(data_source, parsed_date, city or None, None)
             race = next((r for r in races if r.id == race_id), None)
             if race is None:
                 error = "Yaris bulunamadi (bulten degismis olabilir; lutfen tekrar secin)."
@@ -3100,6 +3502,7 @@ def create_app() -> FastAPI:
                 "sort_order": sort_order,
                 "sort_urls": sort_urls,
                 "sortable_fields": _SORTABLE_FIELDS,
+                "model_health_status": model_health_status,
             },
         )
 

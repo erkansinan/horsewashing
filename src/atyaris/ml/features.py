@@ -12,6 +12,8 @@ import pandas as pd
 LEAKAGE_COLUMNS = {
     "finish_position",
     "is_winner",
+    "is_placed",
+    "target_highest_odds_placer",
     "latent_true_win_probability",
 }
 
@@ -31,7 +33,7 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "seasonal_race_load", "distance_fit", "surface_fit", "track_fit",
     "history_avg_finish_position", "history_avg_field_size", "history_avg_weight",
     "history_avg_odds", "history_avg_handicap_points", "history_avg_race_time_seconds",
-    "history_avg_prize", "history_avg_s20",
+    "history_avg_prize",
     "workout_count",
     "workout_avg_distance", "workout_avg_speed_index", "workout_best_speed_index",
     "days_since_last_workout",
@@ -42,20 +44,32 @@ TJK_STAGE1_FEATURE_COLUMNS = [
 ]
 
 TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
-    "form_avg_5",
-    "last_run_perf",
-    "distance_fit",
-    "surface_fit",
     "handicap_points",
-    "history_avg_finish_position",
     "draw",
     "weight",
-    "jockey_change_upgrade",
-    "trainer_change_upgrade",
     "class_drop_flag",
     "workout_sudden_improvement",
     "rest_optimal_fit",
 ]
+
+FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS = {
+    "field_size",
+    "form_avg_3",
+    "form_avg_5",
+    "form_avg_10",
+    "form_var_5",
+    "last_run_perf",
+    "trend_3_10",
+    "fatigue_score",
+    "recovery_score",
+    "distance_fit",
+    "surface_fit",
+    "track_fit",
+    "history_avg_field_size",
+    "history_avg_finish_position",
+    "jockey_change_upgrade",
+    "trainer_change_upgrade",
+}
 
 MISSINGNESS_INDICATOR_COLUMNS = {
     "odds_missing",
@@ -77,6 +91,29 @@ STAGE2_MARKET_COLUMNS = ["odds", "market_probability_norm", "implied_probability
 class FeatureBuildResult:
     frame: pd.DataFrame
     feature_columns: list[str]
+
+
+def _derive_placer_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    finish = pd.to_numeric(
+        frame.get("finish_position", pd.Series(np.nan, index=frame.index)),
+        errors="coerce",
+    )
+    odds = pd.to_numeric(frame.get("odds", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    labels = pd.DataFrame(index=frame.index)
+    labels["is_placed"] = np.where(finish.notna(), finish.le(3).astype(float), np.nan)
+    labels["target_highest_odds_placer"] = None
+
+    if "race_id" not in frame.columns or "horse_id" not in frame.columns:
+        return labels
+    eligible = finish.le(3) & finish.notna() & odds.gt(1.0) & odds.notna()
+    for race_id, group in frame.loc[eligible].groupby("race_id", sort=False):
+        race_odds = odds.loc[group.index]
+        target_index = race_odds.idxmax()
+        horse_id = frame.loc[target_index, "horse_id"]
+        if pd.notna(horse_id):
+            race_indices = frame.index[frame["race_id"] == race_id]
+            labels.loc[race_indices, "target_highest_odds_placer"] = str(horse_id)
+    return labels
 
 
 def preprocess_dataset(frame: pd.DataFrame) -> pd.DataFrame:
@@ -148,15 +185,21 @@ def _change_upgrade(history: list[dict[str, object]], current: object, key: str)
     return float(np.clip(np.mean(current_perf) - np.mean(previous_perf), -1.0, 1.0))
 
 
-def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = None) -> FeatureBuildResult:
+def build_leakage_safe_features(
+    frame: pd.DataFrame,
+    as_of_date: date | None = None,
+    recompute_precomputed_columns: set[str] | None = None,
+) -> FeatureBuildResult:
     """Builds features using only events strictly before each row race_datetime.
 
     This function never uses finish_result columns from the current race row while
     constructing its own features.
     """
     df = preprocess_dataset(frame)
+    recompute_precomputed_columns = recompute_precomputed_columns or set()
     if as_of_date is not None:
         df = df[df["date"] <= as_of_date].copy()
+    placer_labels = _derive_placer_labels(df)
 
     if "workout_avg_speed_index" not in df.columns:
         avg_time = pd.to_numeric(
@@ -189,10 +232,9 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
             where=best_time.to_numpy(dtype=float) > 0.0,
         )
 
-    # Real TJK ingestion already computes historical features while the race
-    # history is available. Those rows intentionally do not contain the raw
-    # finish_position column, so rebuilding history here would replace valid
-    # values with the no-history defaults.
+    # Real TJK ingestion computes point-in-time features using the resolved
+    # source horse ID. Preserve those values for both labelled and prediction
+    # rows; rebuilding by race-local horse_id can lose the horse's history.
     precomputed_columns = {
         "days_since_last_race",
         "form_avg_3",
@@ -202,7 +244,11 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
         "surface_fit",
         "distance_fit",
     }
-    if "finish_position" not in df.columns and precomputed_columns.issubset(df.columns):
+    if (
+        "finish_position" not in df.columns
+        and precomputed_columns.issubset(df.columns)
+        and not recompute_precomputed_columns
+    ):
         feat_df = df.copy()
         grp_sum = feat_df.groupby("race_id")["market_probability"].transform("sum").replace(0.0, 1.0)
         feat_df["market_probability_norm"] = feat_df["market_probability"] / grp_sum
@@ -229,6 +275,10 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
         feat_df[feature_columns] = feat_df[feature_columns].replace(
             [np.inf, -np.inf], np.nan
         ).fillna(0.0)
+        feat_df["is_placed"] = placer_labels["is_placed"].to_numpy()
+        feat_df["target_highest_odds_placer"] = placer_labels[
+            "target_highest_odds_placer"
+        ].to_numpy()
         return FeatureBuildResult(frame=feat_df, feature_columns=feature_columns)
 
     histories: dict[str, list[dict[str, object]]] = defaultdict(list)
@@ -319,6 +369,8 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
             for x in h
             if abs(float(x.get("distance", row.distance)) - float(row.distance)) <= 200.0
         ]
+        history_field_sizes = [float(x["field_size"]) for x in h]
+        history_weights = [float(x["weight"]) for x in h if float(x.get("weight", 0.0)) > 0.0]
 
         surface_fit = _smoothed_mean(same_surface_perf)
         track_fit = _smoothed_mean(same_track_perf)
@@ -368,9 +420,16 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
                 "distance_fit": distance_fit,
                 "surface_fit": surface_fit,
                 "track_fit": track_fit,
+                "history_avg_field_size": float(np.mean(history_field_sizes)) if history_field_sizes else 0.0,
+                "history_avg_weight": float(np.mean(history_weights)) if history_weights else 0.0,
                 "market_probability": mprob,
                 "implied_probability": implied_prob,
                 "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
+                "finish_position": (
+                    float(row.finish_position)
+                    if pd.notnull(getattr(row, "finish_position", np.nan))
+                    else np.nan
+                ),
                 "is_winner": int(getattr(row, "is_winner", 0)) if pd.notnull(getattr(row, "is_winner", 0)) else 0,
                 "jockey_change_upgrade": jockey_change_upgrade,
                 "trainer_change_upgrade": trainer_change_upgrade,
@@ -382,12 +441,19 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
 
         finish_position = float(getattr(row, "finish_position", np.nan))
         field_size = float(getattr(row, "field_size", np.nan))
-        if pd.notnull(finish_position) and pd.notnull(field_size):
+        if (
+            pd.notnull(finish_position)
+            and pd.notnull(field_size)
+            and field_size > 1.0
+            and finish_position <= field_size
+        ):
             perf = _field_size_adjusted_score(finish_position, field_size)
             histories[horse_id].append(
                 {
                     "perf": perf,
                     "day_ordinal": float(row.race_datetime.toordinal()),
+                    "field_size": field_size,
+                    "weight": float(getattr(row, "weight", 0.0) or 0.0),
                     "distance": float(getattr(row, "distance", 1400.0)),
                     "surface": str(getattr(row, "surface", "")),
                     "track": str(getattr(row, "track", "")),
@@ -400,6 +466,18 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
             )
 
     feat_df = pd.DataFrame(feature_rows)
+
+    precomputed_rows = pd.Series(False, index=df.index)
+    if precomputed_columns.issubset(df.columns):
+        precomputed_rows = df[list(precomputed_columns)].notna().all(axis=1)
+    if precomputed_rows.any():
+        for column in TJK_STAGE1_FEATURE_COLUMNS:
+            if column not in df.columns or column in recompute_precomputed_columns:
+                continue
+            values = pd.to_numeric(df.loc[precomputed_rows, column], errors="coerce")
+            available = values.notna()
+            if available.any():
+                feat_df.loc[values.index[available], column] = values.loc[available].to_numpy()
 
     # Normalize market probabilities within each race to account for overround.
     grp_sum = feat_df.groupby("race_id")["market_probability"].transform("sum").replace(0.0, 1.0)
@@ -429,6 +507,10 @@ def build_leakage_safe_features(frame: pd.DataFrame, as_of_date: date | None = N
             feat_df[column] = 0.0
 
     feat_df[feature_columns] = feat_df[feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    feat_df["is_placed"] = placer_labels["is_placed"].to_numpy()
+    feat_df["target_highest_odds_placer"] = placer_labels[
+        "target_highest_odds_placer"
+    ].to_numpy()
     return FeatureBuildResult(frame=feat_df, feature_columns=feature_columns)
 
 

@@ -29,6 +29,7 @@ RAW_COLLECTIONS: dict[str, tuple[str, ...]] = {
     "daily_program": ("race_id", "horse_id"),
     "race_results": ("race_id", "horse_id"),
     "horse_history": ("horse_id", "race_id", "race_date"),
+    "horse_id_mapping": ("horse_name_key", "resolved_at_id"),
     "workouts": ("horse_id", "workout_date", "distance_m", "time_seconds", "detail"),
     "trainer_statistics": ("trainer_id", "as_of_date"),
 }
@@ -126,6 +127,10 @@ class JsonlRawStore:
                 except (TypeError, ValueError):
                     logger.warning("Eksik anahtarli ham JSONL satiri atlandi: %s:%s", self.path, line_number)
         return latest
+
+    def read_latest_records(self) -> list[dict[str, Any]]:
+        """Return the active record for each collection key."""
+        return [record for record, _digest in self._read_latest().values()]
 
     def repair(self) -> RawRepairStats:
         """Scan and rewrite one collection, dropping only unrecoverable rows."""

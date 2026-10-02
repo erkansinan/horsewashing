@@ -13,9 +13,10 @@ import pandas as pd
 
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
-from atyaris.models.entities import HorseStatistics, TrainerStatistics
+from atyaris.models.entities import HorseStatistics, PastPerformance, TrainerStatistics
+from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
 from atyaris.ml.raw_store import JsonlRawStore
-from atyaris.services import build_data_source
+from atyaris.services import build_prediction_data_source, build_training_data_source
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,17 @@ def _market_probability_from_odds(odds: float | None, default: float) -> float:
     if odds is None or odds <= 1.0:
         return default
     return 1.0 / odds
+
+
+def _field_size_adjusted_history(history: list[PastPerformance]) -> list[float]:
+    return [
+        1.0 - ((float(performance.finish_position) - 1.0) / (float(performance.field_size) - 1.0))
+        for performance in history
+        if performance.finish_position is not None
+        and performance.field_size is not None
+        and performance.field_size > 1
+        and performance.finish_position <= performance.field_size
+    ]
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -84,6 +96,36 @@ def _append_raw_history_records(path: Path | None, records: list[dict[str, objec
             existing_keys.add(key)
 
 
+def _load_recent_trainer_statistics(
+    path: Path | None,
+    target_date: date,
+    max_age_days: int,
+) -> dict[int, tuple[TrainerStatistics, date]]:
+    if path is None or not path.exists():
+        return {}
+    latest: dict[int, tuple[TrainerStatistics, date]] = {}
+    try:
+        records = JsonlRawStore(path, "trainer_statistics").read_latest_records()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Yerel antrenor istatistik cache'i okunamadi | path=%s | hata=%s", path, exc)
+        return {}
+
+    for record in records:
+        try:
+            trainer_id = int(record["trainer_id"])
+            as_of_date = date.fromisoformat(str(record["as_of_date"]))
+            age_days = (target_date - as_of_date).days
+            if age_days < 0 or age_days > max_age_days:
+                continue
+            stats = TrainerStatistics.model_validate(record)
+        except (KeyError, TypeError, ValueError):
+            continue
+        previous = latest.get(trainer_id)
+        if previous is None or as_of_date > previous[1]:
+            latest[trainer_id] = (stats, as_of_date)
+    return latest
+
+
 def ingest_real_tjk_data(
     start_date: date,
     end_date: date,
@@ -92,9 +134,18 @@ def ingest_real_tjk_data(
     require_results: bool = True,
     hippodrome: str | None = None,
     race_no: int | None = None,
+    program_from_csv: bool = False,
+    program_from_html: bool = False,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Build labelled training or unlabelled prediction rows from live TJK pages."""
-    source = build_data_source("tjk", __import__("atyaris.config", fromlist=["get_settings"]).get_settings())
+    if program_from_csv and program_from_html:
+        raise ValueError("Gunluk program kaynagi CSV veya HTML olmali; ikisi birlikte secilemez.")
+    settings = __import__("atyaris.config", fromlist=["get_settings"]).get_settings()
+    source = (
+        build_prediction_data_source(settings)
+        if (program_from_html or program_from_csv) and not require_results
+        else build_training_data_source(settings)
+    )
     if not isinstance(source, TJKHtmlDataSource):
         raise RuntimeError("ML egitimi icin gercek TJK kaynagi bekleniyor.")
 
@@ -105,11 +156,31 @@ def ingest_real_tjk_data(
     raw_workout_records: list[dict[str, object]] = []
     raw_trainer_records: list[dict[str, object]] = []
     incomplete_workout_records = 0
+    missing_horse_history_records = 0
     raw_history_path = getattr(paths, "raw_history_jsonl", None)
+    mapping_path = getattr(
+        paths,
+        "raw_horse_id_mapping_jsonl",
+        Path("data/raw/tjk_horse_id_mapping.jsonl"),
+    )
+    horse_id_mapping = HorseIdMappingStore(mapping_path)
     daily_races: list[tuple[date, object, list[object], dict[int, dict[int, int]]]] = []
     unavailable_days: list[str] = []
     unavailable_result_sets: list[str] = []
     trainer_stats_cache: dict[int, TrainerStatistics | None] = {}
+    trainer_stats_as_of: dict[int, date] = {}
+    prediction_mode = (program_from_html or program_from_csv) and not require_results
+    trainer_cache_path = getattr(paths, "raw_trainer_statistics_jsonl", None)
+    if prediction_mode:
+        cached_trainers = _load_recent_trainer_statistics(
+            trainer_cache_path,
+            start_date,
+            settings.prediction_trainer_cache_max_age_days,
+        )
+        trainer_stats_cache.update({trainer_id: item[0] for trainer_id, item in cached_trainers.items()})
+        trainer_stats_as_of.update({trainer_id: item[1] for trainer_id, item in cached_trainers.items()})
+    trainer_cache_hits: set[int] = set()
+    trainer_live_lookups: set[int] = set()
     started_at = monotonic()
     total_days = max((end_date - start_date).days + 1, 1)
     completed_days = 0
@@ -154,7 +225,13 @@ def ingest_real_tjk_data(
                     f"tahmini kalan: {_estimate_remaining(started_at, completed_days, total_days)}"
                 )
             try:
-                races = source.get_daily_races(current, hippodrome)
+                races = (
+                    source.get_daily_races_csv(current, hippodrome)
+                    if program_from_csv
+                    else source.get_daily_races_html(current, hippodrome, race_no=race_no)
+                    if program_from_html
+                    else source.get_daily_races(current, hippodrome)
+                )
             except DataSourceError as exc:
                 unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: bulten: {exc}")
                 logger.warning(
@@ -175,6 +252,30 @@ def ingest_real_tjk_data(
                 races = [race for race in races if race.race_no == race_no]
                 if not races:
                     continue
+            if program_from_csv:
+                try:
+                    resolution = resolve_race_horse_ids(
+                        source,
+                        races,
+                        current,
+                        hippodrome,
+                        horse_id_mapping,
+                    )
+                    logger.info(
+                        "TJK at ID eslestirme | tarih=%s | hipodrom=%s | cozuldu=%d | unresolved=%d | isim-cakismasi=%d",
+                        current.isoformat(),
+                        hippodrome,
+                        resolution["resolved"],
+                        resolution["unresolved"],
+                        len(resolution["collision_names"]),
+                    )
+                except (DataSourceError, OSError) as exc:
+                    logger.warning(
+                        "TJK HTML programindan at ID'leri alinamadi | tarih=%s | hipodrom=%s | hata=%s",
+                        current.isoformat(),
+                        hippodrome,
+                        exc,
+                    )
             if require_results:
                 try:
                     results = source.get_daily_race_results(current, hippodrome)
@@ -268,6 +369,10 @@ def ingest_real_tjk_data(
                             "race_no": race.race_no,
                             "field_size": len(race.entries),
                             "horse_name": entry.horse_name,
+                            "source_horse_id": entry.source_horse_id,
+                            "id_unresolved": entry.id_unresolved,
+                            "id_resolution_status": entry.id_resolution_status,
+                            "id_candidate_ids": entry.id_candidate_ids,
                             "draw": entry.number,
                             "age": entry.age,
                             "jockey_id": getattr(entry.jockey, "source_jockey_id", None),
@@ -290,12 +395,28 @@ def ingest_real_tjk_data(
                             "race_no": race.race_no,
                             "horse_number": entry.number,
                             "horse_name": entry.horse_name,
+                            "source_horse_id": entry.source_horse_id,
+                            "id_unresolved": entry.id_unresolved,
+                            "id_resolution_status": entry.id_resolution_status,
                             "finish_position": finish_position,
                         }
                     )
 
+                    history_lookup_status = (
+                        "unresolved_id"
+                        if entry.source_horse_id is None or entry.id_unresolved
+                        else "fetch_failed"
+                    )
                     try:
-                        stats = source.get_horse_statistics(entry, include_workouts=True)
+                        if prediction_mode:
+                            stats = source.get_horse_statistics(
+                                entry,
+                                include_workouts=True,
+                                request_timeout=settings.prediction_data_request_timeout_seconds,
+                                max_retries=settings.prediction_data_request_max_retries,
+                            )
+                        else:
+                            stats = source.get_horse_statistics(entry, include_workouts=True)
                     except DataSourceError as exc:
                         # TJK may omit an individual horse history while still
                         # exposing the race and its official result. Keep the
@@ -316,6 +437,15 @@ def ingest_real_tjk_data(
                             progress_callback(
                                 f"    Uyari: {entry.horse_name} gecmisi alinamadi; varsayilan istatistik kullaniliyor ({exc})"
                             )
+                    else:
+                        if history_lookup_status != "unresolved_id":
+                            history_lookup_status = (
+                                "available"
+                                if any(performance.race_date < current for performance in stats.past_performances)
+                                else "empty"
+                            )
+                    if not stats.past_performances:
+                        missing_horse_history_records += 1
                     retrieved_at = datetime.now(timezone.utc).isoformat()
                     for performance in stats.past_performances:
                         raw_history_records.append(
@@ -331,15 +461,30 @@ def ingest_real_tjk_data(
                                 "target_horse_id": str(entry.horse_id),
                                 "target_horse_name": entry.horse_name,
                                 "source_horse_id": entry.source_horse_id,
+                                "id_unresolved": entry.id_unresolved,
+                                "id_resolution_status": entry.id_resolution_status,
                                 **performance.model_dump(mode="json"),
                             }
                         )
                     trainer_statistics = None
                     trainer_id = entry.trainer.source_trainer_id
                     if trainer_id is not None:
+                        if prediction_mode and trainer_id in trainer_stats_cache:
+                            trainer_cache_hits.add(trainer_id)
                         if trainer_id not in trainer_stats_cache:
                             try:
-                                trainer_stats_cache[trainer_id] = source.get_trainer_statistics(trainer_id)
+                                if prediction_mode:
+                                    trainer_stats_cache[trainer_id] = source.get_trainer_statistics(
+                                        trainer_id,
+                                        request_timeout=settings.prediction_data_request_timeout_seconds,
+                                        max_retries=settings.prediction_data_request_max_retries,
+                                    )
+                                else:
+                                    trainer_stats_cache[trainer_id] = source.get_trainer_statistics(trainer_id)
+                                    trainer_stats_as_of[trainer_id] = current
+                                if prediction_mode:
+                                    trainer_live_lookups.add(trainer_id)
+                                    trainer_stats_as_of[trainer_id] = current
                             except DataSourceError as exc:
                                 trainer_stats_cache[trainer_id] = None
                                 logger.warning(
@@ -349,11 +494,13 @@ def ingest_real_tjk_data(
                                     exc,
                                 )
                         trainer_statistics = trainer_stats_cache.get(trainer_id)
-                    if trainer_statistics is not None:
+                    if trainer_statistics is not None and (
+                        not prediction_mode or trainer_id in trainer_live_lookups
+                    ):
                         raw_trainer_records.append(
                             {
                                 "trainer_id": str(trainer_statistics.trainer_id),
-                                "as_of_date": current.isoformat(),
+                                "as_of_date": trainer_stats_as_of.get(trainer_id, current).isoformat(),
                                 "trainer_name": trainer_statistics.trainer_name,
                                 "total_starts": trainer_statistics.total_starts,
                                 "first_place": trainer_statistics.first_place,
@@ -467,12 +614,6 @@ def ingest_real_tjk_data(
                         for value in [pd.to_numeric(p.prize_info, errors="coerce")]
                         if pd.notna(value)
                     ]
-                    history_s20 = [
-                        float(value)
-                        for p in history
-                        for value in [pd.to_numeric(p.s20, errors="coerce")]
-                        if pd.notna(value)
-                    ]
                     workout_times = [
                         float(workout.time_seconds)
                         for workout in historical_workouts
@@ -503,11 +644,7 @@ def ingest_real_tjk_data(
                         p for p in history if (current - p.race_date).days <= 365
                     ]
 
-                    perf_hist = [
-                        1.0 - ((float(p.finish_position) - 1.0) / max(float(p.field_size or field_size) - 1.0, 1.0))
-                        for p in history
-                        if p.finish_position is not None
-                    ]
+                    perf_hist = _field_size_adjusted_history(history)
                     recent_3 = perf_hist[-3:] if perf_hist else []
                     recent_5 = perf_hist[-5:] if perf_hist else []
                     recent_10 = perf_hist[-10:] if perf_hist else []
@@ -628,6 +765,11 @@ def ingest_real_tjk_data(
                             "race_datetime": race.start_time,
                             "horse_id": str(entry.horse_id),
                             "horse_name": str(entry.horse_name),
+                            "source_horse_id": entry.source_horse_id,
+                            "id_unresolved": bool(entry.id_unresolved),
+                            "id_resolution_status": entry.id_resolution_status,
+                            "history_lookup_status": history_lookup_status,
+                            "history_checked_at": retrieved_at,
                             "draw": int(entry.number),
                             "weight": float(entry.weight_kg),
                             "distance": float(race.distance_m),
@@ -693,7 +835,6 @@ def ingest_real_tjk_data(
                             "history_avg_handicap_points": _mean(history_handicap),
                             "history_avg_race_time_seconds": _mean(history_times),
                             "history_avg_prize": _mean(history_prizes),
-                            "history_avg_s20": _mean(history_s20),
                             "workout_count": float(len(historical_workouts)),
                             "workout_avg_time_seconds": _mean(workout_times),
                             "workout_best_time_seconds": min(workout_times) if workout_times else 0.0,
@@ -729,6 +870,13 @@ def ingest_real_tjk_data(
     for raw_path, collection, records in raw_stores:
         if raw_path is not None and records:
             JsonlRawStore(raw_path, collection).upsert(records)
+    if prediction_mode:
+        logger.info(
+            "TJK tahmin antrenor cache | cache_hit=%d | canli_istek=%d | cache_tazelik_gun=%d",
+            len(trainer_cache_hits),
+            len(trainer_live_lookups),
+            settings.prediction_trainer_cache_max_age_days,
+        )
     frame = pd.DataFrame(rows)
     if frame.empty:
         details = []
@@ -741,6 +889,7 @@ def ingest_real_tjk_data(
         if require_results and (unavailable_days or unavailable_result_sets):
             frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
             frame.attrs["incomplete_workout_records"] = incomplete_workout_records
+            frame.attrs["missing_horse_history_records"] = missing_horse_history_records
             return frame
         raise RuntimeError(
             f"Gercek TJK verisiyle {purpose} icin kullanilabilir satir bulunamadi. "
@@ -768,4 +917,5 @@ def ingest_real_tjk_data(
     if unavailable_days or unavailable_result_sets:
         frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
     frame.attrs["incomplete_workout_records"] = incomplete_workout_records
+    frame.attrs["missing_horse_history_records"] = missing_horse_history_records
     return frame

@@ -230,7 +230,7 @@ Bu repo, literaturde denenmis iki asamali Benter mimarisini uygular:
 
 - Asama 1 (fundamental_model): Yaris ici goreli kazanim olasiliklari ureten conditional logit.
 - Asama 2 (market_blend): Asama 1 olasiliklarini piyasa (ganyan) bilgisiyle ikinci bir kosullu modelde birlestirme.
-- Harville (harville.py): Kazanma olasiliklarindan 2.lik, 3.luk ve top3 olasiliklarini turetme.
+- Gamma-ayarlamali Harville (harville.py): Fold oncesi son kalibrasyon penceresinden ayri ikinci/ucuncu sira gamma katsayilari ogrenilir; ham Harville olasiliklari da walk-forward raporunda karsilastirilir.
 - Kalibrasyon (calibration.py): Platt veya isotonic ile olasilik duzeltmesi.
 - EV + Fractional Kelly (ev_kelly.py): Value bet filtreleme ve bahis boyutu onerisi.
 - Walk-forward backtest (backtest.py): log-loss, calibration, ROI ve market baseline karsilastirmasi.
@@ -424,7 +424,11 @@ kullanilir.
 | `history_avg_odds` | Gecmis kosulardaki ortalama TJK ganyanidir. |
 | `history_avg_handicap_points` | Gecmis kosulardaki ortalama HP degeridir. |
 | `history_avg_race_time_seconds` | Gecmis derecelerin saniye cinsinden ortalamasidir. |
-| `history_avg_prize`, `history_avg_s20` | TJK gecmis satirlarindaki sayisal ikramiye ve S20 ortalamalaridir. |
+| `history_avg_prize` | TJK gecmis satirlarindaki sayisal ikramiye ortalamasidir. |
+
+TJK gecmis satirlarindaki `S20` degerinin resmi anlami mevcut kaynaklarda
+dogrulanamamistir. Ham deger arsivde korunur, ancak anlami teyit edilene kadar
+sayisal feature olarak kullanilmaz.
 
 #### TJK antrenor feature'lari
 
@@ -613,7 +617,7 @@ ML modunda kullanim adimlari:
 ML tahmin ekraninda sunulan basliklar:
 
 - `P(win)`: Kalibre edilmis kazanma olasiligi.
-- `P(2.)`, `P(3.)`, `P(Top3)`: Harville formulu ile turetilen siralama olasiliklari.
+- `P(2.)`, `P(3.)`, `P(Top3)`: Harville siralama olasiliklarinin walk-forward kalibrasyon penceresinde ogrenilen, yere ozel gamma katsayilariyla ayarlanmis halleri.
 - `Guven`: Model-piyasa sapmasindan uretilen guven skoru.
 - `Edge`, `EV`, `Kelly`: Value bet analizi ve fractional Kelly bahis buyuklugu.
 - `Karar (BET/NO_BET)`: Olasilik, edge, EV ve Kelly filtrelerine gore sinyal.
@@ -742,9 +746,11 @@ degistirir; modelin kararini veya hesaplanan degerleri degistirmez.
   karsilastirmasinda yararlidir; ancak mevcut `BET/NO_BET` karari kazanma
   olasiligi ve piyasa oranina gore verilir.
 
-`P(2.)`, `P(3.)` ve `P(Top3)` kazanma olasiligindan Harville yaklasimiyla
-turetilir. Bu nedenle bunlari ayri bir modelin bagimsiz kaniti gibi degil,
-modelin kazanma siralamasindan turetilmis ek gorunumler olarak okuyun.
+`P(2.)` ve `P(3.)` kazanma olasiligindan Harville yaklasimiyla turetilir ve
+her bitiris sirasi icin ayri bir gamma katsayisiyla kalibre edilir. Ham ve
+gamma-ayarlanmis Harville kalibrasyonu, uzun oranli atlar dahil, walk-forward
+raporunda ayri ayri verilir. Bu olasiliklar bagimsiz bir plase modelinin
+sonucu degil, kazanma siralamasindan turetilmis degerlerdir.
 
 ### Model-piyasa sutunlari
 

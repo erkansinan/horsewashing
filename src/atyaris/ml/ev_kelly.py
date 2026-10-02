@@ -20,8 +20,11 @@ def add_ev_kelly_columns(
     out["market_probability_used"] = pd.to_numeric(out.get(market_col, 0.0), errors="coerce").fillna(0.0)
     out["edge"] = out["calibrated_probability"] - out["market_probability_used"]
 
-    odds = pd.to_numeric(out.get("odds", np.nan), errors="coerce").fillna(0.0)
-    out["ev"] = out["calibrated_probability"] * odds - 1.0
+    odds = pd.to_numeric(
+        out.get("odds", pd.Series(np.nan, index=out.index)), errors="coerce"
+    ).fillna(0.0)
+    valid_odds = odds > 1.0
+    out["ev"] = (out["calibrated_probability"] * odds - 1.0).where(valid_odds, np.nan)
 
     b = (odds - 1.0).to_numpy(dtype=float)
     p = out["calibrated_probability"].to_numpy(dtype=float)
@@ -38,6 +41,7 @@ def add_ev_kelly_columns(
         & (out["edge"] >= min_edge)
         & (out["ev"] >= min_ev)
         & (out["kelly_fraction"] > 0.0)
+        & valid_odds
     )
     out["bet_decision"] = np.where(bet_mask, "BET", "NO_BET")
     return out

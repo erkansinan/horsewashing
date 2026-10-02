@@ -2,7 +2,7 @@
 {% block title %}ML Eğitim{% endblock %}
 {% block content %}
 <h2>ML Eğitim</h2>
-<p>Veriyi önce kesintili olarak toplayın, ardından aşağıdaki akıştan modeli yeniden eğitin.</p>
+<p>TJK arşivini güncelledikten sonra modeli yerel beş JSONL dosyasından eğitin. Toplama ve eğitim ayrı işlerdir.</p>
 {% if raw_repair %}<p class="training-status" data-state="completed">{{ raw_repair }}</p>{% endif %}
 
 <section class="training-panel" aria-labelledby="collection-start-title">
@@ -23,15 +23,18 @@
     <span>Gün: <b class="completed-days">{{ job.completed_days or 0 }}</b> tamamlandı / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı</span><br>
     <span>Tahmini kalan süre: <b class="estimated-remaining">{{ job.estimated_remaining or 'hesaplaniyor' }}</b></span><br>
     <span>Şu an: <b class="current-target">{{ job.current_target or job.current_date or 'Başlatılıyor' }}</b></span><br>
+    <span>Son ağ hatası: <b class="last-error">{{ job.last_error or 'yok' }}</b></span><br>
+    <span class="manual-check-link">{% if job.manual_url %}<a href="{{ job.manual_url }}" target="_blank" rel="noopener noreferrer">TJK isteğini manuel kontrol et</a>{% endif %}</span>
+    {% if job.manual_url %}<br>{% endif %}
     <span>Eksik veri: <b class="missing-data-records">{{ job.missing_data_records or 0 }}</b> | Atlanan gün: <b class="skipped-days">{{ job.skipped_days or 0 }}</b> | Başarısız hedef: <b class="failed-targets">{{ job.failed_targets or 0 }}</b></span>
     {% if job.status == 'running' %}
     <button type="button" data-collection-action="pause" data-job-id="{{ job.job_id }}">Toplamayı duraklat</button>
     <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
-    {% elif job.status == 'paused' %}
-    <button type="button" data-collection-action="resume" data-job-id="{{ job.job_id }}">Kaldığı yerden devam et</button>
+    {% elif job.status in ['paused', 'completed_with_warnings'] %}
+    <button type="button" data-collection-action="resume" data-job-id="{{ job.job_id }}">Eksik verileri tekrar dene</button>
     <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
     {% endif %}
-    {% if job.status in ['failed', 'cancelled', 'completed'] %}
+    {% if job.status in ['failed', 'cancelled', 'completed', 'completed_with_warnings'] %}
     <button type="button" data-collection-action="remove" data-job-id="{{ job.job_id }}">Kayıt geçmişinden kaldır</button>
     {% endif %}
   </div>
@@ -122,15 +125,6 @@
 
 <section class="training-panel" aria-labelledby="training-start-title">
   <h2 id="training-start-title">Yeni eğitim başlat</h2>
-  <form class="filters" method="get" action="/train">
-    <label>Başlangıç tarihi
-      <input type="date" name="start_date" value="{{ start_date }}" required>
-    </label>
-    <label>Bitiş tarihi
-      <input type="date" name="end_date" value="{{ end_date }}" required>
-    </label>
-    <button type="submit">Eğitimi başlat</button>
-  </form>
   <form class="filters" method="get" action="/train">
     <input type="hidden" name="mode" value="local">
     <label>Başlangıç tarihi
@@ -266,6 +260,20 @@
       if (estimate) estimate.textContent = job.estimated_remaining || "hesaplaniyor";
       const currentTarget = status.querySelector(".current-target");
       if (currentTarget) currentTarget.textContent = job.current_target || job.current_date || "Başlatılıyor";
+      const lastError = status.querySelector(".last-error");
+      if (lastError) lastError.textContent = job.last_error || "yok";
+      const manualLink = status.querySelector(".manual-check-link");
+      if (manualLink) {
+        manualLink.replaceChildren();
+        if (job.manual_url) {
+          const link = document.createElement("a");
+          link.href = job.manual_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = "TJK isteğini manuel kontrol et";
+          manualLink.appendChild(link);
+        }
+      }
       const missingData = status.querySelector(".missing-data-records");
       if (missingData) missingData.textContent = job.missing_data_records || 0;
       const skippedDays = status.querySelector(".skipped-days");

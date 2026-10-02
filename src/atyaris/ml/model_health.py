@@ -68,6 +68,7 @@ EXPECTED_FEATURE_SIGNS = {
     "workout_best_speed_index": 1,
     "history_avg_finish_position": -1,
     "weight": -1,
+    "weight_deviation": -1,
 }
 
 
@@ -182,8 +183,23 @@ def _race_top4(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
 def _log_loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
     if frame.empty:
         return 0.0
-    p = np.clip(probabilities, 1e-8, 1.0 - 1e-8)
-    y = frame["is_winner"].to_numpy(dtype=float)
+    work = frame[["race_id", "is_winner"]].copy()
+    work["probability"] = np.clip(probabilities, 0.0, 1.0)
+    winning_mass = (
+        work.loc[pd.to_numeric(work["is_winner"], errors="coerce").fillna(0.0) > 0.0]
+        .groupby("race_id")["probability"]
+        .sum()
+    )
+    if winning_mass.empty:
+        return 0.0
+    return float(-np.log(np.clip(winning_mass.to_numpy(dtype=float), 1e-8, 1.0)).mean())
+
+
+def _row_binary_bce(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
+    if frame.empty:
+        return 0.0
+    p = np.clip(np.asarray(probabilities, dtype=float), 1e-8, 1.0 - 1e-8)
+    y = pd.to_numeric(frame["is_winner"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     return float(-np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
@@ -291,6 +307,10 @@ def fixed_test_comparison(
         "bootstrap_samples": int(bootstrap_samples),
         "model_log_loss": model_log_loss,
         "market_log_loss": market_log_loss,
+        "model_race_based_log_loss": model_log_loss,
+        "market_race_based_log_loss": market_log_loss,
+        "model_row_based_bce": _row_binary_bce(test_df, model_probability),
+        "market_row_based_bce": _row_binary_bce(test_df, market_probability),
         "log_loss_difference": model_log_loss - market_log_loss,
         "edge_status": "supported" if ci_low > 0.0 else "not_established",
         "alpha_comparison": alpha_rows,
@@ -315,14 +335,32 @@ def test_beats_market_baseline(
     favorite_top1 = _race_top1(test_df, test_df[market_col].to_numpy(dtype=float))
     full_top4 = _race_top4(test_df, full_p)
     market_top4 = _race_top4(test_df, market_p)
+    full_race_log_loss = _log_loss(test_df, full_p)
+    market_race_log_loss = _log_loss(test_df, market_p)
+    full_row_bce = _row_binary_bce(test_df, full_p)
+    market_row_bce = _row_binary_bce(test_df, market_p)
     return _result(
         "test_beats_market_baseline",
         bool(
-            _log_loss(test_df, full_p) < _log_loss(test_df, market_p)
+            full_race_log_loss < market_race_log_loss
             and full_top4 > market_top4
         ),
-        full_log_loss=_log_loss(test_df, full_p),
-        market_only_log_loss=_log_loss(test_df, market_p),
+        full_log_loss=full_race_log_loss,
+        market_only_log_loss=market_race_log_loss,
+        full_race_based_log_loss=full_race_log_loss,
+        market_only_race_based_log_loss=market_race_log_loss,
+        full_row_based_bce=full_row_bce,
+        market_only_row_based_bce=market_row_bce,
+        full_max_race_probability_sum_error=float(
+            (test_df.assign(_p=full_p).groupby("race_id")["_p"].sum() - 1.0)
+            .abs()
+            .max()
+        ),
+        market_max_race_probability_sum_error=float(
+            (test_df.assign(_p=market_p).groupby("race_id")["_p"].sum() - 1.0)
+            .abs()
+            .max()
+        ),
         full_top1=full_top1,
         market_only_top1=market_top1,
         favorite_top1=favorite_top1,
@@ -444,6 +482,8 @@ def test_learning_curve_improves(artifact: BenterTwoStageArtifact) -> HealthChec
 def _metrics(frame: pd.DataFrame, probabilities: np.ndarray) -> dict[str, float]:
     return {
         "log_loss": _log_loss(frame, probabilities),
+        "race_based_log_loss": _log_loss(frame, probabilities),
+        "row_based_bce": _row_binary_bce(frame, probabilities),
         "top1": _race_top1(frame, probabilities),
     }
 

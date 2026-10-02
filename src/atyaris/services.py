@@ -14,6 +14,8 @@ from atyaris.config import Settings
 from atyaris.data_sources.base import RaceDataSource
 from atyaris.data_sources.sample_source import SampleDataSource
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.data_sources.prediction import build_prediction_data_source
+from atyaris.data_sources.training import build_training_data_source
 from atyaris.models.entities import Race
 
 
@@ -26,15 +28,7 @@ def build_data_source(source: str, settings: Settings) -> RaceDataSource:
     if source == "sample":
         return SampleDataSource()
     if source == "tjk":
-        cache = SqliteTTLCache(settings.cache_path, settings.cache_ttl_seconds)
-        return TJKHtmlDataSource(
-            base_url=settings.tjk_base_url,
-            user_agent=settings.user_agent,
-            request_timeout=settings.request_timeout_seconds,
-            min_request_interval=settings.min_request_interval_seconds,
-            cache=cache,
-            cache_ttl_seconds=settings.cache_ttl_seconds,
-        )
+        return build_prediction_data_source(settings)
     raise InvalidSourceError("source 'sample' veya 'tjk' olmali")
 
 

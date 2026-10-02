@@ -4,13 +4,17 @@ kullanir; canli TJK sitesine bagimli degildir.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import json
+from threading import Event, Thread
 from types import SimpleNamespace
 import time
 
 from bs4 import BeautifulSoup
+import httpx
 from fastapi.testclient import TestClient
 import atyaris.web.app as web_app_module
 import pandas as pd
+import pytest
 
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.sample_source import SampleDataSource
@@ -38,6 +42,115 @@ def test_training_rejects_date_range_shorter_than_three_days() -> None:
 
     assert response.status_code == 400
     assert "en az 6 farkli tarih" in response.json()["detail"]
+
+
+def test_ml_date_cache_rejects_inconsistent_history_features(tmp_path) -> None:
+    feature_path = tmp_path / "prediction_features.csv"
+    pd.DataFrame(
+        {
+            "date": ["2026-09-27", "2026-09-27"],
+            "race_id": ["Istanbul-2026-09-27-1"] * 2,
+            "track": ["ISTANBUL"] * 2,
+            "career_starts": [0, 0],
+            "history_missing": [0, 1],
+            "history_lookup_status": ["available", "empty"],
+            "history_checked_at": [pd.Timestamp.now(tz="UTC").isoformat()] * 2,
+        }
+    ).to_csv(feature_path, index=False)
+    paths = SimpleNamespace(prediction_features_csv=feature_path)
+
+    assert not web_app_module._ml_has_date(paths, date(2026, 9, 27), city="İstanbul")
+
+    valid = pd.read_csv(feature_path)
+    valid.loc[0, "career_starts"] = 3
+    valid.to_csv(feature_path, index=False)
+
+    assert web_app_module._ml_has_date(paths, date(2026, 9, 27), city="İstanbul")
+
+
+def test_ml_date_cache_retries_stale_history_lookup_failures(tmp_path) -> None:
+    feature_path = tmp_path / "prediction_features.csv"
+    paths = SimpleNamespace(prediction_features_csv=feature_path)
+    base = {
+        "date": "2026-09-29",
+        "track": "ADANA",
+        "race_id": "Adana-2026-09-29-1",
+        "career_starts": 0,
+        "history_missing": 1,
+        "history_lookup_status": "fetch_failed",
+    }
+    target_date = date(2026, 9, 29)
+    fresh = {
+        **base,
+        "history_checked_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=5)).isoformat(),
+    }
+    pd.DataFrame([fresh]).to_csv(feature_path, index=False)
+    assert web_app_module._ml_has_date(paths, target_date, city="Adana", race_no=1)
+
+    stale = {
+        **base,
+        "history_checked_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=11)).isoformat(),
+    }
+    pd.DataFrame([stale]).to_csv(feature_path, index=False)
+    assert not web_app_module._ml_has_date(paths, target_date, city="Adana", race_no=1)
+
+
+def test_ml_date_cache_accepts_legacy_missing_history_snapshot(tmp_path) -> None:
+    feature_path = tmp_path / "prediction_features.csv"
+    pd.DataFrame(
+        [{
+            "date": "2026-09-29",
+            "track": "ADANA",
+            "race_id": "Adana-2026-09-29-1",
+            "career_starts": 0,
+            "history_missing": 1,
+        }]
+    ).to_csv(feature_path, index=False)
+
+    assert web_app_module._ml_has_date(
+        SimpleNamespace(prediction_features_csv=feature_path),
+        date(2026, 9, 29),
+        city="Adana",
+        race_no=1,
+    )
+
+
+def test_ml_model_loadable_rejects_failed_health_report(tmp_path) -> None:
+    model_path = tmp_path / "phase1_logreg.joblib"
+    model_path.touch()
+    model_path.with_suffix(".health.json").write_text(
+        '{"passed": false, "checks": []}', encoding="utf-8"
+    )
+    paths = SimpleNamespace(model_path=model_path, raw_csv=tmp_path / "raw.csv")
+
+    loadable, message = web_app_module._ml_model_loadable(paths)
+
+    assert not loadable
+    assert "Health kontrolu gecmeyen model servis edilemez" in message
+
+
+def test_predict_page_shows_failed_model_health_and_blocks_ml(monkeypatch, tmp_path, caplog) -> None:
+    model_path = tmp_path / "phase1_logreg.joblib"
+    model_path.write_bytes(b"test artifact")
+    model_path.with_suffix(".health.json").write_text(
+        '{"passed": false, "checks": [{"name": "test_feature_signs", "passed": false}]}',
+        encoding="utf-8",
+    )
+    paths = SimpleNamespace(model_path=model_path, raw_csv=tmp_path / "raw.csv")
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+
+    with caplog.at_level("INFO", logger="atyaris.web.app"):
+        response = _client().get(
+            "/predict",
+            params={"race_id": "1", "source": "ml", "date": "2026-09-27"},
+        )
+
+    assert response.status_code == 200
+    assert "passed: false" in response.text
+    assert "test_feature_signs" in response.text
+    assert "ML modeli hazir degil" in response.text
+    assert "passed=False" in caplog.text
 
 
 
@@ -130,6 +243,259 @@ def test_training_page_contains_start_form_and_active_jobs(monkeypatch) -> None:
         assert "ML Eğitim" in response.text
     finally:
         web_app_module._TRAINING_JOBS.pop("active-training", None)
+
+
+@pytest.mark.parametrize(
+    ("missing_history_records", "expected_status"),
+    [(0, "completed"), (1, "completed_with_warnings")],
+)
+def test_collection_worker_downloads_city_csv_and_persists_program(
+    monkeypatch, tmp_path, missing_history_records: int, expected_status: str
+) -> None:
+    target_date = date(2026, 8, 25)
+    paths = SimpleNamespace(
+        raw_csv=tmp_path / "races.csv",
+        raw_daily_program_jsonl=tmp_path / "program.jsonl",
+    )
+    checkpoint = paths.raw_csv.with_suffix(".collection.progress.json")
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "collection_version": 1,
+                "completed_units": [f"{target_date.isoformat()}|Ankara|1"],
+                "failed_units": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    race = Race(
+        id="Ankara-2026-08-25-1",
+        hippodrome="Ankara",
+        race_no=1,
+        start_time=datetime(2026, 8, 25, 14, 0),
+        distance_m=1200,
+        surface=TrackSurface.CIM,
+        entries=[
+            RaceEntry(
+                number=1,
+                horse_id="UTKANBEY-1",
+                horse_name="UTKANBEY",
+                jockey=Jockey(name="M.G.ARSLAN"),
+                trainer=Trainer(name="M.ÖZYİĞİT"),
+                weight_kg=59.0,
+            )
+        ],
+    )
+    calls: list[str] = []
+    ingestion_calls: list[dict[str, object]] = []
+
+    class CsvSource:
+        def get_daily_races_csv(self, requested_date: date, city: str) -> list[Race]:
+            assert requested_date == target_date
+            calls.append(city)
+            return [race] if city == "Ankara" else []
+
+        def get_daily_races_html(self, requested_date: date, city: str) -> list[Race]:
+            assert requested_date == target_date
+            if city != "Ankara":
+                return []
+            html_race = race.model_copy(deep=True)
+            html_race.entries[0].source_horse_id = 98765
+            return [html_race]
+
+    job_id = "csv-collection-test"
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+    monkeypatch.setattr(web_app_module, "build_training_data_source", lambda _settings: CsvSource())
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara", "İstanbul"])
+    monkeypatch.setattr(web_app_module, "_persist_collection_jobs", lambda: None)
+
+    def fake_ingest(*args, **kwargs):
+        ingestion_calls.append(kwargs)
+        frame = pd.DataFrame()
+        frame.attrs["missing_horse_history_records"] = missing_history_records
+        return frame
+
+    monkeypatch.setattr(
+        web_app_module,
+        "ingest_real_tjk_data",
+        fake_ingest,
+    )
+    web_app_module._COLLECTION_JOBS[job_id] = {
+        "status": "running",
+        "message": "",
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+    }
+    web_app_module._COLLECTION_CANCEL_EVENTS[job_id] = Event()
+
+    try:
+        web_app_module._run_collection_job(job_id, target_date, target_date)
+
+        records = [
+            json.loads(line)
+            for line in paths.raw_daily_program_jsonl.read_text(encoding="utf-8").splitlines()
+        ]
+        assert calls == ["Ankara", "İstanbul"]
+        assert len(ingestion_calls) == 1
+        assert ingestion_calls[0]["program_from_csv"] is True
+        assert len(records) == 1
+        assert records[0]["source"] == "tjk_daily_program_csv"
+        assert records[0]["horse_name"] == "UTKANBEY"
+        assert records[0]["source_horse_id"] == 98765
+        updated_checkpoint = json.loads(checkpoint.read_text(encoding="utf-8"))
+        assert updated_checkpoint["collection_version"] == 2
+        job = web_app_module._COLLECTION_JOBS[job_id]
+        assert job["status"] == expected_status
+        assert job["completed_days"] == (1 if expected_status == "completed" else 0)
+        assert job["missing_data_records"] == missing_history_records
+        assert job["failed_targets"] == (1 if missing_history_records else 0)
+    finally:
+        web_app_module._COLLECTION_JOBS.pop(job_id, None)
+        web_app_module._COLLECTION_CANCEL_EVENTS.pop(job_id, None)
+
+
+def _start_blocked_collection(monkeypatch, tmp_path):
+    target_date = date(2026, 9, 26)
+    paths = SimpleNamespace(
+        raw_csv=tmp_path / "collection.csv",
+        raw_daily_program_jsonl=tmp_path / "program.jsonl",
+        raw_horse_id_mapping_jsonl=tmp_path / "horse_ids.jsonl",
+    )
+    collection_entered = Event()
+    release_collection = Event()
+
+    class BlockedTrainingSource:
+        def get_daily_races_csv(self, *_args, **_kwargs):
+            collection_entered.set()
+            assert release_collection.wait(5)
+            return []
+
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+    monkeypatch.setattr(web_app_module, "build_training_data_source", lambda _settings: BlockedTrainingSource())
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+    monkeypatch.setattr(web_app_module, "_persist_collection_jobs", lambda: None)
+    monkeypatch.setattr(web_app_module, "_restore_collection_jobs", lambda: None)
+    monkeypatch.setattr(web_app_module, "_restore_training_jobs", lambda: None)
+
+    job_id = "blocked-collection-regression"
+    web_app_module._COLLECTION_JOBS[job_id] = {
+        "status": "running",
+        "message": "",
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+    }
+    web_app_module._COLLECTION_CANCEL_EVENTS[job_id] = Event()
+    worker = Thread(
+        target=web_app_module._run_collection_job,
+        args=(job_id, target_date, target_date),
+    )
+    worker.start()
+    assert collection_entered.wait(2)
+    return target_date, job_id, worker, release_collection
+
+
+def test_prediction_path_unaffected_by_training_collection(monkeypatch, tmp_path) -> None:
+    target_date, job_id, worker, release_collection = _start_blocked_collection(monkeypatch, tmp_path)
+    settings = Settings(
+        cache_path=str(tmp_path / "prediction-cache.sqlite3"),
+        prediction_data_min_request_interval_seconds=0.0,
+    )
+    prediction_source = web_app_module._bulletin_source_for_ml(settings)
+    expected_races = [
+        race
+        for race in SampleDataSource().get_daily_races(target_date, "Ankara")
+        if race.race_no == 1
+    ]
+    html_calls = []
+    prediction_source.get_daily_races_html = (  # type: ignore[method-assign]
+        lambda requested_date, city, race_no=None: html_calls.append((requested_date, city, race_no))
+        or expected_races
+    )
+    prediction_source.get_daily_races_csv = lambda *_args, **_kwargs: pytest.fail(  # type: ignore[method-assign]
+        "prediction must not request a CSV bulletin"
+    )
+    try:
+        started = time.monotonic()
+        races = web_app_module._fetch_ml_bulletin_races(
+            prediction_source, target_date, "Ankara", race_no=1
+        )
+        elapsed = time.monotonic() - started
+
+        assert races == expected_races
+        assert elapsed < 0.2
+        assert html_calls == [(target_date, "Ankara", 1)]
+        assert worker.is_alive()
+    finally:
+        prediction_source.close()
+        release_collection.set()
+        worker.join(timeout=5)
+        web_app_module._COLLECTION_JOBS.pop(job_id, None)
+        web_app_module._COLLECTION_CANCEL_EVENTS.pop(job_id, None)
+    assert not worker.is_alive()
+
+
+def test_collection_indexes_large_raw_archive_without_changing_duplicate_semantics(
+    monkeypatch, tmp_path
+) -> None:
+    raw_history = tmp_path / "history.jsonl"
+    record = {
+        "horse_id": "horse-1",
+        "race_id": "race-1",
+        "race_date": "2026-09-01",
+    }
+    raw_history.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    monkeypatch.setitem(web_app_module.RAW_STORE_THRESHOLDS, "warning_records", 1)
+    messages = []
+
+    web_app_module._prepare_collection_indexes(
+        SimpleNamespace(raw_history_jsonl=raw_history), messages.append
+    )
+
+    store = web_app_module.JsonlRawStore(raw_history, "horse_history")
+    assert store.index_path.exists()
+    assert messages == ["Ham arsiv indeksi hazirlaniyor: horse_history"]
+    assert store.upsert([record]).duplicates == 1
+    assert store.count_records() == 1
+
+
+def test_training_job_can_start_while_collection_is_running(monkeypatch, tmp_path) -> None:
+    _target_date, collection_job_id, collection_worker, release_collection = _start_blocked_collection(
+        monkeypatch, tmp_path
+    )
+    training_started = Event()
+    monkeypatch.setattr(
+        web_app_module,
+        "_run_local_training_job",
+        lambda *_args: training_started.set(),
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "_run_training_job",
+        lambda *_args: pytest.fail("default training mode must not use network ingestion"),
+    )
+    training_job_id = None
+    try:
+        response = _client().get(
+            "/train",
+            params={"start_date": "2026-09-01", "end_date": "2026-09-06"},
+            follow_redirects=False,
+        )
+        training_job_id = response.headers["location"].split("train_job=", 1)[1]
+
+        assert response.status_code == 303
+        assert collection_worker.is_alive()
+        assert training_started.wait(2)
+    finally:
+        release_collection.set()
+        collection_worker.join(timeout=5)
+        web_app_module._COLLECTION_JOBS.pop(collection_job_id, None)
+        web_app_module._COLLECTION_CANCEL_EVENTS.pop(collection_job_id, None)
+        if training_job_id:
+            web_app_module._TRAINING_JOBS.pop(training_job_id, None)
+            web_app_module._TRAINING_CANCEL_EVENTS.pop(training_job_id, None)
+    assert not collection_worker.is_alive()
 
 
 def test_training_page_hides_cancelled_jobs() -> None:
@@ -432,6 +798,29 @@ def test_interrupted_training_job_is_restored_as_paused(monkeypatch, tmp_path) -
         web_app_module._TRAINING_JOBS.pop(job_id, None)
 
 
+def test_completed_training_status_survives_app_restart(monkeypatch, tmp_path) -> None:
+    settings = Settings(phase1_raw_csv_path=str(tmp_path / "tjk_real_races.csv"))
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
+    job_id = "completed-training-status"
+    web_app_module._TRAINING_JOBS[job_id] = {
+        "status": "completed",
+        "message": "Egitim tamamlandi",
+        "start_date": "2026-09-01",
+        "end_date": "2026-09-10",
+    }
+    try:
+        web_app_module._persist_training_jobs()
+        web_app_module._TRAINING_JOBS.clear()
+
+        client = _client()
+
+        response = client.get(f"/train/status/{job_id}")
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+
+
 def test_training_status_page_contains_interruption_confirmation(monkeypatch) -> None:
     web_app_module._TRAINING_JOBS["active-job"] = {"status": "running", "message": "Egitim"}
     try:
@@ -491,20 +880,173 @@ def test_index_with_invalid_date_shows_error() -> None:
     assert "Gecersiz istek" in response.text
 
 
-def test_index_tjk_dns_failure_falls_back_to_known_hippodromes(monkeypatch) -> None:
-    class FailingTjkSource(TJKHtmlDataSource):
-        def get_available_hippodromes(self, target_date: date) -> list[str]:  # type: ignore[override]
-            raise DataSourceError("Hipodrom listesi cekilirken hata: [Errno 11001] getaddrinfo failed")
+def test_index_tjk_city_options_match_selected_date(monkeypatch) -> None:
+    target_date = date(2026, 9, 23)
+    availability_calls: list[date] = []
 
-    monkeypatch.setattr(web_app_module, "build_data_source", lambda source_name, settings: FailingTjkSource())
+    class DateSpecificTjkSource(TJKHtmlDataSource):
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            availability_calls.append(requested_date)
+            return ["Ankara", "İzmir"]
 
-    client = _client()
-    response = client.get("/", params={"source": "tjk", "date": date.today().isoformat()})
+    monkeypatch.setattr(
+        web_app_module,
+        "build_data_source",
+        lambda _source_name, _settings: DateSpecificTjkSource(),
+    )
+
+    response = _client().get(
+        "/",
+        params={"source": "tjk", "date": target_date.isoformat()},
+    )
 
     assert response.status_code == 200
-    assert "Veri kaynagi hatasi" not in response.text
-    assert "su an ulasilamiyor" in response.text
-    assert "Ankara" in response.text
+    assert availability_calls == [target_date]
+    assert '<option value="Ankara"' in response.text
+    assert '<option value="İzmir"' in response.text
+    assert '<option value="Bursa"' not in response.text
+
+
+def test_index_ml_city_options_match_selected_date(monkeypatch) -> None:
+    target_date = date(2026, 9, 23)
+    availability_calls: list[date] = []
+
+    class DateSpecificTjkSource(TJKHtmlDataSource):
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            availability_calls.append(requested_date)
+            return ["Ankara", "İzmir"]
+
+    monkeypatch.setattr(
+        web_app_module,
+        "_bulletin_source_for_ml",
+        lambda _settings: DateSpecificTjkSource(),
+    )
+
+    response = _client().get(
+        "/",
+        params={"source": "ml", "date": target_date.isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert availability_calls == [target_date]
+    assert '<option value="Ankara"' in response.text
+    assert '<option value="İzmir"' in response.text
+    assert '<option value="Bursa"' not in response.text
+
+
+def test_index_tjk_city_options_are_empty_when_selected_date_has_no_program(monkeypatch) -> None:
+    target_date = date(2026, 9, 24)
+
+    class EmptyDateTjkSource(TJKHtmlDataSource):
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            assert requested_date == target_date
+            return []
+
+    monkeypatch.setattr(
+        web_app_module,
+        "build_data_source",
+        lambda _source_name, _settings: EmptyDateTjkSource(),
+    )
+
+    response = _client().get(
+        "/",
+        params={"source": "tjk", "date": target_date.isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert '<option value="Ankara"' not in response.text
+    assert '<option value="Bursa"' not in response.text
+
+
+def test_index_fetches_tjk_bulletin_without_blocking_on_horse_id_resolution(monkeypatch) -> None:
+    target_date = date(2026, 9, 23)
+    race = SampleDataSource().get_daily_races(target_date)[0]
+    calls: list[tuple[date, str | None, bool, bool]] = []
+
+    class FastTjkSource(TJKHtmlDataSource):
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            return ["Ankara"]
+
+        def get_daily_races(
+            self,
+            requested_date: date,
+            city: str | None = None,
+            resolve_missing_ids: bool = True,
+            include_odds: bool = True,
+        ) -> list[Race]:
+            calls.append((requested_date, city, resolve_missing_ids, include_odds))
+            return [race]
+
+    monkeypatch.setattr(
+        web_app_module,
+        "build_data_source",
+        lambda _source_name, _settings: FastTjkSource(),
+    )
+
+    response = _client().get(
+        "/",
+        params={"source": "tjk", "date": target_date.isoformat(), "city": "Ankara"},
+    )
+
+    assert response.status_code == 200
+    assert "Gunun Yarislari" in response.text
+    assert calls == [(target_date, "Ankara", False, False)]
+
+
+def test_tjk_predict_fetches_only_the_requested_race_without_global_id_resolution(monkeypatch) -> None:
+    target_date = date.today()
+    race = SampleDataSource().get_daily_races(target_date, "Ankara")[0]
+    race.entries[0].odds = 5.5
+    calls = []
+
+    class SelectedRaceSource(TJKHtmlDataSource):
+        def get_daily_races(self, *args, **kwargs) -> list[Race]:  # type: ignore[no-untyped-def]
+            raise AssertionError("TJK prediction must bypass the CSV-first path")
+
+        def get_daily_races_html(
+            self,
+            requested_date: date,
+            city: str,
+            race_no: int | None = None,
+        ) -> list[Race]:
+            calls.append((requested_date, city, race_no))
+            return [race] if race_no == race.race_no else []
+
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            raise AssertionError("prediction should not scan all city CSVs")
+
+    monkeypatch.setattr(
+        web_app_module,
+        "build_data_source",
+        lambda _source_name, _settings: SelectedRaceSource(),
+    )
+
+    def predict_selected_race(self, requested_race, **_kwargs):
+        assert requested_race.race_no == race.race_no
+        return SimpleNamespace(
+            race=requested_race,
+            ranked=[],
+            imputation_notes=[],
+            backtest=None,
+            model_notes=[],
+            disclaimer="test",
+        )
+
+    monkeypatch.setattr(web_app_module.PredictionEngine, "predict", predict_selected_race)
+
+    response = _client().get(
+        "/predict",
+        params={
+            "race_id": race.id,
+            "source": "tjk",
+            "date": target_date.isoformat(),
+            "city": "Ankara",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [(target_date, "Ankara", race.race_no)]
+    assert "5.50" in response.text
 
 
 def test_predict_renders_ranked_horses_and_disclaimer() -> None:
@@ -597,6 +1139,43 @@ def test_index_ml_mode_lists_ml_races(monkeypatch) -> None:
     assert "ML Yarislari" in response.text
     assert "ML Tahmin Gor" in response.text
     assert "Ankara" in response.text
+
+
+def test_index_ml_mode_uses_html_tjk_bulletin(monkeypatch) -> None:
+    target_date = date.today()
+    race = SampleDataSource().get_daily_races(target_date, "Ankara")[0]
+    calls = []
+
+    class HtmlBackedTjkSource(TJKHtmlDataSource):
+        def get_available_hippodromes(self, requested_date: date) -> list[str]:
+            assert requested_date == target_date
+            return ["Ankara"]
+
+        def get_daily_races_csv(self, requested_date: date, city: str) -> list[Race]:
+            raise AssertionError("ML bulletin must never use the CSV program")
+
+        def get_daily_races_html(self, requested_date: date, city: str, race_no=None) -> list[Race]:
+            calls.append((requested_date, city, race_no))
+            return [race]
+
+        def get_daily_races(self, *args, **kwargs) -> list[Race]:  # type: ignore[no-untyped-def]
+            raise AssertionError("ML bulletin should request the HTML program directly")
+
+    monkeypatch.setattr(
+        web_app_module,
+        "_bulletin_source_for_ml",
+        lambda _settings: HtmlBackedTjkSource(),
+    )
+
+    response = _client().get(
+        "/",
+        params={"source": "ml", "date": target_date.isoformat(), "city": "Ankara"},
+    )
+
+    assert response.status_code == 200
+    assert "ML Yarislari" in response.text
+    assert '<option value="Ankara" selected>' in response.text
+    assert calls == [(target_date, "Ankara", None)]
 
 
 def test_derive_horse_stats_metrics_uses_tjk_and_workout_data() -> None:
@@ -769,6 +1348,108 @@ def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
     assert response.status_code == 200
     assert "ML Tahmin -" in response.text
     assert "istatistiksel analize dayanir" in response.text
+
+
+def test_ml_prediction_overlays_bulletin_odds_without_changing_model_probabilities(monkeypatch) -> None:
+    target_date = date.today()
+    race = SampleDataSource().get_daily_races(target_date, "Ankara")[0]
+    for entry in race.entries:
+        entry.odds = None
+    race.entries[0].odds = 4.25
+    source = TJKHtmlDataSource()
+    bulletin_requests = []
+
+    def get_daily_races_html(
+        _target_date,
+        _city,
+        race_no=None,
+    ):
+        bulletin_requests.append((_target_date, _city))
+        return [race]
+
+    monkeypatch.setattr(source, "get_daily_races_html", get_daily_races_html)
+    stats_requests = []
+
+    def unavailable_stats(entry):
+        stats_requests.append(entry.horse_id)
+        raise DataSourceError("no local horse id")
+
+    monkeypatch.setattr(source, "get_horse_statistics", unavailable_stats)
+    weights = list(range(len(race.entries), 0, -1))
+    total_weight = sum(weights)
+    fake_pred = pd.DataFrame(
+        [
+            {
+                "race_id": f"{target_date:%Y%m%d}_01",
+                "horse_id": entry.horse_id,
+                "horse_name": entry.horse_name,
+                "number": entry.number,
+                "draw": entry.number,
+                "odds": 0.0,
+                "odds_missing": 1.0,
+                "calibrated_probability": weight / total_weight,
+                "confidence": 0.6,
+                "edge": 0.1,
+                "ev": -1.0,
+                "kelly_fraction": 0.2,
+                "bet_decision": "BET",
+                "track": "ANKARA",
+            }
+            for entry, weight in zip(race.entries, weights)
+        ]
+    )
+    first_horse_id = race.entries[0].horse_id
+    missing_history_row = fake_pred["horse_id"] == first_horse_id
+    fake_pred.loc[missing_history_row, "career_starts"] = 0
+    fake_pred.loc[missing_history_row, "history_missing"] = 1
+    other_races = []
+    for race_no in range(2, 8):
+        other_race = fake_pred.copy()
+        other_race["race_id"] = f"{target_date:%Y%m%d}_{race_no:02d}"
+        other_race["horse_id"] = other_race["horse_id"].astype(str) + f"-{race_no}"
+        other_races.append(other_race)
+    fake_pred = pd.concat([fake_pred, *other_races], ignore_index=True)
+    fake_optimizer = {
+        "summary": {"status": "OK", "budget": 500.0, "spent": 0.0, "column_count": 0},
+        "columns": [],
+    }
+    optimizer_race_ids = []
+
+    def fake_optimize(paths, requested_date, settings, budget, prediction):
+        optimizer_race_ids.extend(prediction["race_id"].astype(str).unique())
+        return fake_optimizer
+
+    monkeypatch.setattr(web_app_module, "_bulletin_source_for_ml", lambda _settings: source)
+    monkeypatch.setattr(web_app_module, "_predict_ml_for_date_with_recovery", lambda *args, **kwargs: fake_pred)
+    monkeypatch.setattr(web_app_module, "optimize_for_date", fake_optimize)
+    monkeypatch.setattr(web_app_module, "_build_ml_analysis_context", lambda *args: {})
+
+    response = _client().get(
+        "/predict",
+        params={
+            "race_id": f"{target_date:%Y%m%d}_01",
+            "source": "ml",
+            "date": target_date.isoformat(),
+            "city": "Ankara",
+        },
+    )
+
+    assert response.status_code == 200
+    assert bulletin_requests == [(target_date, "Ankara")]
+    assert stats_requests == [entry.horse_id for entry in race.entries]
+    assert optimizer_race_ids == [f"{target_date:%Y%m%d}_01"]
+    assert "Veri Durumu" in response.text
+    assert "TJK gecmisi cekilemedi" in response.text
+    assert "Geçmiş verisi olmayan atlar var." in response.text
+    assert "GEÇMİŞ VERİ EKSİK" in response.text
+    rows = BeautifulSoup(response.text, "html.parser").find("table").find_all("tr")
+    first_cells = rows[1].find_all("td")
+    assert first_cells[3].get_text(strip=True) == "GEÇMİŞ VERİ EKSİK"
+    assert first_cells[4].get_text(strip=True) == "4.25"
+    assert first_cells[5].get_text(strip=True) != "0.00%"
+    assert first_cells[11].get_text(strip=True) == "-"
+    assert first_cells[-1].get_text(strip=True) == "NO_BET"
+    assert rows[2].find_all("td")[4].get_text(strip=True) == "-"
 
 
 def test_predict_ml_mode_falls_back_when_city_track_mismatch(monkeypatch) -> None:

@@ -1,11 +1,82 @@
 [
   {
+    "job_id": "dbb0a57db7fd4445890547d1d0996c8e",
+    "status": "completed",
+    "mode": "online",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "f42972ab3b0a4e9caa3228eafd6019d9",
+    "status": "completed",
+    "mode": "online",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "5cc9a6f466e54c11966fe2042fe07152",
+    "status": "completed",
+    "mode": "online",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "d4fd07905e1d4fe1ad032c369b5d3c45",
+    "status": "completed",
+    "mode": "online",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-09-08",
+    "end_date": "2026-09-16"
+  },
+  {
     "job_id": "pause-route-job",
     "status": "running",
+    "mode": "online",
     "message": "Egitim duraklatiliyor...",
     "retry_targets": [],
     "can_accept_partial": false,
     "start_date": "2026-09-09",
     "end_date": "2026-09-10"
+  },
+  {
+    "job_id": "cd247e7d93b5487f9bddad2b746ad43d",
+    "status": "completed",
+    "mode": "online",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "e33d65fd66924f70800a85bc2acacf43",
+    "status": "failed",
+    "mode": "local",
+    "message": "Lokal egitim: Temiz veri bos veri uretti. Secilen tarih araliginda etiketli TJK yarisi bulunamadi.",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-05-01",
+    "end_date": "2026-06-01"
+  },
+  {
+    "job_id": "9f1397e87d424b28983c4fda33177e12",
+    "status": "completed",
+    "mode": "local",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
   }
 ]
