@@ -47,6 +47,7 @@ def save_phase3_artifact(artifact: BenterTwoStageArtifact, calibrator_payload: d
             "stage1_model": artifact.stage1_model,
             "stage2_model": artifact.stage2_model,
             "feature_columns": artifact.feature_columns,
+            "placer_model": artifact.placer_model,
             "logistic_weight": artifact.logistic_weight,
             "calibrator": calibrator_payload,
         },
@@ -78,6 +79,7 @@ def load_phase3_artifact(
             stage1_model=payload["stage1_model"],
             stage2_model=payload["stage2_model"],
             feature_columns=list(payload["feature_columns"]),
+            placer_model=payload.get("placer_model"),
             logistic_weight_hint=float(payload.get("logistic_weight", 0.0) or 0.0),
         )
     else:

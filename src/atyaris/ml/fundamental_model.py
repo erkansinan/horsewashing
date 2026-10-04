@@ -82,12 +82,13 @@ def fit_conditional_logit(
     coefficient_sign_constraints: dict[str, int] | None = None,
     checkpoint_path: str | Path | None = None,
     checkpoint_interval: int = 50,
+    label_col: str = "is_winner",
 ) -> ConditionalLogitModel:
     if frame.empty:
         raise ValueError("fit_conditional_logit icin bos veri verildi")
 
     x_raw = frame[feature_columns].to_numpy(dtype=float)
-    y = frame["is_winner"].to_numpy(dtype=float)
+    y = frame[label_col].to_numpy(dtype=float)
     groups = _race_groups(frame)
 
     x, mean_, scale_ = _standardize_fit(x_raw)
@@ -120,7 +121,7 @@ def fit_conditional_logit(
         sign_constraints[feature_columns.index(feature)] = sign
 
     def _loss(frame: pd.DataFrame, probabilities: np.ndarray) -> float:
-        labels = frame["is_winner"].to_numpy(dtype=float)
+        labels = frame[label_col].to_numpy(dtype=float)
         winner_indices = np.flatnonzero(labels > 0.5)
         if winner_indices.size == 0:
             return 0.0
@@ -133,7 +134,7 @@ def fit_conditional_logit(
     if validation_frame is not None and not validation_frame.empty:
         validation_x_raw = validation_frame[feature_columns].to_numpy(dtype=float)
         validation_x = _standardize_apply(validation_x_raw, mean_, scale_)
-        validation_y = validation_frame["is_winner"].to_numpy(dtype=float)
+        validation_y = validation_frame[label_col].to_numpy(dtype=float)
         validation_groups = _race_groups(validation_frame)
 
     for iteration in range(start_iteration, max_iter):

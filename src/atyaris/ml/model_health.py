@@ -67,7 +67,7 @@ EXPECTED_FEATURE_SIGNS = {
     "jockey_horse_combo_wins": 1,
     "workout_best_speed_index": 1,
     "history_avg_finish_position": -1,
-    "weight": -1,
+    # Absolute carried weight is confounded by race class and horse quality.
     "weight_deviation": -1,
 }
 

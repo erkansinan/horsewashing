@@ -90,6 +90,26 @@ def test_highest_odds_selection_is_limited_to_top_three_place_probabilities() ->
     assert result.loc[result["predicted_highest_odds_placer"], "horse_id"].tolist() == ["H3"]
 
 
+def test_direct_placer_model_selection_is_not_limited_to_top_three_candidates() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["R1"] * 4,
+            "horse_id": ["H1", "H2", "H3", "H4"],
+            "place_probability": [0.8, 0.7, 0.6, 0.1],
+            "placer_probability": [0.1, 0.2, 0.3, 0.4],
+            "odds": [4.0, 8.0, 12.0, 100.0],
+        }
+    )
+
+    result = mark_highest_odds_placer_predictions(
+        frame,
+        selection_probability_col="placer_probability",
+    )
+
+    assert set(result.loc[result["predicted_top3"], "horse_id"]) == {"H1", "H2", "H3"}
+    assert result.loc[result["predicted_highest_odds_placer"], "horse_id"].tolist() == ["H4"]
+
+
 def test_probability_floor_prevents_exact_zero_after_calibration() -> None:
     result = apply_probability_floor(np.array([0.8, 0.0, 0.0]))
 

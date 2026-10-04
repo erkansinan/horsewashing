@@ -291,12 +291,29 @@ def load_training_history(
         previous = previous_by_id.get(run["id"])
         current_features = set(run["metrics"].get("feature_columns", []))
         previous_features = set(previous["metrics"].get("feature_columns", [])) if previous else set()
+        current_placer_features = set(
+            run["metrics"].get("highest_odds_placer_feature_columns", [])
+        )
+        previous_placer_features = (
+            set(previous["metrics"].get("highest_odds_placer_feature_columns", []))
+            if previous
+            else set()
+        )
         run["changes_from_previous"] = {
             "previous_model_version": previous["model_version"] if previous else None,
             "added_features": sorted(current_features - previous_features) if previous else [],
             "removed_features": sorted(previous_features - current_features) if previous else [],
             "feature_count_change": (
                 len(current_features) - len(previous_features) if previous else None
+            ),
+            "highest_odds_placer_added_features": (
+                sorted(current_placer_features - previous_placer_features) if previous else []
+            ),
+            "highest_odds_placer_removed_features": (
+                sorted(previous_placer_features - current_placer_features) if previous else []
+            ),
+            "highest_odds_placer_feature_count_change": (
+                len(current_placer_features) - len(previous_placer_features) if previous else None
             ),
             "blend_weight_change": (
                 run["blend_weight"] - previous["blend_weight"]

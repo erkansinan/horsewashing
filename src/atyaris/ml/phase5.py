@@ -9,6 +9,7 @@ import pandas as pd
 
 from atyaris.config import Settings
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
+from atyaris.ml.features import TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS
 from atyaris.ml.modeling import load_phase3_artifact
 from atyaris.ml.pipeline import (
     Phase1Paths,
@@ -64,6 +65,9 @@ def register_training_run(
             "training_rows": int(len(feature_frame)),
             "feature_count": len(tracked_features),
             "feature_columns": tracked_features,
+            "highest_odds_placer_target": "target_highest_odds_placer",
+            "highest_odds_placer_feature_count": len(TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS),
+            "highest_odds_placer_feature_columns": TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS,
         },
         status="candidate",
     )

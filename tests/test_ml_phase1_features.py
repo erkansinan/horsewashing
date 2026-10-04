@@ -9,6 +9,7 @@ import pytest
 from atyaris.ml.features import (
     FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS,
     LEAKAGE_COLUMNS,
+    TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS,
     TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
     build_leakage_safe_features,
     preprocess_dataset,
@@ -168,6 +169,59 @@ def test_placer_labels_are_available_but_never_model_features() -> None:
         assert target in set(eligible["horse_id"].astype(str))
         target_odds = eligible.loc[eligible["horse_id"].astype(str) == target, "odds"].iloc[0]
         assert target_odds == pd.to_numeric(eligible["odds"], errors="coerce").max()
+
+
+def test_highest_odds_placer_features_use_pre_race_odds_and_prior_history() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "race_id": "R1",
+                "date": "2025-01-01",
+                "race_datetime": "2025-01-01 12:00:00",
+                "horse_id": "H1",
+                "draw": 1,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 5,
+                "odds": 10.0,
+                "market_probability": 0.1,
+                "finish_position": 2,
+                "is_winner": 0,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+            {
+                "race_id": "R2",
+                "date": "2025-01-10",
+                "race_datetime": "2025-01-10 12:00:00",
+                "horse_id": "H1",
+                "draw": 2,
+                "weight": 56.0,
+                "distance": 1400,
+                "field_size": 5,
+                "odds": 8.0,
+                "market_probability": 0.1,
+                "finish_position": 1,
+                "is_winner": 1,
+                "early_pace": 0.2,
+                "surface": "KUM",
+                "track": "ANKARA",
+                "track_condition": "NORMAL",
+            },
+        ]
+    )
+
+    built = build_leakage_safe_features(frame)
+    first, second = built.frame.sort_values("race_datetime").itertuples(index=False)
+
+    assert set(TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS).issubset(built.frame.columns)
+    assert first.history_longshot_starts == 0.0
+    assert second.history_longshot_starts == 1.0
+    assert second.history_longshot_place_rate > first.history_longshot_place_rate
+    assert second.odds_rank_fraction == 0.0
+    assert not set(TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS).intersection(LEAKAGE_COLUMNS)
 
 
 def test_features_use_only_previous_races_for_same_day_target() -> None:

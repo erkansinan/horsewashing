@@ -150,6 +150,7 @@ def test_predict_page_shows_failed_model_health_and_blocks_ml(monkeypatch, tmp_p
     assert "passed: false" in response.text
     assert "test_feature_signs" in response.text
     assert "ML modeli hazir degil" in response.text
+    assert "istatistikleri su an sinirli" not in response.text
     assert "passed=False" in caplog.text
 
 
@@ -187,7 +188,12 @@ def test_training_history_api_and_html_show_model_changes(monkeypatch, tmp_path)
         holdout_days=20,
         calibration_method="isotonic",
         blend_weight=0.5,
-        metrics={"feature_count": 2, "feature_columns": ["speed", "form"]},
+        metrics={
+            "feature_count": 5,
+            "feature_columns": ["speed", "form"],
+            "highest_odds_placer_feature_count": 17,
+            "highest_odds_placer_feature_columns": ["odds_log", "history_longshot_place_rate"],
+        },
     )
     register_model_run(
         str(tracking_db),
@@ -198,7 +204,12 @@ def test_training_history_api_and_html_show_model_changes(monkeypatch, tmp_path)
         holdout_days=30,
         calibration_method="platt",
         blend_weight=0.7,
-        metrics={"feature_count": 2, "feature_columns": ["speed", "pace"]},
+        metrics={
+            "feature_count": 6,
+            "feature_columns": ["speed", "pace"],
+            "highest_odds_placer_feature_count": 18,
+            "highest_odds_placer_feature_columns": ["odds_log", "odds_rank_fraction"],
+        },
     )
     settings = Settings(phase5_tracking_db_path=str(tracking_db))
     monkeypatch.setattr(web_app_module, "get_settings", lambda: settings)
@@ -211,6 +222,12 @@ def test_training_history_api_and_html_show_model_changes(monkeypatch, tmp_path)
     assert payload["latest_training"]["model_version"] == "model_new"
     assert payload["latest_training"]["changes_from_previous"]["added_features"] == ["pace"]
     assert payload["latest_training"]["changes_from_previous"]["removed_features"] == ["form"]
+    assert payload["latest_training"]["changes_from_previous"][
+        "highest_odds_placer_added_features"
+    ] == ["odds_rank_fraction"]
+    assert payload["latest_training"]["changes_from_previous"][
+        "highest_odds_placer_removed_features"
+    ] == ["history_longshot_place_rate"]
     assert payload["latest_training"]["changes_from_previous"]["calibration_changed"] is True
     assert payload["latest_training"]["model_health"]["metrics"]["test"]["top1"] == 0.3
 
@@ -220,7 +237,13 @@ def test_training_history_api_and_html_show_model_changes(monkeypatch, tmp_path)
     assert "Son eğitim tarihi" in html_response.text
     assert "model_new" in html_response.text
     assert "pace" in html_response.text
+    assert "odds_rank_fraction" in html_response.text
+    assert "history_longshot_place_rate" in html_response.text
+    assert "Yüksek oranlı plase feature" in html_response.text
+    assert "<td>6</td>" in html_response.text
+    assert "<td>18</td>" in html_response.text
     assert "Model sağlık raporu" in html_response.text
+    assert "P(win) Feature Importance (6 features)" in html_response.text
     assert "Baseline karşılaştırması" in html_response.text
     assert "Kalibrasyon eğrisi" in html_response.text
     assert "speed" in html_response.text
@@ -1301,6 +1324,7 @@ def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
                 "rank": 1,
                 "odds": 2.5,
                 "calibrated_probability": 0.34,
+                "placer_probability": 0.20,
                 "confidence": 0.88,
                 "edge": 0.12,
                 "ev": 0.10,
@@ -1313,6 +1337,7 @@ def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
                 "rank": 2,
                 "odds": 4.1,
                 "calibrated_probability": 0.23,
+                "placer_probability": 0.80,
                 "confidence": 0.71,
                 "edge": -0.01,
                 "ev": -0.02,
@@ -1342,12 +1367,20 @@ def test_predict_ml_mode_renders_ml_table_and_disclaimer(monkeypatch) -> None:
     client = _client()
     response = client.get(
         "/predict",
-        params={"race_id": "20260830_01", "source": "ml", "date": date.today().isoformat()},
+        params={
+            "race_id": "20260830_01",
+            "source": "ml",
+            "date": date.today().isoformat(),
+            "sort_by": "placer_probability",
+            "sort_order": "desc",
+        },
     )
 
     assert response.status_code == 200
     assert "ML Tahmin -" in response.text
     assert "istatistiksel analize dayanir" in response.text
+    assert "sort_by=placer_probability" in response.text
+    assert response.text.index("80.00%") < response.text.index("20.00%")
 
 
 def test_ml_prediction_overlays_bulletin_odds_without_changing_model_probabilities(monkeypatch) -> None:
@@ -1447,7 +1480,7 @@ def test_ml_prediction_overlays_bulletin_odds_without_changing_model_probabiliti
     assert first_cells[3].get_text(strip=True) == "GEÇMİŞ VERİ EKSİK"
     assert first_cells[4].get_text(strip=True) == "4.25"
     assert first_cells[5].get_text(strip=True) != "0.00%"
-    assert first_cells[11].get_text(strip=True) == "-"
+    assert first_cells[12].get_text(strip=True) == "-"
     assert first_cells[-1].get_text(strip=True) == "NO_BET"
     assert rows[2].find_all("td")[4].get_text(strip=True) == "-"
 

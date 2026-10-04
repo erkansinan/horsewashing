@@ -325,6 +325,7 @@
     <tr><th>Holdout günü</th><td>{{ latest.holdout_days }}</td></tr>
     <tr><th>Kalibrasyon</th><td>{{ latest.calibration_method }}</td></tr>
     <tr><th>TJK feature sayısı</th><td>{{ latest.metrics.get('feature_count', '-') }}</td></tr>
+    <tr><th>En yüksek oranlı plase feature sayısı</th><td>{{ latest.metrics.get('highest_odds_placer_feature_count', '-') }}</td></tr>
     <tr><th>Eğitim satırı</th><td>{{ latest.metrics.get('training_rows', '-') }}</td></tr>
   </table>
 </section>
@@ -375,7 +376,8 @@
   </table>
   {% else %}<p>Kalibrasyon eğrisi verisi bulunamadı.</p>{% endif %}
 
-  <h3>Feature importance</h3>
+  <h3>P(win) Feature Importance ({{ latest.metrics.get('feature_count', '-') }} features)</h3>
+  <p>Bu katsayılar P(win) modeline aittir; yüksek oranlı plase modeli ayrı feature sayısıyla yukarıda listelenir.</p>
   {% if health.feature_importance %}
   <table>
     <thead><tr><th>Feature</th><th>Importance</th><th>Katsayı</th></tr></thead>
@@ -394,9 +396,12 @@
   <thead>
     <tr>
       <th>Model</th><th>Eğitim tarihi</th><th>Veri aralığı</th><th>Durum</th>
-      <th>Eğitim satırı</th><th>TJK feature</th><th>Holdout</th><th>Kalibrasyon</th><th>Blend</th>
+      <th>Eğitim satırı</th><th>P(win) feature</th><th>Yüksek oranlı plase feature</th>
+      <th>Holdout</th><th>Kalibrasyon</th><th>Blend</th>
       <th>Test log loss</th><th>Test Top-1</th><th>Önceki model</th>
-      <th>Eklenen feature</th><th>Çıkan feature</th><th>Kalibrasyon değişti</th>
+      <th>Eklenen P(win) feature</th><th>Çıkan P(win) feature</th>
+      <th>Eklenen yüksek oranlı plase feature</th><th>Çıkan yüksek oranlı plase feature</th>
+      <th>Kalibrasyon değişti</th>
     </tr>
   </thead>
   <tbody>
@@ -408,6 +413,7 @@
       <td>{{ run.status }}</td>
       <td>{{ run.metrics.get('training_rows', '-') }}</td>
       <td>{{ run.metrics.get('feature_count', '-') }}</td>
+      <td>{{ run.metrics.get('highest_odds_placer_feature_count', '-') }}</td>
       <td>{{ run.holdout_days or '-' }}</td>
       <td>{{ run.calibration_method or '-' }}</td>
       <td>{{ '%.3f'|format(run.blend_weight) if run.blend_weight is not none else '-' }}</td>
@@ -424,6 +430,8 @@
       <td>{{ run.changes_from_previous.previous_model_version or '-' }}</td>
       <td>{{ run.changes_from_previous.added_features | join(', ') or '-' }}</td>
       <td>{{ run.changes_from_previous.removed_features | join(', ') or '-' }}</td>
+      <td>{{ run.changes_from_previous.highest_odds_placer_added_features | join(', ') or '-' }}</td>
+      <td>{{ run.changes_from_previous.highest_odds_placer_removed_features | join(', ') or '-' }}</td>
       <td>{{ 'Evet' if run.changes_from_previous.calibration_changed else 'Hayır' if run.changes_from_previous.calibration_changed is not none else '-' }}</td>
     </tr>
   {% endfor %}

@@ -146,8 +146,9 @@ def mark_highest_odds_placer_predictions(
     place_probability_col: str = "place_probability",
     odds_col: str = "odds",
     top_k: int = 3,
+    selection_probability_col: str | None = None,
 ) -> pd.DataFrame:
-    """Mark the highest-odds runner among the model's top-k place candidates."""
+    """Select a direct target-model pick, or fall back to the top-k place candidates."""
     out = frame.copy()
     if place_probability_col not in out.columns:
         place_probability_col = "top3_probability" if "top3_probability" in out else "calibrated_probability"
@@ -163,6 +164,19 @@ def mark_highest_odds_placer_predictions(
         out.loc[indices, "predicted_place_rank"] = ranks
         candidate_indices = ranks[ranks <= max(1, top_k)].index
         out.loc[candidate_indices, "predicted_top3"] = True
+        if selection_probability_col and selection_probability_col in out.columns:
+            candidates = out.loc[indices].copy()
+            if odds_col in candidates:
+                candidates["_odds"] = pd.to_numeric(candidates[odds_col], errors="coerce")
+                candidates = candidates[candidates["_odds"] > 1.0]
+            if candidates.empty:
+                continue
+            scores = pd.to_numeric(
+                candidates[selection_probability_col],
+                errors="coerce",
+            ).fillna(-1.0)
+            out.loc[scores.idxmax(), "predicted_highest_odds_placer"] = True
+            continue
         if odds_col not in out.columns:
             continue
         candidates = out.loc[candidate_indices].copy()

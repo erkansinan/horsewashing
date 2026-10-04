@@ -31,6 +31,10 @@ from atyaris.ml.market_blend import (
     predict_two_stage_probability,
 )
 from atyaris.ml.modeling import evaluate_predictions
+from atyaris.ml.placer_model import (
+    fit_highest_odds_placer_model,
+    predict_highest_odds_placer_probability,
+)
 
 
 @dataclass
@@ -374,7 +378,10 @@ def _highest_odds_placer_metrics(
     conditional_second_stage: list[float] = []
     market_exact: list[float] = []
     target_longshot_exact: list[float] = []
+    place_model_longshot_exact: list[float] = []
+    direct_place_agreement: list[float] = []
     target_longshot_count = 0
+    place_model_exact: list[float] = []
 
     for race_id, group in frame.groupby("race_id", sort=False):
         targets = group["target_highest_odds_placer"].dropna()
@@ -385,7 +392,22 @@ def _highest_odds_placer_metrics(
         if target_row.empty:
             continue
 
+        place_model_pick = group[group["place_top3_highest_odds_placer"]].head(1)
+        place_model_exact.append(
+            float(
+                not place_model_pick.empty
+                and str(place_model_pick.iloc[0]["horse_id"]) == target
+            )
+        )
         model_pick = group[group["predicted_highest_odds_placer"]].head(1)
+        direct_place_agreement.append(
+            float(
+                not place_model_pick.empty
+                and not model_pick.empty
+                and str(place_model_pick.iloc[0]["horse_id"])
+                == str(model_pick.iloc[0]["horse_id"])
+            )
+        )
         if model_pick.empty:
             exact = 0.0
             model_placed.append(0.0)
@@ -415,6 +437,7 @@ def _highest_odds_placer_metrics(
         if "odds_slice" in target_row.columns and str(target_row.iloc[0]["odds_slice"]) == "longshot":
             target_longshot_count += 1
             target_longshot_exact.append(exact)
+            place_model_longshot_exact.append(place_model_exact[-1])
 
     race_count = len(exact_matches)
     exact_rate = float(np.mean(list(exact_matches.values()))) if race_count else 0.0
@@ -432,6 +455,15 @@ def _highest_odds_placer_metrics(
             ),
             "model_second_stage_exact_match_given_target_captured": conditional_rate,
             "model_second_stage_error_rate_given_target_captured": 1.0 - conditional_rate,
+            "place_model_top3_odds_baseline_exact_match_rate": (
+                float(np.mean(place_model_exact)) if place_model_exact else 0.0
+            ),
+            "direct_model_delta_vs_place_model_baseline": (
+                exact_rate - float(np.mean(place_model_exact)) if place_model_exact else 0.0
+            ),
+            "direct_vs_place_model_pick_agreement_rate": (
+                float(np.mean(direct_place_agreement)) if direct_place_agreement else 0.0
+            ),
             "market_baseline_exact_match_rate": market_exact_rate,
             "market_baseline_marked_placer_rate": (
                 float(np.mean(market_placed)) if market_placed else 0.0
@@ -440,6 +472,16 @@ def _highest_odds_placer_metrics(
             "target_longshot_races": target_longshot_count,
             "target_longshot_exact_match_rate": (
                 float(np.mean(target_longshot_exact)) if target_longshot_exact else 0.0
+            ),
+            "place_model_top3_odds_baseline_longshot_exact_match_rate": (
+                float(np.mean(place_model_longshot_exact))
+                if place_model_longshot_exact
+                else 0.0
+            ),
+            "direct_model_longshot_delta_vs_place_model_baseline": (
+                float(np.mean(target_longshot_exact) - np.mean(place_model_longshot_exact))
+                if place_model_longshot_exact
+                else 0.0
             ),
         },
         exact_matches,
@@ -918,6 +960,7 @@ def walk_forward_backtest(
                 selected_feature_columns,
                 stage1_coefficient_sign_constraints=stage1_coefficient_sign_constraints,
             )
+            cached_artifact.placer_model = fit_highest_odds_placer_model(core_train_df)
             calibration_form_probability = predict_two_stage_probability(
                 cached_artifact,
                 calibration_df,
@@ -1014,7 +1057,21 @@ def walk_forward_backtest(
             raw_place_probability,
             group_ids=pred["race_id"].to_numpy(),
         )
-        pred = mark_highest_odds_placer_predictions(pred)
+        place_candidate_predictions = mark_highest_odds_placer_predictions(pred)
+        pred["place_top3_highest_odds_placer"] = place_candidate_predictions[
+            "predicted_highest_odds_placer"
+        ]
+        if artifact.placer_model is not None:
+            pred["placer_probability"] = predict_highest_odds_placer_probability(
+                artifact.placer_model,
+                pred,
+            )
+            pred = mark_highest_odds_placer_predictions(
+                pred,
+                selection_probability_col="placer_probability",
+            )
+        else:
+            pred = place_candidate_predictions
         market_predictions = mark_highest_odds_placer_predictions(
             pred,
             place_probability_col="market_probability_used",
@@ -1116,11 +1173,16 @@ def walk_forward_backtest(
                 "model_first_stage_target_recall": 0.0,
                 "model_second_stage_exact_match_given_target_captured": 0.0,
                 "model_second_stage_error_rate_given_target_captured": 0.0,
+                "place_model_top3_odds_baseline_exact_match_rate": 0.0,
+                "direct_model_delta_vs_place_model_baseline": 0.0,
+                "direct_vs_place_model_pick_agreement_rate": 0.0,
                 "market_baseline_exact_match_rate": 0.0,
                 "market_baseline_marked_placer_rate": 0.0,
                 "model_vs_market_exact_match_delta": 0.0,
                 "target_longshot_races": 0,
                 "target_longshot_exact_match_rate": 0.0,
+                "place_model_top3_odds_baseline_longshot_exact_match_rate": 0.0,
+                "direct_model_longshot_delta_vs_place_model_baseline": 0.0,
             },
             race_highest_odds_placer_exact_match={},
             race_market_highest_odds_placer_exact_match={},

@@ -230,6 +230,7 @@ Bu repo, literaturde denenmis iki asamali Benter mimarisini uygular:
 
 - Asama 1 (fundamental_model): Yaris ici goreli kazanim olasiliklari ureten conditional logit.
 - Asama 2 (market_blend): Asama 1 olasiliklarini piyasa (ganyan) bilgisiyle ikinci bir kosullu modelde birlestirme.
+- En yuksek oranli plase modeli (`placer_model.py`): Ayri bir kosullu model, her kosuda ilk 3'e giren atlar arasindaki en yuksek ganyanli ati dogrudan hedefler. Kazanan/plase olasiligindan turetilmis bir secim degildir.
 - Gamma-ayarlamali Harville (harville.py): Fold oncesi son kalibrasyon penceresinden ayri ikinci/ucuncu sira gamma katsayilari ogrenilir; ham Harville olasiliklari da walk-forward raporunda karsilastirilir.
 - Kalibrasyon (calibration.py): Platt veya isotonic ile olasilik duzeltmesi.
 - EV + Fractional Kelly (ev_kelly.py): Value bet filtreleme ve bahis boyutu onerisi.
@@ -285,6 +286,11 @@ atyaris ml learn --start-date 2026-08-01 --end-date 2026-09-06
 
 Bu komut `raw -> preprocess -> features -> train -> backtest` akisinin tamamini
 calistirir ve yeni model versiyonunu deney takip veritabanina kaydeder.
+En yuksek oranli plase secimi de ayri zaman-sirali hedefle egitilir; walk-forward
+raporu bu modelin tam eslesme oranini hem piyasa/top-3 secimleriyle hem de dogrudan
+modelden once kullanilan "Top-3 adaylari icinden en yuksek ganyan" yontemiyle
+karsilastirir. Tahmin tablosundaki `P(En yüksek oranlı plase)` degeri, kosudaki
+hedef atin model secim olasiligidir; `P(Top3)` ile ayni sey degildir.
 
 ### Gercek TJK egitiminde checkpoint ve devam etme
 
@@ -425,6 +431,16 @@ kullanilir.
 | `history_avg_handicap_points` | Gecmis kosulardaki ortalama HP degeridir. |
 | `history_avg_race_time_seconds` | Gecmis derecelerin saniye cinsinden ortalamasidir. |
 | `history_avg_prize` | TJK gecmis satirlarindaki sayisal ikramiye ortalamasidir. |
+
+#### En yuksek oranli plase secimi
+
+Bu hedef, her kosuda yalnizca ilk 3'e girenler arasindaki en yuksek ganyanli
+ati secer ve ayri bir race-conditional model ile egitilir. Modelin girdileri
+arasında ganyan logaritmasi, kosu icindeki ganyan sirasi/medyan farki ve atın
+onceki en az 5.00 ganyanli kosularindaki Top-3 orani vardir. Gecmis oranli
+plase orani, az sayida kosusu olan atlarda asiri guven olusmamasi icin %30
+oncul ve 3 kosuluk guc ile yumusatilir. Bu feature'lar her tahmin tarihinde
+yalnizca o tarihten onceki kosular kullanilarak uretilir.
 
 TJK gecmis satirlarindaki `S20` degerinin resmi anlami mevcut kaynaklarda
 dogrulanamamistir. Ham deger arsivde korunur, ancak anlami teyit edilene kadar

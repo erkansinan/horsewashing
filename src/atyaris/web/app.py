@@ -90,6 +90,7 @@ _ML_SORTABLE_FIELDS = {
     "place2_probability": "P(2.)",
     "place3_probability": "P(3.)",
     "top3_probability": "P(Top3)",
+    "placer_probability": "P(En yüksek oranlı plase)",
     "confidence": "Guven",
     "edge": "Edge",
     "ev": "EV",
@@ -964,6 +965,8 @@ def _ml_sort_value(row, sort_by: str):  # type: ignore[no-untyped-def]
         return _safe_float(row.get("place3_probability"), -1.0)
     if sort_by == "top3_probability":
         return _safe_float(row.get("place_probability"), _safe_float(row.get("top3_probability"), -1.0))
+    if sort_by == "placer_probability":
+        return _safe_float(row.get("placer_probability"), -1.0)
     if sort_by == "confidence":
         return _safe_float(row.get("confidence"), -1.0)
     if sort_by == "edge":
@@ -2521,7 +2524,7 @@ def create_app() -> FastAPI:
         city: str = Query(""),
         sort_by: str = Query(
             "calibrated_probability",
-            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|edge|kelly_fraction|form_strength)$",
+            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|placer_probability|edge|kelly_fraction|form_strength)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
@@ -2699,7 +2702,14 @@ def create_app() -> FastAPI:
                         )
                         rec["place_probability"] = rec["top3_probability"]
 
-                    marked_records = mark_highest_odds_placer_predictions(pd.DataFrame(records))
+                    marked_records = mark_highest_odds_placer_predictions(
+                        pd.DataFrame(records),
+                        selection_probability_col=(
+                            "placer_probability"
+                            if any("placer_probability" in record for record in records)
+                            else None
+                        ),
+                    )
                     for record, marked_record in zip(records, marked_records.to_dict(orient="records")):
                         record["predicted_place_rank"] = marked_record["predicted_place_rank"]
                         record["predicted_top3"] = marked_record["predicted_top3"]
@@ -3475,10 +3485,7 @@ def create_app() -> FastAPI:
         except (InvalidSourceError, ValueError) as exc:
             error = f"Gecersiz istek: {exc}"
         except RuntimeError as exc:
-            error = (
-                f"Tahmin uretilemedi: {exc} "
-                "(TJK kaynaginda at istatistikleri su an sinirli/erisilemez olabilir)."
-            )
+            error = f"Tahmin uretilemedi: {exc}"
         except DataSourceError as exc:
             error = f"Veri kaynagi hatasi: {exc}"
         except Exception as exc:  # noqa: BLE001

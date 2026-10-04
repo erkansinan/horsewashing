@@ -14,6 +14,7 @@ LEAKAGE_COLUMNS = {
     "is_winner",
     "is_placed",
     "target_highest_odds_placer",
+    "is_highest_odds_placer",
     "latent_true_win_probability",
 }
 
@@ -50,6 +51,27 @@ TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
     "class_drop_flag",
     "workout_sudden_improvement",
     "rest_optimal_fit",
+]
+
+TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS = [
+    "handicap_points",
+    "draw",
+    "weight",
+    "class_drop_flag",
+    "workout_sudden_improvement",
+    "rest_optimal_fit",
+    "form_avg_5",
+    "last_run_perf",
+    "career_starts",
+    "career_places",
+    "history_longshot_starts",
+    "history_longshot_place_rate",
+    "market_probability_norm",
+    "odds_log",
+    "odds_rank_fraction",
+    "odds_vs_field_median",
+    "odds_rank_form_interaction",
+    "odds_rank_longshot_place_interaction",
 ]
 
 FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS = {
@@ -114,6 +136,28 @@ def _derive_placer_labels(frame: pd.DataFrame) -> pd.DataFrame:
             race_indices = frame.index[frame["race_id"] == race_id]
             labels.loc[race_indices, "target_highest_odds_placer"] = str(horse_id)
     return labels
+
+
+def _add_highest_odds_placer_features(frame: pd.DataFrame) -> None:
+    defaults = {
+        "history_longshot_starts": 0.0,
+        "history_longshot_place_rate": 0.3,
+    }
+    for column, default in defaults.items():
+        frame[column] = pd.to_numeric(
+            frame.get(column, pd.Series(default, index=frame.index)),
+            errors="coerce",
+        ).fillna(default)
+
+    form = pd.to_numeric(
+        frame.get("form_avg_5", pd.Series(0.45, index=frame.index)),
+        errors="coerce",
+    ).fillna(0.45)
+    odds_rank = pd.to_numeric(frame["odds_rank_fraction"], errors="coerce").fillna(0.0)
+    frame["odds_rank_form_interaction"] = odds_rank * form
+    frame["odds_rank_longshot_place_interaction"] = (
+        odds_rank * frame["history_longshot_place_rate"]
+    )
 
 
 def preprocess_dataset(frame: pd.DataFrame) -> pd.DataFrame:
@@ -232,6 +276,17 @@ def build_leakage_safe_features(
             where=best_time.to_numpy(dtype=float) > 0.0,
         )
 
+    valid_odds = df["odds"].where(df["odds"] > 1.0)
+    log_odds = np.log(valid_odds)
+    odds_rank = valid_odds.groupby(df["race_id"]).rank(method="average", ascending=True)
+    field_size = df.groupby("race_id")["race_id"].transform("size")
+    df["odds_log"] = log_odds.fillna(0.0)
+    df["odds_rank_fraction"] = (
+        (odds_rank - 1.0) / (field_size - 1.0).clip(lower=1.0)
+    ).fillna(0.0)
+    field_median_log_odds = log_odds.groupby(df["race_id"]).transform("median")
+    df["odds_vs_field_median"] = (log_odds - field_median_log_odds).fillna(0.0)
+
     # Real TJK ingestion computes point-in-time features using the resolved
     # source horse ID. Preserve those values for both labelled and prediction
     # rows; rebuilding by race-local horse_id can lose the horse's history.
@@ -252,6 +307,7 @@ def build_leakage_safe_features(
         feat_df = df.copy()
         grp_sum = feat_df.groupby("race_id")["market_probability"].transform("sum").replace(0.0, 1.0)
         feat_df["market_probability_norm"] = feat_df["market_probability"] / grp_sum
+        _add_highest_odds_placer_features(feat_df)
         race_mean_form = feat_df.groupby("race_id")["form_avg_5"].transform("mean")
         race_sum_form = feat_df.groupby("race_id")["form_avg_5"].transform("sum")
         race_count = feat_df.groupby("race_id")["horse_id"].transform("count").replace(0, 1)
@@ -376,6 +432,14 @@ def build_leakage_safe_features(
         track_fit = _smoothed_mean(same_track_perf)
         condition_fit = _smoothed_mean(same_condition_perf)
         distance_fit = _smoothed_mean(similar_distance_perf)
+        longshot_history = [item for item in h if float(item.get("odds", 0.0)) >= 5.0]
+        longshot_starts = len(longshot_history)
+        longshot_places = sum(
+            1 for item in longshot_history if bool(item.get("is_placed", False))
+        )
+        history_longshot_place_rate = (
+            longshot_places + 0.3 * 3.0
+        ) / (longshot_starts + 3.0)
 
         mprob = float(row.market_probability) if pd.notnull(row.market_probability) else 0.1
         implied_prob = 1.0 / max(1.01, float(row.odds)) if pd.notnull(row.odds) else mprob
@@ -422,9 +486,14 @@ def build_leakage_safe_features(
                 "track_fit": track_fit,
                 "history_avg_field_size": float(np.mean(history_field_sizes)) if history_field_sizes else 0.0,
                 "history_avg_weight": float(np.mean(history_weights)) if history_weights else 0.0,
+                "history_longshot_starts": float(longshot_starts),
+                "history_longshot_place_rate": float(history_longshot_place_rate),
                 "market_probability": mprob,
                 "implied_probability": implied_prob,
                 "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
+                "odds_log": float(row.odds_log),
+                "odds_rank_fraction": float(row.odds_rank_fraction),
+                "odds_vs_field_median": float(row.odds_vs_field_median),
                 "finish_position": (
                     float(row.finish_position)
                     if pd.notnull(getattr(row, "finish_position", np.nan))
@@ -453,6 +522,8 @@ def build_leakage_safe_features(
                     "perf": perf,
                     "day_ordinal": float(row.race_datetime.toordinal()),
                     "field_size": field_size,
+                    "odds": float(row.odds) if pd.notnull(row.odds) else 0.0,
+                    "is_placed": finish_position <= 3.0,
                     "weight": float(getattr(row, "weight", 0.0) or 0.0),
                     "distance": float(getattr(row, "distance", 1400.0)),
                     "surface": str(getattr(row, "surface", "")),
@@ -478,10 +549,18 @@ def build_leakage_safe_features(
             available = values.notna()
             if available.any():
                 feat_df.loc[values.index[available], column] = values.loc[available].to_numpy()
+        for column in ("history_longshot_starts", "history_longshot_place_rate"):
+            if column not in df.columns:
+                continue
+            values = pd.to_numeric(df.loc[precomputed_rows, column], errors="coerce")
+            available = values.notna()
+            if available.any():
+                feat_df.loc[values.index[available], column] = values.loc[available].to_numpy()
 
     # Normalize market probabilities within each race to account for overround.
     grp_sum = feat_df.groupby("race_id")["market_probability"].transform("sum").replace(0.0, 1.0)
     feat_df["market_probability_norm"] = feat_df["market_probability"] / grp_sum
+    _add_highest_odds_placer_features(feat_df)
 
     # Phase 2: opponent strength and race pace context (race-level, then projected to horse rows).
     race_mean_form = feat_df.groupby("race_id")["form_avg_5"].transform("mean")
@@ -500,7 +579,6 @@ def build_leakage_safe_features(
         feat_df["style_closer_prob"] * feat_df["pace_pressure"]
         + feat_df["style_front_prob"] * (1.0 - feat_df["pace_pressure"])
     )
-
     feature_columns = TJK_STAGE1_FEATURE_COLUMNS.copy()
     for column in feature_columns:
         if column not in feat_df:

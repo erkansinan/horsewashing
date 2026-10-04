@@ -52,6 +52,10 @@ from atyaris.ml.fundamental_model import fit_conditional_logit, predict_conditio
 from atyaris.ml.model_health import run_model_health_checks
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
+from atyaris.ml.placer_model import (
+    fit_highest_odds_placer_model,
+    predict_highest_odds_placer_probability,
+)
 from atyaris.ml.real_ingestion import ingest_real_tjk_data
 
 
@@ -521,6 +525,7 @@ def train_phase1_model(
         stage1_coefficient_sign_constraints=stage1_coefficient_sign_constraints,
         checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",
     )
+    artifact.placer_model = fit_highest_odds_placer_model(train_df)
 
     raw_cal = predict_two_stage_probability(artifact, calibration_df)
     calibrator = fit_calibrator(
@@ -619,6 +624,7 @@ def predict_for_date(
             "place3_probability",
             "top3_probability",
             "place_probability",
+            "placer_probability",
             "predicted_place_rank",
             "predicted_top3",
             "predicted_highest_odds_placer",
@@ -680,7 +686,17 @@ def predict_for_date(
         raw_place_probability,
         group_ids=out["race_id"].to_numpy(),
     )
-    out = mark_highest_odds_placer_predictions(out)
+    if artifact.placer_model is not None:
+        out["placer_probability"] = predict_highest_odds_placer_probability(
+            artifact.placer_model,
+            out,
+        )
+        out = mark_highest_odds_placer_predictions(
+            out,
+            selection_probability_col="placer_probability",
+        )
+    else:
+        out = mark_highest_odds_placer_predictions(out)
 
     if enable_ev:
         out = add_ev_kelly_columns(

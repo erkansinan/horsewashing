@@ -640,6 +640,14 @@ def ingest_real_tjk_data(
                     career_places = sum(
                         1 for p in history if p.finish_position is not None and p.finish_position <= 3
                     )
+                    longshot_history = [
+                        p for p in history if p.odds is not None and p.odds >= 5.0
+                    ]
+                    longshot_places = sum(
+                        1
+                        for p in longshot_history
+                        if p.finish_position is not None and p.finish_position <= 3
+                    )
                     last_year_history = [
                         p for p in history if (current - p.race_date).days <= 365
                     ]
@@ -806,6 +814,10 @@ def ingest_real_tjk_data(
                             "career_starts": float(len(history)),
                             "career_wins": float(career_wins),
                             "career_places": float(career_places),
+                            "history_longshot_starts": float(len(longshot_history)),
+                            "history_longshot_place_rate": float(
+                                (longshot_places + 0.3 * 3.0) / (len(longshot_history) + 3.0)
+                            ),
                             "last_year_starts": float(len(last_year_history)),
                             "last_year_wins": float(sum(1 for p in last_year_history if p.finish_position == 1)),
                             "last_year_places": float(

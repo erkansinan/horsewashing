@@ -62,3 +62,20 @@ def test_form_and_market_weights_default_to_seventy_five_twenty_five() -> None:
 
     assert artifact.form_weight == 0.75
     assert artifact.market_weight == 0.25
+
+
+def test_phase3_artifact_round_trip_preserves_optional_placer_model(tmp_path: Path) -> None:
+    from atyaris.ml.market_blend import BenterTwoStageArtifact
+
+    artifact = BenterTwoStageArtifact(
+        stage1_model=object(),
+        stage2_model=object(),
+        feature_columns=[],
+        placer_model={"target_model": "highest_odds_placer"},
+    )
+    model_path = tmp_path / "phase1.joblib"
+
+    modeling.save_phase3_artifact(artifact, {"method": "none"}, str(model_path))
+    loaded, _ = modeling.load_phase3_artifact(str(model_path))
+
+    assert loaded.placer_model == {"target_model": "highest_odds_placer"}

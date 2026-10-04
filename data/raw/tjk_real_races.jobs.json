@@ -41,9 +41,9 @@
   },
   {
     "job_id": "pause-route-job",
-    "status": "running",
+    "status": "paused",
     "mode": "online",
-    "message": "Egitim duraklatiliyor...",
+    "message": "Sunucu yeniden baslatildi; checkpointten devam edilebilir",
     "retry_targets": [],
     "can_accept_partial": false,
     "start_date": "2026-09-09",
@@ -71,6 +71,46 @@
   },
   {
     "job_id": "9f1397e87d424b28983c4fda33177e12",
+    "status": "completed",
+    "mode": "local",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "f40085cb87134b00bf3e675500f085a0",
+    "status": "completed",
+    "mode": "local",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "cda7791e6f2641359dd7c915c0da534c",
+    "status": "failed",
+    "mode": "local",
+    "message": "Lokal egitim: [WinError 32] Dosya ba\u015fka bir i\u015flem taraf\u0131ndan kullan\u0131ld\u0131\u011f\u0131ndan bu i\u015flem dosyaya eri\u015femiyor: 'data\\\\processed\\\\features_phase1.csv.tmp' -> 'data\\\\processed\\\\features_phase1.csv'",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "6bfcd9fe21164340aafdf8744ea949d2",
+    "status": "completed",
+    "mode": "local",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "4a8a5697e5884fb0bee34078dd2941ea",
     "status": "completed",
     "mode": "local",
     "message": "Lokal veriden egitim tamamlandi",

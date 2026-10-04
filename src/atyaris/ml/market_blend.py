@@ -21,6 +21,7 @@ class BenterTwoStageArtifact:
     stage1_model: ConditionalLogitModel
     stage2_model: ConditionalLogitModel
     feature_columns: list[str]
+    placer_model: ConditionalLogitModel | None = None
     # Kept for loading older artifacts; prediction no longer uses fixed weights.
     form_weight: float = 0.75
     market_weight: float = 0.25

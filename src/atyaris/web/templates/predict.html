@@ -60,6 +60,7 @@
         <th><a href="{{ sort_urls.place2_probability }}">P(2.){% if sort_by == 'place2_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.place3_probability }}">P(3.){% if sort_by == 'place3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.top3_probability }}">P(Top3, kalibre){% if sort_by == 'top3_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.placer_probability }}">P(En yüksek oranlı plase){% if sort_by == 'placer_probability' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th>Seçim</th>
         <th><a href="{{ sort_urls.confidence }}">Guven{% if sort_by == 'confidence' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.edge }}">Edge{% if sort_by == 'edge' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
@@ -80,6 +81,7 @@
         <td>{{ "%.2f"|format((row.place2_probability|default(0.0)) * 100) }}%</td>
         <td>{{ "%.2f"|format((row.place3_probability|default(0.0)) * 100) }}%</td>
         <td>{{ "%.2f"|format((row.place_probability|default(row.top3_probability|default(0.0))) * 100) }}%</td>
+        <td>{% if row.placer_probability is defined %}{{ "%.2f"|format(row.placer_probability * 100) }}%{% else %}-{% endif %}</td>
         <td>{% if row.predicted_highest_odds_placer|default(false) %}<strong>En yüksek oranlı Top-3</strong>{% elif row.predicted_top3|default(false) %}Top-3 adayı{% else %}-{% endif %}</td>
         <td>{{ "%.3f"|format(row.confidence) }}</td>
         <td>{% if row.edge is not none %}{{ "%.3f"|format(row.edge) }}{% else %}-{% endif %}</td>

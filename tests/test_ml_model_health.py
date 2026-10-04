@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -103,6 +104,18 @@ def test_parameter_update_and_prediction_diversity() -> None:
     artifact = _artifact(train, features)
     assert health.test_parameter_update(artifact).passed
     assert "probability_variance" in health.test_prediction_diversity(artifact, test).details
+
+
+def test_absolute_weight_sign_is_not_a_fixed_health_gate() -> None:
+    artifact = BenterTwoStageArtifact(
+        stage1_model=SimpleNamespace(coef_=np.array([0.1])),
+        stage2_model=SimpleNamespace(coef_=np.array([0.1])),
+        feature_columns=["weight"],
+    )
+
+    result = health.test_feature_signs(artifact)
+
+    assert result.passed
 
 
 def test_reproducibility() -> None:
