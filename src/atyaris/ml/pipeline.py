@@ -28,8 +28,6 @@ from atyaris.ml.calibration import (
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
     FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS,
-    MISSINGNESS_INDICATOR_COLUMNS,
-    TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
     TJK_STAGE1_FEATURE_COLUMNS,
     FeatureBuildResult,
     assert_no_leakage_columns,
@@ -49,7 +47,10 @@ from atyaris.ml.market_blend import (
     predict_two_stage_probability,
 )
 from atyaris.ml.fundamental_model import fit_conditional_logit, predict_conditional_logit_probability
-from atyaris.ml.model_health import run_model_health_checks
+from atyaris.ml.model_health import (
+    expected_feature_sign_constraints,
+    run_model_health_checks,
+)
 from atyaris.ml.modeling import load_phase3_artifact, save_phase3_artifact
 from atyaris.ml.optimizer import optimize_ticket_portfolio
 from atyaris.ml.placer_model import (
@@ -84,35 +85,6 @@ def read_csv_cached(path: Path) -> pd.DataFrame:
     stat = path.stat()
     cached = _read_csv_snapshot(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
     return cached.copy()
-
-
-def _apply_prediction_reliability(
-    frame: pd.DataFrame,
-    model_probability: np.ndarray,
-    market_probability: np.ndarray,
-) -> np.ndarray:
-    """Shrink weakly evidenced predictions toward the race market baseline."""
-    starts = pd.to_numeric(
-        frame.get("career_starts", pd.Series(0.0, index=frame.index)),
-        errors="coerce",
-    ).fillna(0.0).to_numpy(dtype=float)
-    reliability = np.clip(starts / 5.0, 0.0, 1.0)
-    workout_missing = pd.to_numeric(
-        frame.get("workout_missing", pd.Series(1.0, index=frame.index)),
-        errors="coerce",
-    ).fillna(1.0).to_numpy(dtype=float)
-    reliability *= np.where(workout_missing >= 0.5, 0.5, 1.0)
-    blended = market_probability + reliability * (model_probability - market_probability)
-    if "odds_missing" in frame.columns:
-        odds_missing = pd.to_numeric(frame["odds_missing"], errors="coerce").fillna(1.0) >= 0.5
-        no_market_by_race = odds_missing.groupby(frame["race_id"]).transform("all").to_numpy(dtype=bool)
-        blended = np.where(no_market_by_race, model_probability, blended)
-    for race_id, indices in frame.groupby("race_id", sort=False).indices.items():
-        del race_id
-        total = float(np.sum(blended[indices]))
-        if total > 0.0:
-            blended[indices] = blended[indices] / total
-    return blended
 
 
 def paths_from_settings(settings: Settings) -> Phase1Paths:
@@ -349,10 +321,42 @@ def prepare_prediction_features(
     race_no: int | None = None,
 ) -> pd.DataFrame:
     """Create target-day features without adding unlabelled rows to training data."""
+    refresh_history_source_ids: set[str] = set()
+    if paths.prediction_features_csv.exists():
+        existing = pd.read_csv(
+            paths.prediction_features_csv,
+            usecols=lambda column: column
+            in {"date", "track", "race_id", "source_horse_id", "career_starts", "history_missing"},
+        )
+        if {"date", "source_horse_id"}.issubset(existing.columns):
+            matching = pd.to_datetime(existing["date"], errors="coerce").dt.date == target_date
+            if hippodrome and "track" in existing.columns:
+                matching &= (
+                    existing["track"].astype(str).str.strip().str.upper().str.replace("İ", "I")
+                    == hippodrome.strip().upper().replace("İ", "I")
+                )
+            if race_no is not None and "race_id" in existing.columns:
+                matching &= existing["race_id"].astype(str).str.extract(r"(\d+)$")[0].astype(float) == race_no
+            missing_history = pd.Series(False, index=existing.index)
+            if "history_missing" in existing.columns:
+                missing_history |= pd.to_numeric(
+                    existing["history_missing"], errors="coerce"
+                ).fillna(0.0).ge(0.5)
+            if "career_starts" in existing.columns:
+                missing_history |= pd.to_numeric(
+                    existing["career_starts"], errors="coerce"
+                ).fillna(0.0).le(0.0)
+            source_ids = pd.to_numeric(
+                existing.loc[matching & missing_history, "source_horse_id"],
+                errors="coerce",
+            ).dropna()
+            refresh_history_source_ids = {str(int(source_id)) for source_id in source_ids}
+
     ingestion_kwargs = {
         "progress_callback": progress_callback,
         "require_results": False,
         "program_from_html": True,
+        "refresh_history_source_ids": refresh_history_source_ids,
     }
     if hippodrome:
         ingestion_kwargs["hippodrome"] = hippodrome
@@ -369,6 +373,28 @@ def prepare_prediction_features(
     built = build_leakage_safe_features(combined, as_of_date=target_date)
     prediction = built.frame[pd.to_datetime(built.frame["date"]).dt.date == target_date].copy()
     _require_rows(prediction, "Tahmin feature uretimi")
+    metadata_columns = [
+        column
+        for column in (
+            "source_horse_id",
+            "history_lookup_status",
+            "history_checked_at",
+            "id_unresolved",
+            "id_resolution_status",
+        )
+        if column in raw.columns and column not in prediction.columns
+    ]
+    if metadata_columns:
+        metadata = raw[["race_id", "horse_id", *metadata_columns]].drop_duplicates(
+            subset=["race_id", "horse_id"],
+            keep="last",
+        )
+        prediction = prediction.merge(
+            metadata,
+            on=["race_id", "horse_id"],
+            how="left",
+            validate="one_to_one",
+        )
     if "track" not in prediction.columns:
         if hippodrome:
             prediction["track"] = hippodrome.strip().upper().replace("İ", "I")
@@ -414,11 +440,7 @@ def _benter_feature_columns(
     frame: pd.DataFrame,
     feature_columns: list[str] | None = None,
 ) -> list[str]:
-    selected = [
-        column
-        for column in (feature_columns or TJK_SELECTED_STAGE1_FEATURE_COLUMNS)
-        if column not in MISSINGNESS_INDICATOR_COLUMNS
-    ]
+    selected = list(feature_columns or TJK_STAGE1_FEATURE_COLUMNS)
     missing = [column for column in selected if column not in frame.columns]
     if missing:
         raise ValueError(f"TJK feature verisinde eksik kolonlar var: {missing}")
@@ -522,7 +544,11 @@ def train_phase1_model(
         stage1_regularization=stage1_regularization,
         stage2_penalty="l2",
         stage2_regularization=0.02,
-        stage1_coefficient_sign_constraints=stage1_coefficient_sign_constraints,
+        stage1_coefficient_sign_constraints=(
+            stage1_coefficient_sign_constraints
+            if stage1_coefficient_sign_constraints is not None
+            else expected_feature_sign_constraints(feature_columns)
+        ),
         checkpoint_dir=paths.model_path.parent / f"{paths.model_path.stem}_checkpoint",
     )
     artifact.placer_model = fit_highest_odds_placer_model(train_df)
@@ -662,11 +688,6 @@ def predict_for_date(
     out["calibrated_probability"] = smooth_race_probabilities(
         calibrated_probability,
         out.groupby("race_id")["race_id"].transform("size").to_numpy(),
-    )
-    out["calibrated_probability"] = _apply_prediction_reliability(
-        out,
-        out["calibrated_probability"].to_numpy(dtype=float),
-        market_probability,
     )
 
     # Race-level normalization.

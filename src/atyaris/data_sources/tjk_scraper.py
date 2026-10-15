@@ -275,6 +275,8 @@ class TJKHtmlDataSource(RaceDataSource):
         retry_backoff_seconds: float = 1.0,
         program_request_timeout: float | None = None,
         program_max_retries: int | None = None,
+        history_request_timeout: float | None = None,
+        history_max_retries: int | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client = RateLimitedClient(
@@ -290,6 +292,8 @@ class TJKHtmlDataSource(RaceDataSource):
         self._cache_ttl = cache_ttl_seconds
         self._program_request_timeout = request_timeout if program_request_timeout is None else program_request_timeout
         self._program_max_retries = max_retries if program_max_retries is None else program_max_retries
+        self._history_request_timeout = request_timeout if history_request_timeout is None else history_request_timeout
+        self._history_max_retries = max_retries if history_max_retries is None else history_max_retries
         self._horse_search_timeout = min(request_timeout, 8.0)
         self._horse_search_unavailable = False
         self._horse_history_path = Path(horse_history_path)
@@ -405,16 +409,22 @@ class TJKHtmlDataSource(RaceDataSource):
         self._local_stats_cache[cache_key] = stats
         return stats
 
+    def _horse_history_url(self, horse_id: int | str) -> str:
+        # TJK tek '&' ile 504/403 donduruyor, '&&' ile 200 donuyor; httpx params
+        # sozlugu '&&'yi '&'ye indirgediginden sorgu metin olarak kurulur.
+        return f"{self._base_url}{_HORSE_HISTORY_PATH}?QueryParameter_AtId={horse_id}&&Era=past"
+
     def _get_html(
         self,
         url: str,
-        params: dict,
+        params: dict | None,
         timeout: float | None = None,
         max_retries: int | None = None,
         headers: dict[str, str] | None = None,
+        bypass_cache: bool = False,
     ) -> str:
-        cache_key = f"GET:{url}:{sorted(params.items())}"
-        if self._cache is not None:
+        cache_key = f"GET:{url}:{sorted((params or {}).items())}"
+        if self._cache is not None and not bypass_cache:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -1746,15 +1756,13 @@ class TJKHtmlDataSource(RaceDataSource):
         return ("mismatch", headings) if headings else ("unverifiable", [])
 
     def validate_horse_id_name(self, horse_id: int, expected_name: str) -> tuple[str, list[str]]:
-        url = f"{self._base_url}{_HORSE_HISTORY_PATH}"
-        params = {"QueryParameter_AtId": str(horse_id), "Era": "past"}
-        cache_key = f"GET:{url}:{sorted(params.items())}"
+        url = self._horse_history_url(horse_id)
+        cache_key = f"GET:{url}:[]"
         html = self._cache.get(cache_key) if self._cache is not None else None
         if html is None:
             try:
                 response = self._client.get(
                     url,
-                    params,
                     timeout=min(self._horse_search_timeout, 8.0),
                     max_retries=0,
                 )
@@ -1773,6 +1781,7 @@ class TJKHtmlDataSource(RaceDataSource):
         include_workouts: bool = True,
         request_timeout: float | None = None,
         max_retries: int | None = None,
+        force_refresh_history: bool = False,
     ) -> HorseStatistics:
         local_stats = self._local_horse_statistics(entry)
         if local_stats is not None:
@@ -1785,16 +1794,19 @@ class TJKHtmlDataSource(RaceDataSource):
                 "At istatistikleri icin gerekli QueryParameter_AtId bulunamadi."
             )
 
-        url = f"{self._base_url}{_HORSE_HISTORY_PATH}"
-        params = {
-            "QueryParameter_AtId": str(entry.source_horse_id),
-            "Era": "past",
-        }
+        url = self._horse_history_url(entry.source_horse_id)
+        history_timeout = (
+            self._history_request_timeout if request_timeout is None else request_timeout
+        )
+        history_retries = self._history_max_retries if max_retries is None else max_retries
         try:
-            if request_timeout is None and max_retries is None:
-                html = self._get_html(url, params)
-            else:
-                html = self._get_html(url, params, timeout=request_timeout, max_retries=max_retries)
+            html = self._get_html(
+                url,
+                None,
+                timeout=history_timeout,
+                max_retries=history_retries,
+                bypass_cache=force_refresh_history,
+            )
         except DataSourceError:
             if local_stats is not None:
                 return local_stats
@@ -2057,15 +2069,12 @@ class TJKHtmlDataSource(RaceDataSource):
         workout_url = f"{self._base_url}{_HORSE_WORKOUT_PATH}"
         workout_params = {"QueryParameter_AtId": str(entry.source_horse_id)}
         try:
-            if request_timeout is None and max_retries is None:
-                workout_html = self._get_html(workout_url, workout_params)
-            else:
-                workout_html = self._get_html(
-                    workout_url,
-                    workout_params,
-                    timeout=request_timeout,
-                    max_retries=max_retries,
-                )
+            workout_html = self._get_html(
+                workout_url,
+                workout_params,
+                timeout=history_timeout,
+                max_retries=history_retries,
+            )
             workout_soup = BeautifulSoup(workout_html, "lxml")
             workout_tables = workout_soup.find_all("table")
             workout_table = None

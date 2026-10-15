@@ -19,6 +19,7 @@ from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.features import (
     FeatureBuildResult,
     TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
+    TJK_STAGE1_FEATURE_COLUMNS,
     build_leakage_safe_features,
 )
 from atyaris.ml.harville import add_harville_columns, fit_harville_gammas
@@ -30,6 +31,7 @@ from atyaris.ml.market_blend import (
     predict_form_probability,
     predict_two_stage_probability,
 )
+from atyaris.ml.model_health import expected_feature_sign_constraints
 from atyaris.ml.modeling import evaluate_predictions
 from atyaris.ml.placer_model import (
     fit_highest_odds_placer_model,
@@ -900,7 +902,7 @@ def walk_forward_backtest(
 ) -> WalkForwardResult:
     features: FeatureBuildResult = build_leakage_safe_features(dataset)
     feat = features.frame
-    selected_feature_columns = feature_columns or TJK_SELECTED_STAGE1_FEATURE_COLUMNS
+    selected_feature_columns = feature_columns or TJK_STAGE1_FEATURE_COLUMNS
     if "weight_deviation" in selected_feature_columns:
         history_weight = pd.to_numeric(feat["history_avg_weight"], errors="coerce").fillna(0.0)
         current_weight = pd.to_numeric(feat["weight"], errors="coerce").fillna(0.0)
@@ -958,7 +960,11 @@ def walk_forward_backtest(
                 core_train_df,
                 calibration_df,
                 selected_feature_columns,
-                stage1_coefficient_sign_constraints=stage1_coefficient_sign_constraints,
+                stage1_coefficient_sign_constraints=(
+                    stage1_coefficient_sign_constraints
+                    if stage1_coefficient_sign_constraints is not None
+                    else expected_feature_sign_constraints(selected_feature_columns)
+                ),
             )
             cached_artifact.placer_model = fit_highest_odds_placer_model(core_train_df)
             calibration_form_probability = predict_two_stage_probability(

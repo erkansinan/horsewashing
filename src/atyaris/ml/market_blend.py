@@ -114,8 +114,9 @@ def fit_two_stage_benter(
     blend_df["market_logit"] = _safe_logit(market_prob)
     blend_df["interaction"] = blend_df["stage1_logit"] * blend_df["market_logit"]
 
-    # Market logit is the fixed backbone; stage 2 learns only a correction.
-    stage2_features = ["stage1_logit", "interaction"]
+    # Stage 2 learns the market weight alongside the form signal (Benter's
+    # combined log-linear model) instead of fixing it at 1.
+    stage2_features = ["market_logit", "stage1_logit", "interaction"]
     stage2 = fit_conditional_logit(
         blend_df,
         stage2_features,

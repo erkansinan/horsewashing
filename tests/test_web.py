@@ -63,12 +63,14 @@ def test_ml_date_cache_rejects_inconsistent_history_features(tmp_path) -> None:
 
     valid = pd.read_csv(feature_path)
     valid.loc[0, "career_starts"] = 3
+    valid.loc[1, "career_starts"] = 4
+    valid.loc[1, "history_missing"] = 0
     valid.to_csv(feature_path, index=False)
 
     assert web_app_module._ml_has_date(paths, date(2026, 9, 27), city="İstanbul")
 
 
-def test_ml_date_cache_retries_stale_history_lookup_failures(tmp_path) -> None:
+def test_ml_date_cache_retries_missing_history_on_each_request(tmp_path) -> None:
     feature_path = tmp_path / "prediction_features.csv"
     paths = SimpleNamespace(prediction_features_csv=feature_path)
     base = {
@@ -85,7 +87,14 @@ def test_ml_date_cache_retries_stale_history_lookup_failures(tmp_path) -> None:
         "history_checked_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=5)).isoformat(),
     }
     pd.DataFrame([fresh]).to_csv(feature_path, index=False)
-    assert web_app_module._ml_has_date(paths, target_date, city="Adana", race_no=1)
+    assert not web_app_module._ml_has_date(paths, target_date, city="Adana", race_no=1)
+    assert web_app_module._ml_has_date(
+        paths,
+        target_date,
+        city="Adana",
+        race_no=1,
+        retry_missing_history=False,
+    )
 
     stale = {
         **base,
@@ -95,7 +104,7 @@ def test_ml_date_cache_retries_stale_history_lookup_failures(tmp_path) -> None:
     assert not web_app_module._ml_has_date(paths, target_date, city="Adana", race_no=1)
 
 
-def test_ml_date_cache_accepts_legacy_missing_history_snapshot(tmp_path) -> None:
+def test_ml_date_cache_retries_legacy_missing_history_snapshot(tmp_path) -> None:
     feature_path = tmp_path / "prediction_features.csv"
     pd.DataFrame(
         [{
@@ -107,7 +116,7 @@ def test_ml_date_cache_accepts_legacy_missing_history_snapshot(tmp_path) -> None
         }]
     ).to_csv(feature_path, index=False)
 
-    assert web_app_module._ml_has_date(
+    assert not web_app_module._ml_has_date(
         SimpleNamespace(prediction_features_csv=feature_path),
         date(2026, 9, 29),
         city="Adana",
@@ -1016,7 +1025,18 @@ def test_index_fetches_tjk_bulletin_without_blocking_on_horse_id_resolution(monk
     assert calls == [(target_date, "Ankara", False, False)]
 
 
-def test_tjk_predict_fetches_only_the_requested_race_without_global_id_resolution(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "sort_by",
+    [
+        "form_trend_slope",
+        "rest_performance_interaction",
+        "tempo_fit_score",
+        "relative_strength",
+    ],
+)
+def test_tjk_predict_fetches_only_the_requested_race_without_global_id_resolution(
+    monkeypatch, sort_by: str
+) -> None:
     target_date = date.today()
     race = SampleDataSource().get_daily_races(target_date, "Ankara")[0]
     race.entries[0].odds = 5.5
@@ -1046,9 +1066,33 @@ def test_tjk_predict_fetches_only_the_requested_race_without_global_id_resolutio
 
     def predict_selected_race(self, requested_race, **_kwargs):
         assert requested_race.race_no == race.race_no
+        entry = requested_race.active_entries[0]
         return SimpleNamespace(
             race=requested_race,
-            ranked=[],
+            ranked=[
+                SimpleNamespace(
+                    entry=entry,
+                    score=SimpleNamespace(
+                        total_score=70.0,
+                        form_score=65.0,
+                        jockey_trainer_score=70.0,
+                        distance_surface_score=75.0,
+                        weight_score=60.0,
+                        rest_score=80.0,
+                    ),
+                    reasoning=[],
+                    tag="Test",
+                    win_probability=0.2,
+                    confidence_score=0.5,
+                    value_bet=None,
+                    feature_snapshot={
+                        "form_trend_slope": 0.123,
+                        "rest_performance_interaction": 0.456,
+                        "tempo_fit_score": 0.789,
+                        "relative_strength": -0.123,
+                    },
+                )
+            ],
             imputation_notes=[],
             backtest=None,
             model_notes=[],
@@ -1064,12 +1108,49 @@ def test_tjk_predict_fetches_only_the_requested_race_without_global_id_resolutio
             "source": "tjk",
             "date": target_date.isoformat(),
             "city": "Ankara",
+            "sort_by": sort_by,
+            "sort_order": "desc",
         },
     )
 
     assert response.status_code == 200
     assert calls == [(target_date, "Ankara", race.race_no)]
     assert "5.50" in response.text
+    assert f"sort_by={sort_by}" in response.text
+    assert "↓" in response.text
+    assert "Form trend eğimi (son N yarış)" in response.text
+    assert "Dinlenme-performans etkileşim puanı" in response.text
+    assert "Tempo uyum skoru (erken-orta-geç)" in response.text
+    assert "Rakip alana göre göreli güç" in response.text
+    assert "0.123" in response.text
+    assert "0.456" in response.text
+    assert "0.789" in response.text
+    assert "-0.123" in response.text
+
+
+@pytest.mark.parametrize(
+    "sort_by",
+    [
+        "form_trend_slope",
+        "rest_performance_interaction",
+        "tempo_fit_score",
+        "relative_strength",
+    ],
+)
+def test_prediction_sort_key_orders_feature_metrics_in_both_directions(sort_by: str) -> None:
+    lower = SimpleNamespace(feature_snapshot={sort_by: -0.2})
+    higher = SimpleNamespace(feature_snapshot={sort_by: 0.8})
+    items = [higher, lower]
+
+    assert sorted(
+        items,
+        key=lambda item: web_app_module._prediction_sort_key(item, sort_by),
+    ) == [lower, higher]
+    assert sorted(
+        items,
+        key=lambda item: web_app_module._prediction_sort_key(item, sort_by),
+        reverse=True,
+    ) == [higher, lower]
 
 
 def test_predict_renders_ranked_horses_and_disclaimer() -> None:

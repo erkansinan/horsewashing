@@ -42,7 +42,7 @@
   </div>
   {% if ml_prediction.rows | selectattr('history_missing') | list %}
   {% if ml_prediction.rows | selectattr('history_lookup_status', 'equalto', 'unresolved_id') | list or ml_prediction.rows | selectattr('history_lookup_status', 'equalto', 'fetch_failed') | list %}
-  <p class="error"><strong>Bazı atların geçmişi TJK’dan alınamadı.</strong> ID’si çözülemeyen veya HTML isteği başarısız olan kayıtlar yaklaşık 10 dakika sonra yeniden denenir. Geçmişi olmayan ve Edge değeri sıfır olan satırlar odds/piyasa fallback’idir.</p>
+  <p class="error"><strong>Bazı atların geçmişi TJK’dan alınamadı.</strong> Sayfayı yenilediğinizde eksik geçmiş tekrar sorgulanır. Geçmişi olmayan ve Edge değeri sıfır olan satırlar odds/piyasa fallback’idir.</p>
   {% else %}
   <p class="error"><strong>Geçmiş verisi olmayan atlar var.</strong> Bu atların sıralaması form verisine dayanmıyor; geçmişi olmayan ve Edge değeri sıfır olan satırlar odds/piyasa fallback’idir.</p>
   {% endif %}
@@ -335,6 +335,10 @@
         <th title="TJK programındaki at oranı; sonuç sayfasındaki GANYAN ödeme tutarı değildir"><a href="{{ sort_urls.odds }}">Ganyan (oran){% if sort_by == 'odds' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.total }}">Toplam{% if sort_by == 'total' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.form }}">Form{% if sort_by == 'form' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.form_trend_slope }}">Form trend eğimi (son N yarış){% if sort_by == 'form_trend_slope' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.rest_performance_interaction }}">Dinlenme-performans etkileşim puanı{% if sort_by == 'rest_performance_interaction' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.tempo_fit_score }}">Tempo uyum skoru (erken-orta-geç){% if sort_by == 'tempo_fit_score' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
+        <th><a href="{{ sort_urls.relative_strength }}">Rakip alana göre göreli güç{% if sort_by == 'relative_strength' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.jockey_trainer }}">Jokey{% if sort_by == 'jockey_trainer' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.distance_surface }}">Pist{% if sort_by == 'distance_surface' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
         <th><a href="{{ sort_urls.weight }}">Ağırlık{% if sort_by == 'weight' %} {{ '↓' if sort_order == 'desc' else '↑' }}{% endif %}</a></th>
@@ -358,6 +362,10 @@
         <td>{% if row.entry.odds is not none %}{{ "%.2f"|format(row.entry.odds) }}{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.total_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.form_score }}/100{% else %}-{% endif %}</td>
+        <td>{% if row.feature_snapshot.form_trend_slope is defined %}{{ "%.3f"|format(row.feature_snapshot.form_trend_slope) }}{% else %}-{% endif %}</td>
+        <td>{% if row.feature_snapshot.rest_performance_interaction is defined %}{{ "%.3f"|format(row.feature_snapshot.rest_performance_interaction) }}{% else %}-{% endif %}</td>
+        <td>{% if row.feature_snapshot.tempo_fit_score is defined %}{{ "%.3f"|format(row.feature_snapshot.tempo_fit_score) }}{% else %}-{% endif %}</td>
+        <td>{% if row.feature_snapshot.relative_strength is defined %}{{ "%.3f"|format(row.feature_snapshot.relative_strength) }}{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.jockey_trainer_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.distance_surface_score }}/100{% else %}-{% endif %}</td>
         <td>{% if row.score %}{{ row.score.weight_score }}/100{% else %}-{% endif %}</td>

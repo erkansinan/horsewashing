@@ -20,6 +20,8 @@ def test_prediction_and_training_factories_have_isolated_request_policies() -> N
         prediction_data_request_max_retries=0,
         prediction_program_request_timeout_seconds=25.0,
         prediction_program_request_max_retries=1,
+        prediction_history_request_timeout_seconds=18.0,
+        prediction_history_request_max_retries=3,
     )
     prediction = build_prediction_data_source(settings)
     training = build_training_data_source(settings)
@@ -32,6 +34,8 @@ def test_prediction_and_training_factories_have_isolated_request_policies() -> N
         assert prediction._client._client.timeout.read == 3.0
         assert prediction._program_request_timeout == 25.0
         assert prediction._program_max_retries == 1
+        assert prediction._history_request_timeout == 18.0
+        assert prediction._history_max_retries == 3
         assert training._client._max_retries == 2
         assert training._client._min_interval == 1.25
         assert training._client._client.timeout.read == 20.0
@@ -67,6 +71,56 @@ def test_get_retries_read_timeout() -> None:
 
     assert response.text == "ok"
     assert attempts["count"] == 2
+
+
+def test_get_retries_gateway_timeout_response() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(504, request=request)
+        return httpx.Response(200, text="ok", request=request)
+
+    client = RateLimitedClient(
+        "test-agent",
+        min_interval=0.0,
+        max_retries=1,
+        retry_backoff_seconds=0.0,
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    try:
+        response = client.get("https://example.test/horse-history")
+    finally:
+        client.close()
+
+    assert response.text == "ok"
+    assert attempts["count"] == 2
+
+
+def test_get_does_not_retry_client_error_response() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        return httpx.Response(403, request=request)
+
+    client = RateLimitedClient(
+        "test-agent",
+        min_interval=0.0,
+        max_retries=2,
+        retry_backoff_seconds=0.0,
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get("https://example.test/horse-history")
+    finally:
+        client.close()
+
+    assert attempts["count"] == 1
 
 
 def test_get_prediction_policy_uses_short_timeout_without_retry() -> None:

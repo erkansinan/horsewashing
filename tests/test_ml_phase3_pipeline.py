@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from datetime import date
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+from atyaris.ml.features import MISSINGNESS_INDICATOR_COLUMNS, TJK_STAGE1_FEATURE_COLUMNS
+from atyaris.web.app import _ml_model_loadable
 from atyaris.ml.pipeline import (
     Phase1Paths,
+    _benter_feature_columns,
     build_features,
     ingest_real_data,
     predict_for_date,
@@ -19,6 +23,31 @@ from atyaris.ml.pipeline import (
 )
 from atyaris.ml.ev_kelly import add_ev_kelly_columns
 from atyaris.ml.modeling import load_phase3_artifact
+
+
+def test_benter_uses_all_tjk_stage1_features_including_missingness_indicators() -> None:
+    frame = pd.DataFrame({column: [0.0] for column in TJK_STAGE1_FEATURE_COLUMNS})
+
+    selected = _benter_feature_columns(frame)
+
+    assert selected == TJK_STAGE1_FEATURE_COLUMNS
+    assert MISSINGNESS_INDICATOR_COLUMNS.issubset(selected)
+
+
+def test_ml_model_loadable_rejects_older_partial_feature_artifact(monkeypatch, tmp_path) -> None:
+    model_path = tmp_path / "phase1_logreg.joblib"
+    model_path.touch()
+    paths = SimpleNamespace(model_path=model_path, raw_csv=tmp_path / "raw.csv")
+    monkeypatch.setattr(
+        "atyaris.web.app.load_phase3_artifact",
+        lambda *_args, **_kwargs: (SimpleNamespace(feature_columns=["draw"]), {}),
+    )
+
+    loadable, message = _ml_model_loadable(paths)
+
+    assert not loadable
+    assert "tum TJK feature'lariyla egitilmemis" in message
+    assert "yeniden egitin" in message
 
 
 def _setup_phase3_artifacts(tmp_path, monkeypatch) -> Phase1Paths:
@@ -197,9 +226,15 @@ def test_prediction_features_are_separate_from_labelled_training_features(tmp_pa
 
     def fake_ingest(start_date, end_date, paths_arg, progress_callback=None, require_results=True, **kwargs):
         ingestion_calls.append(kwargs)
-        return provider.get_dataset(
+        frame = provider.get_dataset(
             start_date, end_date
         ).drop(columns=["finish_position", "is_winner"], errors="ignore")
+        frame["source_horse_id"] = range(1000, 1000 + len(frame))
+        frame["career_starts"] = 1
+        frame["history_missing"] = 0
+        frame["history_lookup_status"] = "available"
+        frame["history_checked_at"] = "2025-05-01T12:00:00+00:00"
+        return frame
 
     monkeypatch.setattr("atyaris.ml.pipeline.ingest_real_tjk_data", fake_ingest)
 
@@ -214,19 +249,28 @@ def test_prediction_features_are_separate_from_labelled_training_features(tmp_pa
     assert target_date not in training_dates
     assert "is_winner" in prediction.columns
     assert prediction["is_winner"].eq(0).all()
+    assert prediction["source_horse_id"].notna().all()
+    assert prediction["history_lookup_status"].eq("available").all()
 
     other_city = prediction.iloc[[0]].copy()
     other_city["race_id"] = f"{target_date:%Y%m%d}_99"
     other_city["track"] = "IZMIR"
+    other_city["career_starts"] = 1
+    other_city["history_missing"] = 0
     earlier_date = prediction.iloc[[0]].copy()
     earlier_date["date"] = date(2025, 4, 30)
+    missing_history = prediction.iloc[[0]].copy()
+    missing_history["source_horse_id"] = 12345
+    missing_history["career_starts"] = 0
+    missing_history["history_missing"] = 1
     paths.prediction_features_csv.write_text(
-        pd.concat([other_city, earlier_date], ignore_index=True).to_csv(index=False),
+        pd.concat([other_city, earlier_date, missing_history], ignore_index=True).to_csv(index=False),
         encoding="utf-8",
     )
 
     prepare_prediction_features(target_date, paths)
 
+    assert ingestion_calls[1]["refresh_history_source_ids"] == {"12345"}
     snapshot = pd.read_csv(paths.prediction_features_csv)
     assert ((snapshot["date"] == target_date.isoformat()) & (snapshot["track"] == "IZMIR")).any()
     assert (pd.to_datetime(snapshot["date"]).dt.date == date(2025, 4, 30)).any()

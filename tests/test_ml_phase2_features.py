@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-import numpy as np
-import pandas as pd
-import pytest
-
 from atyaris.ml.features import TJK_FEATURE_COLUMNS, build_leakage_safe_features
-from atyaris.ml.pipeline import _apply_prediction_reliability
 from atyaris.ml.provider import SyntheticRacingDataProvider as _FixtureRacingDataProvider
 
 
@@ -72,38 +67,3 @@ def test_tjk_numeric_features_have_no_missing_values() -> None:
 
     assert frame["recovery_score"].between(0.0, 1.0).all()
     assert not frame[TJK_FEATURE_COLUMNS].isna().any().any()
-
-
-def test_prediction_reliability_shrinks_sparse_and_missing_workout_horses() -> None:
-    frame = pd.DataFrame(
-        {
-            "race_id": ["race", "race", "race"],
-            "career_starts": [1, 5, 0],
-            "workout_missing": [0, 0, 1],
-        }
-    )
-    model_probability = np.array([0.70, 0.20, 0.10])
-    market_probability = np.array([0.40, 0.35, 0.25])
-
-    result = _apply_prediction_reliability(frame, model_probability, market_probability)
-
-    assert result.sum() == pytest.approx(1.0)
-    assert abs(result[0] - market_probability[0]) < abs(result[1] - market_probability[1])
-    assert abs(result[2] - market_probability[2]) < abs(result[0] - market_probability[0])
-
-
-def test_prediction_reliability_preserves_model_signal_without_market_odds() -> None:
-    frame = pd.DataFrame(
-        {
-            "race_id": ["race", "race", "race"],
-            "career_starts": [0, 0, 0],
-            "workout_missing": [1, 1, 1],
-            "odds_missing": [1, 1, 1],
-        }
-    )
-    model_probability = np.array([0.70, 0.20, 0.10])
-    market_probability = np.array([1 / 3, 1 / 3, 1 / 3])
-
-    result = _apply_prediction_reliability(frame, model_probability, market_probability)
-
-    assert result == pytest.approx(model_probability)

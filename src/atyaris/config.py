@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     prediction_data_min_request_interval_seconds: float = Field(default=0.5, ge=0.0)
     prediction_program_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
     prediction_program_request_max_retries: int = Field(default=2, ge=0)
+    prediction_history_request_timeout_seconds: float = Field(default=20.0, gt=0.0)
+    prediction_history_request_max_retries: int = Field(default=2, ge=0)
     prediction_trainer_cache_max_age_days: int = Field(default=7, ge=0)
     recent_form_window: int = 8
     ideal_rest_days_min: int = 14

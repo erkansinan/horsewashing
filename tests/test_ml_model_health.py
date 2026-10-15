@@ -118,6 +118,17 @@ def test_absolute_weight_sign_is_not_a_fixed_health_gate() -> None:
     assert result.passed
 
 
+def test_default_sign_constraints_only_include_available_features() -> None:
+    constraints = health.expected_feature_sign_constraints(
+        ["distance_fit", "history_avg_finish_position"]
+    )
+
+    assert constraints == {
+        "distance_fit": 1,
+        "history_avg_finish_position": -1,
+    }
+
+
 def test_reproducibility() -> None:
     train, _, test, features = _splits()
     result = health.test_reproducibility(train, test, features)

@@ -47,7 +47,7 @@ from atyaris.ml.real_ingestion import ingest_real_tjk_data
 from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
 from atyaris.ml.raw_store import RAW_STORE_THRESHOLDS, JsonlRawStore
 from atyaris.ml.local_pipeline import build_local_raw_frame, find_missing_local_targets
-from atyaris.ml.features import TJK_SELECTED_STAGE1_FEATURE_COLUMNS, TJK_STAGE1_FEATURE_COLUMNS
+from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.harville import mark_highest_odds_placer_predictions
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
 from atyaris.ml.modeling import load_phase3_artifact
@@ -72,6 +72,10 @@ _SORTABLE_FIELDS = {
     "odds": "Ganyan",
     "total": "Toplam",
     "form": "Form",
+    "form_trend_slope": "Form trend egimi (son N yaris)",
+    "rest_performance_interaction": "Dinlenme-performans etkilesim puani",
+    "tempo_fit_score": "Tempo uyum skoru (erken-orta-gec)",
+    "relative_strength": "Rakip alana gore goreli guc",
     "jockey_trainer": "Jokey",
     "distance_surface": "Pist",
     "weight": "Agirlik",
@@ -929,6 +933,16 @@ def _prediction_sort_key(item, sort_by: str):  # type: ignore[no-untyped-def]
         return item.score.total_score
     if sort_by == "form":
         return item.score.form_score
+    if sort_by in {
+        "form_trend_slope",
+        "rest_performance_interaction",
+        "tempo_fit_score",
+        "relative_strength",
+    }:
+        feature_snapshot = getattr(item, "feature_snapshot", {})
+        if not isinstance(feature_snapshot, dict):
+            return -9999.0
+        return _safe_float(feature_snapshot.get(sort_by), -9999.0)
     if sort_by == "jockey_trainer":
         return item.score.jockey_trainer_score
     if sort_by == "distance_surface":
@@ -1416,6 +1430,7 @@ def _ml_has_date(
     target_date: date,
     city: str = "",
     race_no: int | None = None,
+    retry_missing_history: bool = True,
 ) -> bool:  # type: ignore[no-untyped-def]
     # Training features may contain results for a day that is already over.
     # They must never make a live prediction look ready for that same day.
@@ -1448,7 +1463,7 @@ def _ml_has_date(
             if not {"career_starts", "history_missing"}.issubset(dates.columns):
                 continue
             selected = dates.loc[matching]
-            if {"history_lookup_status", "history_checked_at"}.issubset(selected.columns):
+            if retry_missing_history and {"history_lookup_status", "history_checked_at"}.issubset(selected.columns):
                 lookup_status = selected["history_lookup_status"].fillna("").astype(str)
                 retryable = lookup_status.isin({"fetch_failed", "unresolved_id"})
                 if bool(retryable.any()):
@@ -1461,6 +1476,10 @@ def _ml_has_date(
                         return False
             career_starts = pd.to_numeric(selected["career_starts"], errors="coerce").fillna(-1.0)
             history_missing = pd.to_numeric(selected["history_missing"], errors="coerce").fillna(-1.0)
+            if retry_missing_history and bool(
+                (history_missing.ge(0.5) | career_starts.le(0.0)).any()
+            ):
+                return False
             has_history = career_starts.gt(0.0) & history_missing.lt(0.5)
             no_history = career_starts.le(0.0) & history_missing.ge(0.5)
             if bool((has_history | no_history).all()):
@@ -1481,6 +1500,12 @@ def _ml_model_loadable(paths) -> tuple[bool, str]:  # type: ignore[no-untyped-de
             return False, (
                 "Model desteklenmeyen TJK feature'lari kullaniyor: "
                 f"{unsupported}"
+            )
+        missing = sorted(supported_columns - set(artifact.feature_columns))
+        if missing:
+            return False, (
+                "Model tum TJK feature'lariyla egitilmemis. Model Egitimi bolumunden "
+                f"yeniden egitin. Eksik feature'lar: {missing}"
             )
     except Exception as exc:  # noqa: BLE001
         return False, f"Model artifact'i yuklenemedi: {exc}"
@@ -1560,7 +1585,13 @@ def _ensure_ml_ready_for_date(
             raise RuntimeError(
                 f"{target_date.isoformat()} icin labelsiz tahmin feature verisi hazirlanamadi: {exc}"
             ) from exc
-        if not _ml_has_date(paths, target_date, city=city, race_no=race_no):
+        if not _ml_has_date(
+            paths,
+            target_date,
+            city=city,
+            race_no=race_no,
+            retry_missing_history=False,
+        ):
             raise RuntimeError(
                 f"{target_date.isoformat()} icin tahmin feature verisi olusmadi. "
                 "TJK gunluk programi kontrol edilmeli."
@@ -2524,7 +2555,7 @@ def create_app() -> FastAPI:
         city: str = Query(""),
         sort_by: str = Query(
             "calibrated_probability",
-            pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|placer_probability|edge|kelly_fraction|form_strength)$",
+            pattern="^(strategy|number|odds|total|form|form_trend_slope|rest_performance_interaction|tempo_fit_score|relative_strength|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|placer_probability|edge|kelly_fraction|form_strength)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:

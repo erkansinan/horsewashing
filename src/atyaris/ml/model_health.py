@@ -72,6 +72,14 @@ EXPECTED_FEATURE_SIGNS = {
 }
 
 
+def expected_feature_sign_constraints(feature_columns: list[str]) -> dict[str, int]:
+    return {
+        feature: sign
+        for feature, sign in EXPECTED_FEATURE_SIGNS.items()
+        if feature in feature_columns
+    }
+
+
 @dataclass
 class HealthCheckResult:
     name: str

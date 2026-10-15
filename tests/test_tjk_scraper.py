@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import json
+from types import SimpleNamespace
 import httpx
 from bs4 import BeautifulSoup
 import pytest
 
+from atyaris.cache.sqlite_cache import SqliteTTLCache
 from atyaris.data_sources import tjk_scraper
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource, _era_for_date, _era_for_referer_date
@@ -278,6 +280,31 @@ def test_get_horse_statistics_raises_not_implemented() -> None:
         assert False, "DataSourceError bekleniyordu"
     except DataSourceError:
       pass
+
+
+def test_get_html_can_bypass_cached_history_response(tmp_path, monkeypatch) -> None:
+    cache = SqliteTTLCache(tmp_path / "cache.sqlite3")
+    source = TJKHtmlDataSource(cache=cache)
+    url = "https://www.tjk.org/AtKosuBilgileri"
+    params = {"QueryParameter_AtId": "123", "Era": "past"}
+    cache_key = f"GET:{url}:{sorted(params.items())}"
+    cache.set(cache_key, "cached response")
+    requests = []
+    monkeypatch.setattr(
+        source._client,
+        "get",
+        lambda requested_url, params=None, **kwargs: (
+            requests.append((requested_url, params, kwargs))
+            or SimpleNamespace(text="fresh response")
+        ),
+    )
+
+    response = source._get_html(url, params, bypass_cache=True)
+
+    assert response == "fresh response"
+    assert len(requests) == 1
+    assert cache.get(cache_key) == "fresh response"
+    cache.close()
 
 
 def test_historical_dates_use_tjk_past_era() -> None:
@@ -796,9 +823,53 @@ def test_get_horse_statistics_parses_era_past_summary_and_history(tmp_path) -> N
     assert stats.workout_records[0].hippodrome == "Ankara"
     assert stats.workout_records[0].distance_m == 800
     assert request_policies == [
-      {"timeout": 5.0, "max_retries": 0},
+      {"timeout": 5.0, "max_retries": 0, "bypass_cache": False},
       {"timeout": 5.0, "max_retries": 0},
     ]
+
+
+def test_get_horse_statistics_uses_history_request_policy(tmp_path) -> None:
+    source = TJKHtmlDataSource(
+        request_timeout=5.0,
+        max_retries=0,
+        history_request_timeout=20.0,
+        history_max_retries=2,
+        horse_history_path=tmp_path / "history.jsonl",
+    )
+    entry = RaceEntry(
+        number=1,
+        horse_id="horse-3",
+        source_horse_id=109870,
+        horse_name="TEST AT",
+        jockey=Jockey(name="Ahmet Celik"),
+        trainer=Trainer(name="Antrenor X"),
+        weight_kg=56.0,
+    )
+    html = """
+    <html><body>
+      <table>
+        <tr><th>Tarih</th><th>Sehir</th><th>Msf</th><th>Pist</th><th>S</th></tr>
+        <tr><td>15.08.2026</td><td>İzmir</td><td>1200</td><td>Kum</td><td>2</td></tr>
+      </table>
+    </body></html>
+    """
+    requests = []
+    source._get_html = lambda url, params, **kwargs: requests.append(kwargs) or html  # type: ignore[method-assign]
+
+    source.get_horse_statistics(entry, include_workouts=False)
+
+    assert requests == [
+        {"timeout": 20.0, "max_retries": 2, "bypass_cache": False}
+    ]
+
+
+def test_horse_history_url_keeps_double_ampersand_before_era() -> None:
+    source = TJKHtmlDataSource()
+    url = source._horse_history_url(109870)
+
+    assert url.endswith("AtKosuBilgileri?QueryParameter_AtId=109870&&Era=past")
+    request = httpx.Request("GET", url)
+    assert request.url.query == b"QueryParameter_AtId=109870&&Era=past"
 
 
 def test_get_horse_statistics_parses_history_without_summary_table() -> None:
@@ -822,7 +893,7 @@ def test_get_horse_statistics_parses_history_without_summary_table() -> None:
     </body></html>
     """
 
-    source._get_html = lambda url, params: html  # type: ignore[method-assign]
+    source._get_html = lambda url, params, **kwargs: html  # type: ignore[method-assign]
     stats = source.get_horse_statistics(entry)
 
     assert len(stats.past_performances) == 1

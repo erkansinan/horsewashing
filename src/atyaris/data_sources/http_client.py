@@ -88,6 +88,7 @@ class RateLimitedClient:
                     if headers is not None:
                         request_options["headers"] = headers
                     response = self._client.get(url, params=params, **request_options)
+                    response.raise_for_status()
                     logger.info(
                         "TJK GET yanitlandi | attempt=%d/%d | status=%d | url=%s | params=%s",
                         attempt + 1,
@@ -97,6 +98,29 @@ class RateLimitedClient:
                         params or {},
                     )
                     break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code < 500 or attempt >= retry_count:
+                        logger.error(
+                            "TJK GET HTTP hatasi | attempt=%d/%d | status=%d | url=%s | params=%s",
+                            attempt + 1,
+                            retry_count + 1,
+                            exc.response.status_code,
+                            url,
+                            params or {},
+                        )
+                        raise
+                    delay = self._retry_backoff_seconds * (attempt + 1)
+                    logger.warning(
+                        "TJK GET tekrar denenecek | retry=%d/%d | status=%d | delay=%.1fs | url=%s | params=%s",
+                        attempt + 1,
+                        retry_count,
+                        exc.response.status_code,
+                        delay,
+                        url,
+                        params or {},
+                    )
+                    if delay:
+                        time.sleep(delay)
                 except (httpx.TimeoutException, httpx.NetworkError) as exc:
                     logger.warning(
                         "TJK GET hatasi | attempt=%d/%d | error=%s: %s | url=%s | params=%s",
@@ -125,7 +149,6 @@ class RateLimitedClient:
                     if delay:
                         time.sleep(delay)
             self._last_request_at = time.monotonic()
-        response.raise_for_status()
         return response
 
     def post(

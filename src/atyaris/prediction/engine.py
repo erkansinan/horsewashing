@@ -170,6 +170,12 @@ class PredictionEngine:
                         "rolling_std_3": round(float(feature_row.get("rolling_std_3", 0.0)), 3),
                         "rolling_mean_5": round(float(feature_row.get("rolling_mean_5", 0.5)), 3),
                         "rolling_std_5": round(float(feature_row.get("rolling_std_5", 0.0)), 3),
+                        "form_trend_slope": round(float(feature_row.get("form_trend_slope", 0.0)), 3),
+                        "rest_performance_interaction": round(
+                            float(feature_row.get("rest_performance_interaction", 0.0)), 3
+                        ),
+                        "tempo_fit_score": round(float(feature_row.get("tempo_fit_score", 0.0)), 3),
+                        "relative_strength": round(float(feature_row.get("relative_strength", 0.0)), 3),
                     },
                 )
             )

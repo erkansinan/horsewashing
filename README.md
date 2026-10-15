@@ -372,6 +372,12 @@ takma adidir. Mevcut kosunun `finish_position`/`is_winner`
 sonucu feature hesaplanirken kullanilmaz; gecmis form ve ozetler yalnizca
 TJK'nin onceki kosularindan hesaplanir.
 
+Benter Stage-1 egitimi ve varsayilan walk-forward backtest, `TJK_STAGE1_FEATURE_COLUMNS`
+listesinde bulunan tum TJK kaynakli sayisal feature'lari ve veri-eksiklik gostergelerini
+kullanir. Piyasa oranlari ikinci asamada kullanilmaya devam eder. Daha once egitilmis
+model artifact'lari kendi eski feature listelerini tasir; tam listeye gecmek icin modeli
+yeniden egitmek gerekir.
+
 #### Yaris ve fiziksel bilgiler
 
 | Feature | Anlami |

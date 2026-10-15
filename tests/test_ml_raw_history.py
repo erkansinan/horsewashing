@@ -94,6 +94,7 @@ def test_recent_trainer_cache_uses_latest_non_future_record_within_age(tmp_path)
 def test_prediction_ingestion_scopes_csv_resolution_and_html_fetch_to_requested_race(tmp_path, monkeypatch) -> None:
     target_date = date(2026, 9, 25)
     races = SampleDataSource().get_daily_races(target_date, "Ankara")
+    races[0].entries[0].source_horse_id = 90001
     races[0].entries[0].trainer.source_trainer_id = 9001
     races[0].entries[1].trainer.source_trainer_id = 9002
     source = TJKHtmlDataSource()
@@ -159,6 +160,7 @@ def test_prediction_ingestion_scopes_csv_resolution_and_html_fetch_to_requested_
         hippodrome="Ankara",
         race_no=1,
         program_from_csv=True,
+        refresh_history_source_ids={"90001"},
     )
 
     assert not frame.empty
@@ -167,9 +169,15 @@ def test_prediction_ingestion_scopes_csv_resolution_and_html_fetch_to_requested_
     assert source_factory_calls == ["prediction"]
     assert prediction_request_policies
     assert all(
-        policy == {"include_workouts": True, "request_timeout": 5.0, "max_retries": 0}
+        {
+            key: value
+            for key, value in policy.items()
+            if key != "force_refresh_history"
+        }
+        == {"include_workouts": True, "request_timeout": 20.0, "max_retries": 2}
         for policy in prediction_request_policies
     )
+    assert sum(policy.get("force_refresh_history") is True for policy in prediction_request_policies) == 1
 
     paths.raw_trainer_statistics_jsonl.write_text(
         json.dumps(
@@ -202,7 +210,7 @@ def test_prediction_ingestion_scopes_csv_resolution_and_html_fetch_to_requested_
     assert resolved_race_numbers == []
     assert prediction_request_policies
     assert all(
-        policy == {"include_workouts": True, "request_timeout": 5.0, "max_retries": 0}
+        policy == {"include_workouts": True, "request_timeout": 20.0, "max_retries": 2}
         for policy in prediction_request_policies
     )
     assert all(

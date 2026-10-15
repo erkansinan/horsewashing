@@ -136,6 +136,7 @@ def ingest_real_tjk_data(
     race_no: int | None = None,
     program_from_csv: bool = False,
     program_from_html: bool = False,
+    refresh_history_source_ids: set[str] | None = None,
 ) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Build labelled training or unlabelled prediction rows from live TJK pages."""
     if program_from_csv and program_from_html:
@@ -409,12 +410,19 @@ def ingest_real_tjk_data(
                     )
                     try:
                         if prediction_mode:
-                            stats = source.get_horse_statistics(
-                                entry,
-                                include_workouts=True,
-                                request_timeout=settings.prediction_data_request_timeout_seconds,
-                                max_retries=settings.prediction_data_request_max_retries,
+                            refresh_history = (
+                                refresh_history_source_ids is not None
+                                and entry.source_horse_id is not None
+                                and str(entry.source_horse_id) in refresh_history_source_ids
                             )
+                            history_options = {
+                                "include_workouts": True,
+                                "request_timeout": settings.prediction_history_request_timeout_seconds,
+                                "max_retries": settings.prediction_history_request_max_retries,
+                            }
+                            if refresh_history:
+                                history_options["force_refresh_history"] = True
+                            stats = source.get_horse_statistics(entry, **history_options)
                         else:
                             stats = source.get_horse_statistics(entry, include_workouts=True)
                     except DataSourceError as exc:

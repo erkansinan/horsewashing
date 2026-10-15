@@ -39,6 +39,25 @@ def test_predict_generates_reasoning_bullets(
     )
 
 
+def test_predict_exposes_requested_metrics_in_feature_snapshot(
+    sample_source: SampleDataSource, sample_race: Race, settings: Settings
+) -> None:
+    prediction = PredictionEngine(sample_source, settings).predict(sample_race)
+    metric_names = {
+        "form_trend_slope",
+        "rest_performance_interaction",
+        "tempo_fit_score",
+        "relative_strength",
+    }
+
+    for horse_prediction in prediction.ranked:
+        assert metric_names <= horse_prediction.feature_snapshot.keys()
+        assert all(
+            isinstance(horse_prediction.feature_snapshot[name], float)
+            for name in metric_names
+        )
+
+
 def test_predict_raises_without_active_entries(sample_source: SampleDataSource, settings: Settings) -> None:
     race = sample_source.get_daily_races(date.today())[0]
     for entry in race.entries:
