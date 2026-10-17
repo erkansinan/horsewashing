@@ -10,7 +10,9 @@ from atyaris.ml.features import (
     FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS,
     LEAKAGE_COLUMNS,
     TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS,
+    TJK_EXCLUDED_STAGE1_FEATURE_COLUMNS,
     TJK_SELECTED_STAGE1_FEATURE_COLUMNS,
+    TJK_STAGE1_FEATURE_COLUMNS,
     build_leakage_safe_features,
     preprocess_dataset,
 )
@@ -31,6 +33,14 @@ def test_preprocess_preserves_date_ordering() -> None:
     raw = _dataset().sample(frac=1.0, random_state=1).reset_index(drop=True)
     pre = preprocess_dataset(raw)
     assert pre["race_datetime"].is_monotonic_increasing
+
+
+def test_preprocess_rejects_duplicate_horse_entries_in_a_race() -> None:
+    duplicate_entry = _dataset().iloc[[0]]
+    raw = pd.concat([duplicate_entry, duplicate_entry], ignore_index=True)
+
+    with pytest.raises(ValueError, match="yinelenen race_id/horse_id"):
+        preprocess_dataset(raw)
 
 
 def test_feature_build_has_no_missing_values_in_feature_columns() -> None:
@@ -151,6 +161,21 @@ def test_selected_stage1_features_exclude_field_size_dependent_columns() -> None
     assert not FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS.intersection(
         TJK_SELECTED_STAGE1_FEATURE_COLUMNS
     )
+
+
+def test_active_stage1_features_exclude_unavailable_or_non_point_in_time_columns() -> None:
+    assert len(TJK_STAGE1_FEATURE_COLUMNS) == 40
+    assert not TJK_EXCLUDED_STAGE1_FEATURE_COLUMNS.intersection(
+        TJK_STAGE1_FEATURE_COLUMNS
+    )
+    assert {
+        "field_size",
+        "history_avg_finish_position",
+        "fatigue_score",
+        "class_drop_flag",
+        "workout_sudden_improvement",
+        "rest_optimal_fit",
+    }.issubset(TJK_STAGE1_FEATURE_COLUMNS)
 
 
 def test_placer_labels_are_available_but_never_model_features() -> None:
@@ -320,22 +345,18 @@ def test_no_future_aggregates() -> None:
     full = build_leakage_safe_features(frame).frame
     prefix = build_leakage_safe_features(frame.iloc[:1]).frame
     aggregate_columns = [
-        "form_avg_3",
-        "form_avg_5",
-        "form_avg_10",
-        "form_var_5",
-        "last_run_perf",
         "days_since_last_race",
-        "distance_fit",
-        "surface_fit",
-        "track_fit",
+        "fatigue_score",
+        "short_rest_flag",
+        "long_layoff_flag",
+        "race_frequency_3",
+        "race_frequency_5",
+        "seasonal_race_load",
         "history_avg_finish_position",
-        "history_avg_field_size",
         "history_avg_weight",
         "history_avg_odds",
         "history_avg_handicap_points",
         "history_avg_race_time_seconds",
-        "history_avg_prize",
         "jockey_horse_combo_wins",
     ]
 
@@ -492,13 +513,14 @@ def test_precomputed_prediction_history_survives_labeled_history_rows() -> None:
     assert prediction["career_wins"] == 2.0
     assert prediction["history_avg_finish_position"] == 3.5
     assert prediction["workout_count"] == 4.0
-    assert prediction["form_avg_5"] == 0.76
+    assert prediction["days_since_last_race"] == 5.0
+    assert prediction["workout_sudden_improvement"] == 0.2
+    assert prediction["rest_optimal_fit"] == 0.6
 
     training = built.frame.loc[built.frame["race_id"] == "R1"].iloc[0]
     assert training["career_starts"] == 4.0
     assert training["history_avg_finish_position"] == 3.0
     assert training["workout_count"] == 3.0
-    assert training["form_avg_5"] == 0.61
 
 
 def test_field_size_dependent_precomputed_features_can_be_refreshed_selectively() -> None:

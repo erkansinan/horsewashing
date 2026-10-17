@@ -12,6 +12,7 @@ from atyaris.data_sources.sample_source import SampleDataSource
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
 from atyaris.models.entities import PastPerformance, TrackSurface
 from atyaris.ml.pipeline import Phase1Paths
+from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.real_ingestion import (
     _append_raw_history_records,
     _field_size_adjusted_history,
@@ -164,6 +165,8 @@ def test_prediction_ingestion_scopes_csv_resolution_and_html_fetch_to_requested_
     )
 
     assert not frame.empty
+    assert set(TJK_STAGE1_FEATURE_COLUMNS).issubset(frame.columns)
+    assert not frame[TJK_STAGE1_FEATURE_COLUMNS].isna().any().any()
     assert set(frame["history_lookup_status"]).issubset({"fetch_failed", "unresolved_id"})
     assert resolved_race_numbers == [1]
     assert source_factory_calls == ["prediction"]

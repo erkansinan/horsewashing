@@ -352,3 +352,107 @@ testi pass olsa da final karar `DO_NOT_PROMOTE` kalir.
 Port 8001'deki status UI ve failed-health block odakli web testlerini gecti.
 Son degisikliklerden sonra tam pytest suite `202 passed` ile `745.90` saniyede
 tamamlandi.
+
+## 2026-10-17 TJK Feature Kaynak Filtresi
+
+Aktif Stage-1 listesi 59'dan, TJK programi/gecmis/idman satirlarindan alinabilen
+veya hedef yaris tarihine kadar olan kayitlardan noktasal olarak hesaplanabilen
+40 feature'a indirildi. Guncel yaris `field_size` degeri program girislerinin
+sayisindan hesaplanir; tarihsel `field_size` eksikligine bagimli form ve uyum
+feature'lari aktif model listesinden cikarildi. Ham bitis sirasi ortalamasi
+`history_avg_finish_position` ve dinlenme araliklari gibi alan boyutuna ihtiyac
+duymayan turetilmis feature'lar korundu.
+
+Asagidaki feature'lar artik Stage-1 veya yuksek oranli plase modelinde aktif
+degildir:
+
+- `form_avg_3`, `form_avg_5`, `form_avg_10`, `form_var_5`, `last_run_perf`,
+  `trend_3_10`, `recovery_score`, `distance_fit`, `surface_fit`, `track_fit`,
+  `history_avg_field_size`, `jockey_change_upgrade`, `trainer_change_upgrade`
+- `trainer_win_rate`, `trainer_top3_rate`, `trainer_top5_rate`,
+  `trainer_experience_log`, `trainer_stats_missing`
+- `history_avg_prize` ve `odds_rank_form_interaction`
+
+Trainer sayfasindaki toplu istatistikler hedef tarih icin tarihsel snapshot
+olmadigindan ileri-bakis riski tasir. Ikramiye alanindaki binlik ayiraclar
+guvenilir normalize edilmediginden ortalama ikramiye feature'i kullanilmaz.
+Canli ingestion artik `class_drop_flag`, `workout_sudden_improvement` ve
+`rest_optimal_fit` degerlerini TJK gecmisi/idmanlariyla uretir; jokey-at
+baslangic sayisi da hedef tarihten onceki kosulardan hesaplanir.
+
+Bu kaynak filtresi model artifact'ini otomatik yeniden egitmez. Mevcut artifact
+eski feature listesini tasimaya devam edebilir; yeni listeyle egitim ve health /
+walk-forward kontrolleri tamamlanmadan production'a alinmamali. Altı feature'lik
+`TJK_SELECTED_STAGE1_FEATURE_COLUMNS` deney alt-kumesi olarak kalir, varsayilan
+40 feature'lik listenin yerine gecmez.
+
+## Lokal TJK Snapshot Yeniden Kurulumu ve Aday Benchmark'i
+
+Lokal egitim frame'i artik `target_race_id` + `target_horse_id` ile eslesen
+gecmis snapshot'ini kullanir; ayni atin baska hedef yarislarindaki snapshot'lari
+birbirine karistirilmaz ve hedef tarihine esit/sonraki performanslar disarida
+birakilir. Gecmis performans normalizasyonunda bilinmeyen `field_size` icin
+varsayilan 10 kullanilmaz. Feature builder, canli ingestion veya bu lokal
+kurulum tarafindan acikca isaretlenmis noktasal feature snapshot'larini etiketli
+satirlarda da korur.
+
+Yerel arsivden 9.137 at-yaris satiri, 46 tarih ve 799 yaris kuruldu; yinelenen
+at-yaris anahtari yoktu. Hedef yaris snapshot'inda gecmis kayit kapsami `%92,1`;
+yaris oncesi tarih ve hedef mesafesinin 200 m cevresi kosulunu saglayan idman
+kapsami `%21,3` oldu. Dusuk idman kapsami, `workout_missing` ile acikca isaretlenir.
+Satirlarin `%48,9`'unda gecerli oran yok; bu nedenle market benchmark'i, mevcut
+pipeline davranisindaki eksik-oran `0,1` fallback'iyle hesaplandi ve bu kisitla
+yorumlanmali.
+
+Aday secimi icin daha once kullanilmis health test doneminden onceki sabit
+zamansal validation kullanildi: train `2026-07-18`–`2026-08-30`, calibration
+`2026-08-31`–`2026-09-04`, validation `2026-09-05`–`2026-09-10` (104 yaris).
+Piyasa baseline'i validation'da Top-1 `%21,2`, Top-4 `%45,2`, yaris log-loss
+`2,265` ve yaris Brier `1,065` verdi.
+
+| Aday | Feature sayisi | Top-1 | Top-4 | Yaris log-loss | Yaris Brier |
+|---|---:|---:|---:|---:|---:|
+| 3 temel feature | 3 | 17,3% | 47,1% | 2,291 | 1,070 |
+| Secili alt-kume | 6 | 18,3% | 45,2% | 2,243 | 1,063 |
+| Lokal gecmis alt-kumesi | 28 | 25,0% | 55,8% | 2,132 | 1,029 |
+| Tum aktif feature'lar | 40 | 26,0% | 56,7% | 2,099 | 1,025 |
+
+Validation'da 40 feature adayi diger model adaylarini uc metrikte de domine
+etti; son dogrulama icin bu aday onceden secildi. Son test, onceki health
+raporunda yer almayan `2026-09-17`–`2026-09-22` tarihlerini (5 tarih, 84 yaris)
+kullandi. Health sonucu `passed: false`: 10 kontrolden yalnizca
+`test_beats_market_baseline` basarisiz. Bu testte model race log-loss'i
+`2,104` ile piyasanin `2,232` degerinden ve Top-1'i `%38,1` ile piyasanin
+`%27,4` degerinden iyi; fakat Top-4 `%72,6` ile piyasanin `%73,8` degerinin
+altinda kaldi. Gate gevsetilmedi; mevcut model artifact'i/health dosyasi ve
+kullanici verileri uzerine yazilmadi, aday production'a alinmadi.
+
+## 2026-10-17 Istenen Tarih Araliginda Lokal Model Egitimi
+
+Kullanici istegiyle `2026-07-12`–`2026-09-16` araligi lokal TJK arsivinden
+yeniden kuruldu. Arsivde `2026-07-12`–`2026-07-17` tarihleri bulunmadigindan
+fiili egitim penceresi `2026-07-18`–`2026-09-16` oldu: 8.202 at-yaris satiri,
+715 yaris ve 41 tarih. Aday, 40 aktif feature ile egitildi; zamansal ayrim:
+
+| Partition | Tarih | Satir | Yaris |
+|---|---|---:|---:|
+| Train | 2026-07-18–2026-09-04 | 5.441 | 501 |
+| Calibration | 2026-09-05–2026-09-10 | 1.265 | 104 |
+| Test | 2026-09-11–2026-09-16 | 1.496 | 110 |
+
+Health `passed: true`; 10 kontrolun tamami gecti. Test log-loss `2,028`,
+piyasa `2,370`; Top-1 `%33,6`, piyasa `%28,2`; Top-4 `%70,0`, piyasa `%54,5`.
+Row-based BCE `0,27255`, piyasa `0,29608`.
+
+Aday artifact ve health raporu session dosyalarinda tutuldu:
+`local_tjk_20260712_20260916_phase1_candidate.joblib` (SHA-256
+`99c5c5adac8cdf390ec849313a49d5ed615394ea2468b2b3e727604e2ed8c6fc`) ve
+`local_tjk_20260712_20260916_phase1_candidate.health.json`. Aktif
+`models/phase1_logreg.joblib` bu islemde degistirilmedi; SHA-256
+`a32bc7c5fc995c7c7136cb688e3becd111141df035960bd3318bc9eb4d7c5891` olarak
+kaldi. Dolayisiyla yeni, health-pass aday henuz uygulamanin kullandigi aktif
+artifact degildir. Kullanici onayiyla aday daha sonra aktif
+`models/phase1_logreg.joblib` ve health dosyasina alindi. Aktif artifact
+SHA-256 degeri artik `99c5c5adac8cdf390ec849313a49d5ed615394ea2468b2b3e727604e2ed8c6fc`;
+health `passed: true` ve 10/10 kontrol gecti. Onceki aktif model ile health
+dosyasinin geri donus kopyalari session dosyalarinda saklandi.

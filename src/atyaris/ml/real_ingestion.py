@@ -13,6 +13,7 @@ import pandas as pd
 
 from atyaris.data_sources.base import DataSourceError
 from atyaris.data_sources.tjk_scraper import TJKHtmlDataSource
+from atyaris.ml.features import class_level
 from atyaris.models.entities import HorseStatistics, PastPerformance, TrainerStatistics
 from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
 from atyaris.ml.raw_store import JsonlRawStore
@@ -588,6 +589,11 @@ def ingest_real_tjk_data(
                     ]
                     history.sort(key=lambda p: p.race_date)
                     current_jockey = entry.jockey.name.strip().casefold()
+                    jockey_horse_combo_starts = sum(
+                        1
+                        for performance in history
+                        if (performance.jockey_name or "").strip().casefold() == current_jockey
+                    )
                     jockey_horse_combo_wins = sum(
                         1
                         for performance in history
@@ -602,9 +608,40 @@ def ingest_real_tjk_data(
                         and workout.distance_m is not None
                         and abs(float(workout.distance_m) - float(race.distance_m)) <= 200.0
                     ]
+                    historical_workouts.sort(
+                        key=lambda workout: workout.workout_date or date.min
+                    )
 
                     def _mean(values: list[float]) -> float:
                         return float(sum(values) / len(values)) if values else 0.0
+
+                    workout_speed_records = [
+                        (
+                            workout.workout_date,
+                            100.0
+                            / (
+                                float(workout.time_seconds)
+                                / (float(workout.distance_m) / 100.0)
+                            ),
+                        )
+                        for workout in historical_workouts
+                        if workout.workout_date is not None
+                        and workout.time_seconds is not None
+                        and workout.distance_m is not None
+                        and float(workout.time_seconds) > 0.0
+                        and float(workout.distance_m) > 0.0
+                    ]
+                    workout_speed_records.sort(key=lambda item: item[0])
+                    workout_speed_indices = [speed for _, speed in workout_speed_records]
+                    workout_latest_speed_index = (
+                        workout_speed_indices[-1] if workout_speed_indices else 0.0
+                    )
+                    workout_prior_avg_speed_index = _mean(workout_speed_indices[:-1])
+                    workout_sudden_improvement = (
+                        workout_latest_speed_index - workout_prior_avg_speed_index
+                        if workout_latest_speed_index and workout_prior_avg_speed_index
+                        else 0.0
+                    )
 
                     history_finish = [float(p.finish_position) for p in history if p.finish_position is not None]
                     history_field_sizes = [float(p.field_size) for p in history if p.field_size is not None]
@@ -660,14 +697,19 @@ def ingest_real_tjk_data(
                         p for p in history if (current - p.race_date).days <= 365
                     ]
 
+                    history_dates = [performance.race_date for performance in history]
                     perf_hist = _field_size_adjusted_history(history)
                     recent_3 = perf_hist[-3:] if perf_hist else []
                     recent_5 = perf_hist[-5:] if perf_hist else []
                     recent_10 = perf_hist[-10:] if perf_hist else []
 
                     days_since_last = (
-                        float((current - history[-1].race_date).days) if history else 30.0
+                        float((current - history_dates[-1]).days) if history_dates else 30.0
                     )
+                    recent_3_start = history_dates[max(0, len(history_dates) - 3)] if history_dates else current
+                    recent_5_start = history_dates[max(0, len(history_dates) - 5)] if history_dates else current
+                    recent_3_days = float((current - recent_3_start).days)
+                    recent_5_days = float((current - recent_5_start).days)
                     last_distance = float(history[-1].distance_m) if history else float(race.distance_m)
                     distance_shock = abs(float(race.distance_m) - last_distance) / max(float(race.distance_m), 1.0)
                     last_perf = recent_3[-1] if recent_3 else 0.45
@@ -676,8 +718,37 @@ def ingest_real_tjk_data(
                     seasonal_load = float(
                         sum(1 for p in history if (current - p.race_date).days <= 120)
                     ) / 120.0
-                    race_frequency_3 = 3.0 / max(days_since_last, 1.0)
-                    race_frequency_5 = 5.0 / max(days_since_last, 1.0)
+                    race_frequency_3 = 3.0 / max(recent_3_days, 1.0)
+                    race_frequency_5 = 5.0 / max(recent_5_days, 1.0)
+                    prior_gaps = [
+                        (history_dates[index] - history_dates[index - 1]).days
+                        for index in range(1, len(history_dates))
+                    ]
+                    rest_optimal_fit = (
+                        float(
+                            np.exp(
+                                -abs(days_since_last - float(np.median(prior_gaps)))
+                                / max(float(np.median(prior_gaps)), 7.0)
+                            )
+                        )
+                        if prior_gaps
+                        else 0.0
+                    )
+
+                    current_class = class_level(race.group_info)
+                    previous_class = next(
+                        (
+                            value
+                            for performance in reversed(history)
+                            if (value := class_level(performance.race_class)) is not None
+                        ),
+                        None,
+                    )
+                    class_drop_flag = (
+                        float(max(previous_class - current_class, 0.0))
+                        if current_class is not None and previous_class is not None
+                        else 0.0
+                    )
 
                     fatigue_load = (
                         1.8 * short_rest_flag
@@ -779,6 +850,7 @@ def ingest_real_tjk_data(
                             "race_id": str(race.id),
                             "date": current,
                             "race_datetime": race.start_time,
+                            "_tjk_point_in_time_features": 1.0,
                             "horse_id": str(entry.horse_id),
                             "horse_name": str(entry.horse_name),
                             "source_horse_id": entry.source_horse_id,
@@ -805,6 +877,9 @@ def ingest_real_tjk_data(
                             ),
                             "days_since_last_race": days_since_last,
                             "fatigue_score": fatigue_score,
+                            "class_drop_flag": class_drop_flag,
+                            "workout_sudden_improvement": workout_sudden_improvement,
+                            "rest_optimal_fit": rest_optimal_fit,
                             "recovery_score": recovery_score,
                             "short_rest_flag": short_rest_flag,
                             "long_layoff_flag": long_layoff_flag,
@@ -835,7 +910,7 @@ def ingest_real_tjk_data(
                                     if p.finish_position is not None and p.finish_position <= 3
                                 )
                             ),
-                            "jockey_horse_combo_starts": float(stats.jockey_horse_combo_starts),
+                            "jockey_horse_combo_starts": float(jockey_horse_combo_starts),
                             "jockey_horse_combo_wins": float(jockey_horse_combo_wins),
                             "trainer_starts": float(trainer_starts),
                             "trainer_first_place": float(trainer_statistics.first_place if trainer_statistics else 0),
@@ -861,6 +936,8 @@ def ingest_real_tjk_data(
                             "workout_avg_distance": _mean(workout_distances),
                             "workout_avg_speed_index": _mean(workout_speed_indices),
                             "workout_best_speed_index": max(workout_speed_indices) if workout_speed_indices else 0.0,
+                            "workout_latest_speed_index": workout_latest_speed_index,
+                            "workout_prior_avg_speed_index": workout_prior_avg_speed_index,
                             "days_since_last_workout": float((current - max(workout_dates)).days)
                             if workout_dates else 0.0,
                             "history_missing": float(not history),
@@ -875,6 +952,7 @@ def ingest_real_tjk_data(
                             "is_winner": int(finish_position == 1),
                             "track": _track_label(race.hippodrome),
                             "surface": surface,
+                            "race_class": race.group_info or "",
                             "track_condition": "NORMAL",
                         }
                     )

@@ -22,32 +22,26 @@ def test_phase2_feature_columns_exist() -> None:
         "last_year_places",
         "jockey_horse_combo_starts",
         "jockey_horse_combo_wins",
-        "trainer_win_rate",
-        "trainer_top3_rate",
-        "trainer_top5_rate",
-        "trainer_experience_log",
-        "trainer_stats_missing",
-        "history_avg_finish_position",
-        "history_avg_field_size",
-        "history_avg_weight",
-        "history_avg_odds",
-        "history_avg_handicap_points",
-        "history_avg_race_time_seconds",
-        "history_avg_prize",
-        "workout_count",
-        "workout_avg_distance",
-        "workout_avg_speed_index",
-        "workout_best_speed_index",
-        "days_since_last_workout",
-        "recovery_score",
+        "days_since_last_race",
+        "fatigue_score",
         "short_rest_flag",
         "long_layoff_flag",
         "race_frequency_3",
         "race_frequency_5",
         "seasonal_race_load",
-        "distance_fit",
-        "surface_fit",
-        "track_fit",
+        "history_avg_finish_position",
+        "history_avg_weight",
+        "history_avg_odds",
+        "history_avg_handicap_points",
+        "history_avg_race_time_seconds",
+        "workout_count",
+        "workout_avg_distance",
+        "workout_avg_speed_index",
+        "workout_best_speed_index",
+        "days_since_last_workout",
+        "class_drop_flag",
+        "workout_sudden_improvement",
+        "rest_optimal_fit",
     }
 
     assert required.issubset(set(built.feature_columns))
@@ -57,6 +51,18 @@ def test_phase2_feature_columns_exist() -> None:
     assert "finish_position" not in built.feature_columns
     assert "workout_avg_time_seconds" not in built.feature_columns
     assert "workout_best_time_seconds" not in built.feature_columns
+    assert not {
+        "trainer_win_rate",
+        "trainer_top3_rate",
+        "trainer_top5_rate",
+        "trainer_experience_log",
+        "trainer_stats_missing",
+        "form_avg_5",
+        "history_avg_field_size",
+        "history_avg_prize",
+        "distance_fit",
+        "recovery_score",
+    }.intersection(built.feature_columns)
 
 
 def test_tjk_numeric_features_have_no_missing_values() -> None:

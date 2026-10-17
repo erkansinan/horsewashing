@@ -26,23 +26,40 @@ TJK_STAGE1_FEATURE_COLUMNS = [
     "career_starts", "career_wins", "career_places",
     "last_year_starts", "last_year_wins", "last_year_places",
     "jockey_horse_combo_starts", "jockey_horse_combo_wins",
-    "trainer_win_rate", "trainer_top3_rate", "trainer_top5_rate",
-    "trainer_experience_log", "trainer_stats_missing",
-    "form_avg_3", "form_avg_5", "form_avg_10", "form_var_5", "last_run_perf",
-    "trend_3_10", "days_since_last_race", "fatigue_score", "recovery_score",
+    "days_since_last_race", "fatigue_score",
     "short_rest_flag", "long_layoff_flag", "race_frequency_3", "race_frequency_5",
-    "seasonal_race_load", "distance_fit", "surface_fit", "track_fit",
-    "history_avg_finish_position", "history_avg_field_size", "history_avg_weight",
+    "seasonal_race_load",
+    "history_avg_finish_position", "history_avg_weight",
     "history_avg_odds", "history_avg_handicap_points", "history_avg_race_time_seconds",
-    "history_avg_prize",
     "workout_count",
     "workout_avg_distance", "workout_avg_speed_index", "workout_best_speed_index",
     "days_since_last_workout",
     "history_missing", "career_summary_missing", "workout_missing",
     "age_missing", "handicap_missing", "odds_missing",
-    "jockey_change_upgrade", "trainer_change_upgrade", "class_drop_flag",
-    "workout_sudden_improvement", "rest_optimal_fit",
+    "class_drop_flag", "workout_sudden_improvement", "rest_optimal_fit",
 ]
+
+TJK_EXCLUDED_STAGE1_FEATURE_COLUMNS = {
+    "trainer_win_rate",
+    "trainer_top3_rate",
+    "trainer_top5_rate",
+    "trainer_experience_log",
+    "trainer_stats_missing",
+    "form_avg_3",
+    "form_avg_5",
+    "form_avg_10",
+    "form_var_5",
+    "last_run_perf",
+    "trend_3_10",
+    "recovery_score",
+    "distance_fit",
+    "surface_fit",
+    "track_fit",
+    "history_avg_field_size",
+    "history_avg_prize",
+    "jockey_change_upgrade",
+    "trainer_change_upgrade",
+}
 
 TJK_SELECTED_STAGE1_FEATURE_COLUMNS = [
     "handicap_points",
@@ -60,8 +77,6 @@ TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS = [
     "class_drop_flag",
     "workout_sudden_improvement",
     "rest_optimal_fit",
-    "form_avg_5",
-    "last_run_perf",
     "career_starts",
     "career_places",
     "history_longshot_starts",
@@ -70,7 +85,6 @@ TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS = [
     "odds_log",
     "odds_rank_fraction",
     "odds_vs_field_median",
-    "odds_rank_form_interaction",
     "odds_rank_longshot_place_interaction",
 ]
 
@@ -95,7 +109,6 @@ FIELD_SIZE_DEPENDENT_FEATURE_COLUMNS = {
 
 MISSINGNESS_INDICATOR_COLUMNS = {
     "odds_missing",
-    "trainer_stats_missing",
     "history_missing",
     "workout_missing",
     "career_summary_missing",
@@ -165,6 +178,19 @@ def preprocess_dataset(frame: pd.DataFrame) -> pd.DataFrame:
     out["date"] = pd.to_datetime(out["date"]).dt.date
     out["race_datetime"] = pd.to_datetime(out["race_datetime"])
     out = out.sort_values(["race_datetime", "race_id", "draw"], ascending=[True, True, True]).reset_index(drop=True)
+    if {"race_id", "horse_id"}.issubset(out.columns):
+        duplicate_entries = out.duplicated(["race_id", "horse_id"], keep=False)
+        if duplicate_entries.any():
+            duplicate_keys = (
+                out.loc[duplicate_entries, ["race_id", "horse_id"]]
+                .drop_duplicates()
+                .head(5)
+                .to_dict(orient="records")
+            )
+            raise ValueError(
+                "Her yaris/at icin tek satir olmali; yinelenen race_id/horse_id: "
+                f"{duplicate_keys}"
+            )
     out["odds"] = pd.to_numeric(out["odds"], errors="coerce")
     out["market_probability"] = pd.to_numeric(out["market_probability"], errors="coerce")
     out["weight"] = pd.to_numeric(out["weight"], errors="coerce")
@@ -199,7 +225,7 @@ def _smoothed_mean(values: list[float], prior: float = 0.45, prior_strength: flo
     return float((sum(values) + prior * prior_strength) / (len(values) + prior_strength))
 
 
-def _class_level(value: object) -> float | None:
+def class_level(value: object) -> float | None:
     text = str(value or "").upper()
     if not text or text == "NAN":
         return None
@@ -299,7 +325,13 @@ def build_leakage_safe_features(
         "surface_fit",
         "distance_fit",
     }
-    if (
+    has_point_in_time_snapshot = (
+        "_tjk_point_in_time_features" in df.columns
+        and pd.to_numeric(df["_tjk_point_in_time_features"], errors="coerce")
+        .eq(1.0)
+        .all()
+    )
+    if has_point_in_time_snapshot or (
         "finish_position" not in df.columns
         and precomputed_columns.issubset(df.columns)
         and not recompute_precomputed_columns
@@ -375,8 +407,8 @@ def build_leakage_safe_features(
         long_layoff_flag = 1.0 if days_since_last > 75 else 0.0
         jockey_change_upgrade = _change_upgrade(h, getattr(row, "jockey_name", ""), "jockey_name")
         trainer_change_upgrade = _change_upgrade(h, getattr(row, "trainer_name", ""), "trainer_name")
-        current_class = _class_level(getattr(row, "race_class", ""))
-        previous_classes = [_class_level(item.get("race_class")) for item in h]
+        current_class = class_level(getattr(row, "race_class", ""))
+        previous_classes = [class_level(item.get("race_class")) for item in h]
         previous_class = next((value for value in reversed(previous_classes) if value is not None), None)
         class_drop_flag = float(max(previous_class - current_class, 0.0)) if current_class is not None and previous_class is not None else 0.0
         latest_workout = float(getattr(row, "workout_latest_speed_index", 0.0) or 0.0)

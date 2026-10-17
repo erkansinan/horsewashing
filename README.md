@@ -373,10 +373,30 @@ sonucu feature hesaplanirken kullanilmaz; gecmis form ve ozetler yalnizca
 TJK'nin onceki kosularindan hesaplanir.
 
 Benter Stage-1 egitimi ve varsayilan walk-forward backtest, `TJK_STAGE1_FEATURE_COLUMNS`
-listesinde bulunan tum TJK kaynakli sayisal feature'lari ve veri-eksiklik gostergelerini
+icindeki TJK'dan alinabilen veya noktasal-gecmis verisinden hesaplanabilen 40 feature'i
 kullanir. Piyasa oranlari ikinci asamada kullanilmaya devam eder. Daha once egitilmis
-model artifact'lari kendi eski feature listelerini tasir; tam listeye gecmek icin modeli
+model artifact'lari kendi feature listelerini tasir; aktif liste degistiginde modeli
 yeniden egitmek gerekir.
+
+Asagidaki feature'lar aktif Stage-1 listesinden cikarilmistir:
+
+- `form_avg_3`, `form_avg_5`, `form_avg_10`, `form_var_5`, `last_run_perf`,
+  `trend_3_10`, `recovery_score`, `distance_fit`, `surface_fit`, `track_fit`,
+  `history_avg_field_size`, `jockey_change_upgrade`, `trainer_change_upgrade`:
+  gecmis kosulardaki alan boyutu kapsami yetersiz oldugu icin gercek olcum yerine
+  varsayilan/eksik deger uretebiliyorlar.
+- `trainer_win_rate`, `trainer_top3_rate`, `trainer_top5_rate`,
+  `trainer_experience_log`, `trainer_stats_missing`: TJK antrenor sayfasi guncel
+  toplam istatistik verir; gecmise donuk her yaris icin o tarihteki snapshot
+  olmadigindan tarihsel egitimde ileri-bakisma riski tasirlar.
+- `history_avg_prize`: TJK'nin ikramiye metni yerel binlik ayiraclariyla
+  verildiginden, mevcut sayisal donusum tutar buyuklugunu guvenilir bicimde
+  korumaz.
+
+`field_size` ise hedef kosunun TJK programindaki girisleri sayilarak hesaplandigi
+icin tutulur. Gecmis yarislarin `field_size` degeriyle karistirilmamalidir.
+`TJK_SELECTED_STAGE1_FEATURE_COLUMNS` icindeki alti feature, ayri bir deney
+adayinin alt-kumesidir; varsayilan aktif listeyle ayni sey degildir.
 
 #### Yaris ve fiziksel bilgiler
 
@@ -447,6 +467,9 @@ onceki en az 5.00 ganyanli kosularindaki Top-3 orani vardir. Gecmis oranli
 plase orani, az sayida kosusu olan atlarda asiri guven olusmamasi icin %30
 oncul ve 3 kosuluk guc ile yumusatilir. Bu feature'lar her tahmin tarihinde
 yalnizca o tarihten onceki kosular kullanilarak uretilir.
+
+Bu model de field-size bagimliligi nedeniyle normalize edilmis form feature'larini
+kullanmaz; aktif kolonlari `TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS` belirler.
 
 TJK gecmis satirlarindaki `S20` degerinin resmi anlami mevcut kaynaklarda
 dogrulanamamistir. Ham deger arsivde korunur, ancak anlami teyit edilene kadar
