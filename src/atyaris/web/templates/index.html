@@ -50,7 +50,7 @@
         <td>{{ race.race_time }}</td>
         <td class="horse-list">{{ race.horse_names }}</td>
         <td>
-          <a class="button" href="/predict?race_id={{ race.race_id }}&source=ml&date={{ date }}&city={{ city }}&sort_by=calibrated_probability&sort_order=desc">ML Tahmin Gor</a>
+          <a class="button" href="/predict?race_id={{ race.race_id|urlencode }}&source=ml&date={{ date|urlencode }}&city={{ city|urlencode }}&sort_by=calibrated_probability&sort_order=desc">ML Tahmin Gor</a>
         </td>
       </tr>
       {% endfor %}
@@ -60,7 +60,7 @@
   <h2>Gunun Yarislari</h2>
   {% if city %}
   <p>
-    <a class="button" href="/predict-all-pdf?source={{ source }}&date={{ date }}&city={{ city }}&sort_by=strategy&sort_order=desc">Tum Kosularin PDF Tahmin Raporu</a>
+    <a class="button" href="/predict-all-pdf?source={{ source|urlencode }}&date={{ date|urlencode }}&city={{ city|urlencode }}&sort_by=strategy&sort_order=desc">Tum Kosularin PDF Tahmin Raporu</a>
   </p>
   {% endif %}
   <table>
@@ -85,7 +85,7 @@
           {% endfor %}
         </td>
         <td>
-          <a class="button" href="/predict?race_id={{ race.id }}&source={{ source }}&date={{ date }}&city={{ city }}">Tahmin Uret</a>
+          <a class="button" href="/predict?race_id={{ race.id|urlencode }}&source={{ source|urlencode }}&date={{ date|urlencode }}&city={{ city|urlencode }}">Tahmin Uret</a>
         </td>
       </tr>
       {% endfor %}
@@ -112,6 +112,20 @@
 
     source.addEventListener("change", refreshHippodromes);
     dateInput.addEventListener("change", refreshHippodromes);
+    form.addEventListener("submit", () => {
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) {
+        submit.disabled = true;
+        submit.textContent = "Yukleniyor...";
+      }
+    });
+    window.addEventListener("pageshow", (event) => {
+      const submit = form.querySelector('button[type="submit"]');
+      if (event.persisted && submit) {
+        submit.disabled = false;
+        submit.textContent = "Bulteni Getir";
+      }
+    });
   })();
 </script>
 {% endblock %}

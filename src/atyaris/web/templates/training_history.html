@@ -49,7 +49,7 @@
     {% if item.recommended %}<strong>Compact önerilir: {{ item.reason }}</strong>{% endif %}
   </div>
   {% endfor %}
-  <form method="post" action="/raw/compact">
+  <form id="raw-compact-form" method="post" action="/raw/compact">
     <button type="submit">Ham veriyi compact et</button>
   </form>
   <form id="raw-repair-form" method="post" action="/raw/repair">
@@ -70,6 +70,25 @@
 
 <script>
   (function () {
+    const compactForm = document.getElementById("raw-compact-form");
+    if (compactForm) {
+      compactForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const compactButton = compactForm.querySelector("button");
+        compactButton.disabled = true;
+        compactButton.textContent = "Compact ediliyor...";
+        try {
+          const response = await fetch(compactForm.action, { method: "POST" });
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          window.location.reload();
+        } catch (error) {
+          compactButton.disabled = false;
+          compactButton.textContent = "Ham veriyi compact et";
+          window.alert("Compact işlemi başarısız: " + error.message);
+        }
+      });
+    }
+
     const form = document.getElementById("raw-repair-form");
     const button = document.getElementById("raw-repair-button");
     const status = document.getElementById("raw-repair-status");
@@ -91,9 +110,16 @@
         if (!response.ok) throw new Error("HTTP " + response.status);
         const started = await response.json();
         const poll = async () => {
-          const statusResponse = await fetch("/raw/repair/status/" + encodeURIComponent(started.job_id));
-          if (!statusResponse.ok) throw new Error("Durum alınamadı");
-          const job = await statusResponse.json();
+          let job;
+          try {
+            const statusResponse = await fetch("/raw/repair/status/" + encodeURIComponent(started.job_id));
+            if (!statusResponse.ok) throw new Error("Durum alınamadı");
+            job = await statusResponse.json();
+          } catch (pollError) {
+            message.textContent = "Durum alınamadı; yeniden deneniyor...";
+            window.setTimeout(poll, 3000);
+            return;
+          }
           status.dataset.state = job.status;
           status.querySelector("strong").textContent = job.message || job.status;
           message.textContent = `Dosya: ${job.current_file || "-"} | Dosya: ${job.files_completed || 0}/${job.files_total || 5} | `
@@ -205,6 +231,7 @@
       const jobId = status.dataset.jobId;
       try {
         const response = await fetch("/train/status/" + encodeURIComponent(jobId));
+        if (!response.ok) throw new Error("HTTP " + response.status);
         const job = await response.json();
         status.dataset.state = job.status;
         status.querySelector("strong").textContent = job.status;
@@ -217,7 +244,8 @@
           if (pause) pause.remove();
         }
       } catch (error) {
-        status.querySelector(".training-message").textContent = "Durum alınamadı; sayfayı yenileyin.";
+        status.querySelector(".training-message").textContent = "Durum alınamadı; yeniden deneniyor...";
+        window.setTimeout(() => poll(status), 5000);
       }
     };
     statuses.forEach((status) => {
@@ -239,8 +267,17 @@
         "retry-skipped": "/train/retry-skipped/",
       };
       button.disabled = true;
-      await fetch(endpoints[action] + jobId, { method: "POST" });
-      window.location.reload();
+      try {
+        const response = await fetch(endpoints[action] + jobId, { method: "POST" });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.detail || "HTTP " + response.status);
+        }
+        window.location.reload();
+      } catch (error) {
+        button.disabled = false;
+        window.alert("İşlem başarısız: " + error.message);
+      }
     });
   })();
 </script>
@@ -249,8 +286,18 @@
 <script>
   (function () {
     const update = async (status) => {
-      const response = await fetch("/collect/status/" + encodeURIComponent(status.dataset.jobId));
-      const job = await response.json();
+      let job;
+      try {
+        const response = await fetch("/collect/status/" + encodeURIComponent(status.dataset.jobId));
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        job = await response.json();
+      } catch (error) {
+        const message = status.querySelector(".collection-message");
+        if (message) message.textContent = "Durum alınamadı; yeniden deneniyor...";
+        window.setTimeout(() => update(status), 5000);
+        return;
+      }
+      const previousState = status.dataset.state;
       status.dataset.state = job.status;
       status.querySelector("strong").textContent = job.status;
       status.querySelector(".collection-message").textContent = job.message || "";
@@ -281,6 +328,7 @@
       const failedTargets = status.querySelector(".failed-targets");
       if (failedTargets) failedTargets.textContent = job.failed_targets || 0;
       if (job.status === "running" || job.pause_requested) window.setTimeout(() => update(status), 1500);
+      else if (previousState === "running") window.location.reload();
     };
     document.querySelectorAll(".collection-status[data-job-id]").forEach((status) => {
       if (status.dataset.state === "running") update(status);
@@ -292,8 +340,17 @@
       if (action === "cancel" && !window.confirm("Veri toplama durdurulsun mu? Checkpoint korunur.")) return;
       if (action === "remove" && !window.confirm("Bu veri toplama kaydi gecmis listesinden kaldirilsin mi?")) return;
       button.disabled = true;
-      await fetch("/collect/" + action + "/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
-      window.location.reload();
+      try {
+        const response = await fetch("/collect/" + action + "/" + encodeURIComponent(button.dataset.jobId), { method: "POST" });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.detail || "HTTP " + response.status);
+        }
+        window.location.reload();
+      } catch (error) {
+        button.disabled = false;
+        window.alert("İşlem başarısız: " + error.message);
+      }
     });
   })();
 </script>

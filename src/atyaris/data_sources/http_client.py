@@ -16,6 +16,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_CLIENT_STATUSES = frozenset({408, 429})
+_MAX_RETRY_AFTER_SECONDS = 30.0
+
 
 def manual_check_url(url: str, params: dict | None = None) -> str:
     """Return the exact GET URL that can be opened manually in a browser."""
@@ -59,97 +62,15 @@ class RateLimitedClient:
         min_interval: float | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        retry_count = self._max_retries if max_retries is None else max(0, max_retries)
-        with self._lock:
-            elapsed = time.monotonic() - self._last_request_at
-            request_interval = self._min_interval if min_interval is None else max(0.0, min_interval)
-            wait = request_interval - elapsed
-            if wait > 0:
-                time.sleep(wait)
-            logger.info(
-                "TJK GET basliyor | url=%s | params=%s | timeout=%.1fs | max_retry=%d",
-                url,
-                params or {},
-                timeout or self._client.timeout.read,
-                retry_count,
-            )
-            for attempt in range(retry_count + 1):
-                try:
-                    logger.info(
-                        "TJK GET deneniyor | attempt=%d/%d | url=%s | params=%s",
-                        attempt + 1,
-                        retry_count + 1,
-                        url,
-                        params or {},
-                    )
-                    request_options = {}
-                    if timeout is not None:
-                        request_options["timeout"] = timeout
-                    if headers is not None:
-                        request_options["headers"] = headers
-                    response = self._client.get(url, params=params, **request_options)
-                    response.raise_for_status()
-                    logger.info(
-                        "TJK GET yanitlandi | attempt=%d/%d | status=%d | url=%s | params=%s",
-                        attempt + 1,
-                        retry_count + 1,
-                        response.status_code,
-                        url,
-                        params or {},
-                    )
-                    break
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code < 500 or attempt >= retry_count:
-                        logger.error(
-                            "TJK GET HTTP hatasi | attempt=%d/%d | status=%d | url=%s | params=%s",
-                            attempt + 1,
-                            retry_count + 1,
-                            exc.response.status_code,
-                            url,
-                            params or {},
-                        )
-                        raise
-                    delay = self._retry_backoff_seconds * (attempt + 1)
-                    logger.warning(
-                        "TJK GET tekrar denenecek | retry=%d/%d | status=%d | delay=%.1fs | url=%s | params=%s",
-                        attempt + 1,
-                        retry_count,
-                        exc.response.status_code,
-                        delay,
-                        url,
-                        params or {},
-                    )
-                    if delay:
-                        time.sleep(delay)
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    logger.warning(
-                        "TJK GET hatasi | attempt=%d/%d | error=%s: %s | url=%s | params=%s",
-                        attempt + 1,
-                        retry_count + 1,
-                        type(exc).__name__,
-                        exc,
-                        url,
-                        params or {},
-                    )
-                    if attempt >= retry_count:
-                        logger.error(
-                            "TJK GET basarisiz | manuel kontrol URL: %s",
-                            manual_check_url(url, params),
-                        )
-                        raise
-                    delay = self._retry_backoff_seconds * (attempt + 1)
-                    logger.warning(
-                        "TJK GET tekrar denenecek | retry=%d/%d | delay=%.1fs | url=%s | params=%s",
-                        attempt + 1,
-                        retry_count,
-                        delay,
-                        url,
-                        params or {},
-                    )
-                    if delay:
-                        time.sleep(delay)
-            self._last_request_at = time.monotonic()
-        return response
+        return self._request(
+            "GET",
+            url,
+            params=params,
+            timeout=timeout,
+            max_retries=max_retries,
+            min_interval=min_interval,
+            headers=headers,
+        )
 
     def post(
         self,
@@ -158,42 +79,119 @@ class RateLimitedClient:
         timeout: float | None = None,
         max_retries: int | None = None,
     ) -> httpx.Response:
+        return self._request("POST", url, data=data, timeout=timeout, max_retries=max_retries)
+
+    def _retry_delay(self, attempt: int, response: httpx.Response | None = None) -> float:
+        delay = self._retry_backoff_seconds * (attempt + 1)
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        if retry_after:
+            try:
+                delay = max(delay, min(float(retry_after), _MAX_RETRY_AFTER_SECONDS))
+            except ValueError:
+                pass
+        return delay
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        params: dict | None = None,
+        data: dict[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        min_interval: float | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         retry_count = self._max_retries if max_retries is None else max(0, max_retries)
+        request_options: dict[str, object] = {}
+        if params is not None:
+            request_options["params"] = params
+        if data is not None:
+            request_options["data"] = data
+        if timeout is not None:
+            request_options["timeout"] = timeout
+        if headers is not None:
+            request_options["headers"] = headers
         with self._lock:
             elapsed = time.monotonic() - self._last_request_at
-            wait = self._min_interval - elapsed
+            request_interval = self._min_interval if min_interval is None else max(0.0, min_interval)
+            wait = request_interval - elapsed
             if wait > 0:
                 time.sleep(wait)
             logger.info(
-                "TJK POST basliyor | url=%s | timeout=%.1fs | max_retry=%d",
+                "TJK %s basliyor | url=%s | params=%s | timeout=%.1fs | max_retry=%d",
+                method,
                 url,
+                params or {},
                 timeout or self._client.timeout.read,
                 retry_count,
             )
-            for attempt in range(retry_count + 1):
-                try:
-                    if timeout is None:
-                        response = self._client.post(url, data=data)
-                    else:
-                        response = self._client.post(url, data=data, timeout=timeout)
-                    break
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    logger.warning(
-                        "TJK POST hatasi | attempt=%d/%d | error=%s: %s | url=%s",
-                        attempt + 1,
-                        retry_count + 1,
-                        type(exc).__name__,
-                        exc,
-                        url,
-                    )
-                    if attempt >= retry_count:
-                        raise
-                    delay = self._retry_backoff_seconds * (attempt + 1)
-                    if delay:
-                        time.sleep(delay)
-            self._last_request_at = time.monotonic()
-        response.raise_for_status()
-        return response
+            try:
+                for attempt in range(retry_count + 1):
+                    try:
+                        response = self._client.request(method, url, **request_options)
+                        response.raise_for_status()
+                        logger.info(
+                            "TJK %s yanitlandi | attempt=%d/%d | status=%d | url=%s | params=%s",
+                            method,
+                            attempt + 1,
+                            retry_count + 1,
+                            response.status_code,
+                            url,
+                            params or {},
+                        )
+                        return response
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code
+                        retryable = status >= 500 or status in _RETRYABLE_CLIENT_STATUSES
+                        if not retryable or attempt >= retry_count:
+                            logger.error(
+                                "TJK %s HTTP hatasi | attempt=%d/%d | status=%d | url=%s | params=%s",
+                                method,
+                                attempt + 1,
+                                retry_count + 1,
+                                status,
+                                url,
+                                params or {},
+                            )
+                            raise
+                        delay = self._retry_delay(attempt, exc.response)
+                        logger.warning(
+                            "TJK %s tekrar denenecek | retry=%d/%d | status=%d | delay=%.1fs | url=%s | params=%s",
+                            method,
+                            attempt + 1,
+                            retry_count,
+                            status,
+                            delay,
+                            url,
+                            params or {},
+                        )
+                        if delay:
+                            time.sleep(delay)
+                    except (httpx.TimeoutException, httpx.TransportError) as exc:
+                        logger.warning(
+                            "TJK %s hatasi | attempt=%d/%d | error=%s: %s | url=%s | params=%s",
+                            method,
+                            attempt + 1,
+                            retry_count + 1,
+                            type(exc).__name__,
+                            exc,
+                            url,
+                            params or {},
+                        )
+                        if attempt >= retry_count:
+                            logger.error(
+                                "TJK %s basarisiz | manuel kontrol URL: %s",
+                                method,
+                                manual_check_url(url, params),
+                            )
+                            raise
+                        delay = self._retry_delay(attempt)
+                        if delay:
+                            time.sleep(delay)
+            finally:
+                self._last_request_at = time.monotonic()
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     def close(self) -> None:
         self._client.close()

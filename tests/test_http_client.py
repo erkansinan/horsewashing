@@ -252,3 +252,81 @@ def test_tjk_adapter_normalizes_dns_failure_to_data_source_error() -> None:
             source._get_html("https://www.tjk.org/test", {})
     finally:
         source.close()
+
+
+def test_get_retries_too_many_requests_response() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(200, text="ok", request=request)
+
+    client = RateLimitedClient(
+        "test-agent",
+        min_interval=0.0,
+        max_retries=1,
+        retry_backoff_seconds=0.0,
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    try:
+        response = client.get("https://example.test/horse-history")
+    finally:
+        client.close()
+
+    assert response.text == "ok"
+    assert attempts["count"] == 2
+
+
+def test_get_retries_protocol_error() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise httpx.RemoteProtocolError("server disconnected", request=request)
+        return httpx.Response(200, text="ok", request=request)
+
+    client = RateLimitedClient(
+        "test-agent",
+        min_interval=0.0,
+        max_retries=1,
+        retry_backoff_seconds=0.0,
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    try:
+        response = client.get("https://example.test/horse-history")
+    finally:
+        client.close()
+
+    assert response.text == "ok"
+    assert attempts["count"] == 2
+
+
+def test_post_retries_server_error_response() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, text="ok", request=request)
+
+    client = RateLimitedClient(
+        "test-agent",
+        min_interval=0.0,
+        max_retries=1,
+        retry_backoff_seconds=0.0,
+    )
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    try:
+        response = client.post("https://example.test/horses", {"QueryParameter_AtIsmi": "TEST"})
+    finally:
+        client.close()
+
+    assert response.text == "ok"
+    assert attempts["count"] == 2

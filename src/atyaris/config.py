@@ -44,7 +44,12 @@ class Settings(BaseSettings):
     tjk_base_url: str = "https://www.tjk.org"
     request_timeout_seconds: float = 30.0
     min_request_interval_seconds: float = 1.0
-    user_agent: str = "atyaris-tahmin/1.0 (+iletisim@example.com; arastirma/egitim amacli)"
+    # TJK, 'bot' gorunumlu User-Agent'lari onbellekte olmayan sayfalarda ~50 sn bekletip
+    # 504/403 donduruyor; tarayici uyumlu UA ile ayni istek <1 sn'de 200 donuyor.
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 atyaris-tahmin/1.0"
+    )
     cache_ttl_seconds: int = 600
     cache_path: str = ".cache/atyaris_cache.sqlite3"
     prediction_data_request_timeout_seconds: float = Field(default=5.0, gt=0.0)

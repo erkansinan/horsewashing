@@ -41,9 +41,9 @@
   },
   {
     "job_id": "pause-route-job",
-    "status": "paused",
+    "status": "running",
     "mode": "online",
-    "message": "Sunucu yeniden baslatildi; checkpointten devam edilebilir",
+    "message": "Egitim duraklatiliyor...",
     "retry_targets": [],
     "can_accept_partial": false,
     "start_date": "2026-09-09",
@@ -171,6 +171,16 @@
   },
   {
     "job_id": "f12a434460794a469b7e6d41f12b589e",
+    "status": "completed",
+    "mode": "local",
+    "message": "Lokal veriden egitim tamamlandi",
+    "retry_targets": [],
+    "can_accept_partial": false,
+    "start_date": "2026-07-12",
+    "end_date": "2026-09-16"
+  },
+  {
+    "job_id": "928fa0339a7c480a95fa9369747f6ce9",
     "status": "completed",
     "mode": "local",
     "message": "Lokal veriden egitim tamamlandi",

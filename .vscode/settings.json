@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python -m pytest tests -x -q 2>&1 \\| select -last 15$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

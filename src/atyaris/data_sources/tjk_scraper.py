@@ -43,7 +43,7 @@ import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -126,6 +126,8 @@ def _match_hippodrome(city: str) -> str | None:
     """Kullanicinin verdigi (serbest yazimli) sehir adini, TJK'nin resmi
     hipodrom adlarindan biriyle eslestirir; eslesme yoksa ``None`` doner."""
     normalized = _normalize_city(city)
+    if not normalized:
+        return None
     for name in KNOWN_HIPPODROMES:
         folded = _normalize_city(name)
         if normalized == folded or normalized in folded or folded in normalized:
@@ -143,6 +145,17 @@ _HORSE_SEARCH_PATH = "/TR/YarisSever/Query/Data/Atlar"
 _HORSE_WORKOUT_PATH = "/TR/YarisSever/Query/Page/IdmanIstatistikleri"
 _TRAINER_STATISTICS_PATH = "/TR/YarisSever/Query/Page/AntrenorIstatistikleri"
 _DAILY_PROGRAM_CSV_BASE_URL = "https://medya-cdn.tjk.org/raporftp/TJKPDF"
+
+_MAX_HISTORY_PAGES = 40
+
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 atyaris-tahmin/1.0"
+)
+
+_TRAINER_COUNT_FIELDS = frozenset(
+    {"total_starts", "first_place", "second_place", "third_place", "fourth_place", "fifth_place"}
+)
 
 _SURFACE_MAP = {
     "kum": TrackSurface.KUM,
@@ -265,7 +278,7 @@ class TJKHtmlDataSource(RaceDataSource):
     def __init__(
         self,
         base_url: str = "https://www.tjk.org",
-        user_agent: str = "atyaris-tahmin/1.0",
+        user_agent: str = DEFAULT_USER_AGENT,
         request_timeout: float = 30.0,
         min_request_interval: float = 1.0,
         cache: SqliteTTLCache | None = None,
@@ -299,7 +312,7 @@ class TJKHtmlDataSource(RaceDataSource):
         self._horse_history_path = Path(horse_history_path)
         self._local_history_by_name: dict[str, list[dict[str, object]]] = {}
         self._local_history_loaded_names: set[str] = set()
-        self._local_stats_cache: dict[tuple[str, int], HorseStatistics] = {}
+        self._local_stats_cache: dict[tuple[str, int, str, str], HorseStatistics] = {}
 
     def close(self) -> None:
         self._client.close()
@@ -353,7 +366,7 @@ class TJKHtmlDataSource(RaceDataSource):
         elif source_ids and source_id not in source_ids:
             return None
 
-        cache_key = (name_key, source_id)
+        cache_key = (name_key, source_id, _horse_identity_key(entry.jockey.name), entry.horse_id)
         if cache_key in self._local_stats_cache:
             return self._local_stats_cache[cache_key]
 
@@ -410,9 +423,7 @@ class TJKHtmlDataSource(RaceDataSource):
         return stats
 
     def _horse_history_url(self, horse_id: int | str) -> str:
-        # TJK tek '&' ile 504/403 donduruyor, '&&' ile 200 donuyor; httpx params
-        # sozlugu '&&'yi '&'ye indirgediginden sorgu metin olarak kurulur.
-        return f"{self._base_url}{_HORSE_HISTORY_PATH}?QueryParameter_AtId={horse_id}&&Era=past"
+        return f"{self._base_url}{_HORSE_HISTORY_PATH}?QueryParameter_AtId={horse_id}&Era=past"
 
     def _get_html(
         self,
@@ -769,12 +780,16 @@ class TJKHtmlDataSource(RaceDataSource):
                 save_current_race()
                 program_odds_index = None
                 race_no = int(race_match.group(1))
-                start_time = datetime.combine(
-                    target_date,
-                    datetime.strptime(
-                        f"{race_match.group(2)}:{race_match.group(3)}", "%H:%M"
-                    ).time(),
-                )
+                try:
+                    start_time = datetime.combine(
+                        target_date,
+                        datetime.strptime(
+                            f"{race_match.group(2)}:{race_match.group(3)}", "%H:%M"
+                        ).time(),
+                    )
+                except ValueError:
+                    logger.debug("TJK CSV kosu saati ayristirilamadi: %s", first_cell)
+                    start_time = datetime.combine(target_date, datetime.min.time())
                 row_details = " ".join(row[1:])
                 distance_match = re.search(r"(\d{3,4})\s*m\b", row_details, re.I)
                 distance = int(distance_match.group(1)) if distance_match else 0
@@ -842,31 +857,14 @@ class TJKHtmlDataSource(RaceDataSource):
     def _get_hippodrome_sehir_ids(self, target_date: date) -> dict[str, int]:
         """Secili tarih icin TJK sekmelerindeki resmi hipodrom->SehirId
         eslesmesini dondurur."""
-        url = f"{self._base_url}{_DAILY_PROGRAM_DATA_PATH}"
-        params = {
-            "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
-            "Era": _era_for_date(target_date),
-        }
-        html = self._get_html(url, params)
-        soup = BeautifulSoup(html, "lxml")
-        mapping: dict[str, int] = {}
-        for link in soup.select("ul.gunluk-tabs li a"):
-            raw = (link.get("id") or link.get_text(" ", strip=True) or "").strip()
-            if not raw:
-                continue
-            name = re.sub(r"\s*\(.*\)\s*$", "", raw).strip()
-            matched = _match_hippodrome(name)
-            if not matched:
-                continue
-            href = link.get("href") or ""
-            m = re.search(r"[?&]SehirId=(\d+)", href)
-            if m:
-                mapping[matched] = int(m.group(1))
-        return mapping
+        return self._fetch_sehir_ids(_DAILY_PROGRAM_DATA_PATH, target_date)
 
     def _get_results_hippodrome_sehir_ids(self, target_date: date) -> dict[str, int]:
         """Gunluk yaris sonuclari sayfasindaki hipodrom->SehirId eslesmesi."""
-        url = f"{self._base_url}{_DAILY_RESULTS_DATA_PATH}"
+        return self._fetch_sehir_ids(_DAILY_RESULTS_DATA_PATH, target_date)
+
+    def _fetch_sehir_ids(self, data_path: str, target_date: date) -> dict[str, int]:
+        url = f"{self._base_url}{data_path}"
         params = {
             "QueryParameter_Tarih": target_date.strftime("%d/%m/%Y"),
             "Era": _era_for_date(target_date),
@@ -942,18 +940,27 @@ class TJKHtmlDataSource(RaceDataSource):
         if csv_link is not None:
             csv_url = csv_link.get("href")
             if csv_url:
-                program_races = self.get_daily_races_csv(target_date, matched)
-                horse_numbers = {
-                    race.race_no: {
-                        _normalize_horse_name(entry.horse_name): entry.number
-                        for entry in race.entries
+                try:
+                    program_races = self.get_daily_races_csv(target_date, matched)
+                    horse_numbers = {
+                        race.race_no: {
+                            _normalize_horse_name(entry.horse_name): entry.number
+                            for entry in race.entries
+                        }
+                        for race in program_races
                     }
-                    for race in program_races
-                }
-                csv_results = self._parse_csv_results(
-                    self._get_html(str(csv_url), {}),
-                    horse_numbers_by_race_name=horse_numbers,
-                )
+                    csv_results = self._parse_csv_results(
+                        self._get_html(urljoin(url, str(csv_url)), {}),
+                        horse_numbers_by_race_name=horse_numbers,
+                    )
+                except DataSourceError as exc:
+                    csv_results = {}
+                    logger.warning(
+                        "TJK sonuc CSV baglantisi alinamadi; HTML tablo ayristirilacak | tarih=%s | hipodrom=%s | hata=%s",
+                        target_date.isoformat(),
+                        matched,
+                        exc,
+                    )
                 if csv_results:
                     return csv_results
 
@@ -1001,12 +1008,14 @@ class TJKHtmlDataSource(RaceDataSource):
         results: dict[int, dict[int, int]] = {}
         current_race_no: int | None = None
         in_entries = False
+        rows_seen: dict[int, int] = {}
         for row in csv.reader(io.StringIO(csv_text.lstrip("\ufeff")), delimiter=";"):
             first_cell = row[0].strip() if row else ""
             race_match = _CSV_RACE_HEADER_RE.match(first_cell)
             if race_match:
                 current_race_no = int(race_match.group(1))
                 results.setdefault(current_race_no, {})
+                rows_seen[current_race_no] = 0
                 in_entries = False
                 continue
             if first_cell.casefold() == "at no":
@@ -1015,7 +1024,10 @@ class TJKHtmlDataSource(RaceDataSource):
             if not in_entries or current_race_no is None or not first_cell.isdigit():
                 continue
             race_results = results[current_race_no]
-            finish_position = len(race_results) + 1
+            # Siralama CSV satir sirasindan gelir; eslesmeyen bir satir sonraki atlarin
+            # derecesini kaydirmamali.
+            rows_seen[current_race_no] += 1
+            finish_position = rows_seen[current_race_no]
             if horse_numbers_by_race_name is None:
                 horse_number = int(first_cell)
             else:
@@ -1243,9 +1255,23 @@ class TJKHtmlDataSource(RaceDataSource):
             return []
         races: list[Race] = []
         for name in KNOWN_HIPPODROMES:
-            races.extend(
-                self.get_daily_races(target_date, name, resolve_missing_ids=resolve_missing_ids)
-            )
+            try:
+                races.extend(
+                    self.get_daily_races(
+                        target_date,
+                        name,
+                        resolve_missing_ids=resolve_missing_ids,
+                        include_odds=include_odds,
+                        race_no=race_no,
+                    )
+                )
+            except DataSourceError as exc:
+                logger.warning(
+                    "TJK program alinamadi; diger hipodromlarla devam ediliyor | tarih=%s | hipodrom=%s | hata=%s",
+                    target_date.isoformat(),
+                    name,
+                    exc,
+                )
         return races
 
     def _enrich_source_horse_ids(
@@ -1696,9 +1722,12 @@ class TJKHtmlDataSource(RaceDataSource):
             folded = value.casefold().translate(_TURKISH_FOLD)
             return re.sub(r"[^a-z0-9%]", "", folded)
 
-        def number(value: str) -> float:
+        def number(value: str, integer: bool = False) -> float:
             text = (value or "").replace("%", "").strip()
-            text = text.replace(".", "").replace(",", ".") if "," in text and "." in text else text.replace(",", ".")
+            if integer:
+                text = re.sub(r"[.,\s](?=\d{3}\b)", "", text)
+            else:
+                text = text.replace(".", "").replace(",", ".") if "," in text and "." in text else text.replace(",", ".")
             match = re.search(r"\d+(?:\.\d+)?", text)
             return float(match.group(0)) if match else 0.0
 
@@ -1727,13 +1756,17 @@ class TJKHtmlDataSource(RaceDataSource):
                     index = next((header_map[alias] for alias in field_aliases if alias in header_map), None)
                     if index is None or index >= len(cells):
                         continue
-                    values[field] = cells[index] if field == "trainer_name" else number(cells[index])
+                    values[field] = (
+                        cells[index]
+                        if field == "trainer_name"
+                        else number(cells[index], integer=field in _TRAINER_COUNT_FIELDS)
+                    )
                 if not values.get("total_starts"):
                     continue
                 return TrainerStatistics(
                     trainer_id=trainer_id,
                     trainer_name=str(values.get("trainer_name", "")),
-                    **{field: int(value) if field in {"total_starts", "first_place", "second_place", "third_place", "fourth_place", "fifth_place"} else float(value) for field, value in values.items() if field != "trainer_name"},
+                    **{field: int(value) if field in _TRAINER_COUNT_FIELDS else float(value) for field, value in values.items() if field != "trainer_name"},
                 )
         raise DataSourceError("AntrenorIstatistikleri tablosu bulunamadi veya parse edilemedi.")
 
@@ -1775,6 +1808,54 @@ class TJKHtmlDataSource(RaceDataSource):
                 self._cache.set(cache_key, html, self._cache_ttl)
         return self._parse_horse_page_identity(html, expected_name)
 
+    def _fetch_extra_history_rows(
+        self,
+        horse_id: int,
+        total: int,
+        loaded: int,
+        timeout: float | None,
+        max_retries: int | None,
+        bypass_cache: bool,
+        date_re: re.Pattern[str],
+    ) -> list:  # type: ignore[type-arg]
+        """TJK ilk sayfada 50 kosu gosterir; kalanlar 0 tabanli PageNumber ile gelir."""
+        extra_rows: list = []  # type: ignore[type-arg]
+        for page in range(1, _MAX_HISTORY_PAGES + 1):
+            if loaded >= total:
+                break
+            url = (
+                f"{self._base_url}{_HORSE_HISTORY_PATH}?QueryParameter_AtId={horse_id}"
+                f"&Era=past&PageNumber={page}&Sort=Tarih%20Desc"
+            )
+            try:
+                fragment = self._get_html(
+                    url,
+                    None,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                    bypass_cache=bypass_cache,
+                )
+            except DataSourceError as exc:
+                logger.warning(
+                    "TJK at gecmisi sayfasi alinamadi; eldeki satirlarla devam | at_id=%s | sayfa=%s | hata=%s",
+                    horse_id,
+                    page,
+                    exc,
+                )
+                break
+            rows = [
+                row
+                for row in BeautifulSoup(fragment, "lxml").find_all("tr")
+                if (first := row.find("td")) is not None
+                and date_re.search(first.get_text(" ", strip=True))
+            ]
+            if not rows:
+                break
+            extra_rows.extend(rows)
+            loaded += len(rows)
+        return extra_rows
+
     def get_horse_statistics(
         self,
         entry: RaceEntry,
@@ -1788,8 +1869,6 @@ class TJKHtmlDataSource(RaceDataSource):
             return local_stats
 
         if entry.source_horse_id is None:
-            if local_stats is not None:
-                return local_stats
             raise DataSourceError(
                 "At istatistikleri icin gerekli QueryParameter_AtId bulunamadi."
             )
@@ -1799,23 +1878,16 @@ class TJKHtmlDataSource(RaceDataSource):
             self._history_request_timeout if request_timeout is None else request_timeout
         )
         history_retries = self._history_max_retries if max_retries is None else max_retries
-        try:
-            html = self._get_html(
-                url,
-                None,
-                timeout=history_timeout,
-                max_retries=history_retries,
-                bypass_cache=force_refresh_history,
-            )
-        except DataSourceError:
-            if local_stats is not None:
-                return local_stats
-            raise
+        html = self._get_html(
+            url,
+            None,
+            timeout=history_timeout,
+            max_retries=history_retries,
+            bypass_cache=force_refresh_history,
+        )
         soup = BeautifulSoup(html, "lxml")
         tables = soup.find_all("table")
         if not tables:
-            if local_stats is not None:
-                return local_stats
             raise DataSourceError("AtKosuBilgileri sayfasinda tablo bulunamadi.")
 
         summary_table = None
@@ -1840,8 +1912,6 @@ class TJKHtmlDataSource(RaceDataSource):
                 best_history_rows = len(matching_rows)
 
         if history_table is None:
-            if local_stats is not None:
-                return local_stats
             raise DataSourceError("AtKosuBilgileri gecmis kosu tablosu bulunamadi.")
 
         def _parse_int(text: str) -> int:
@@ -1940,15 +2010,31 @@ class TJKHtmlDataSource(RaceDataSource):
                 return None
 
         header_map: dict[str, int] = {}
-        for row in history_table.find_all("tr"):
-            headers = [c.get_text(" ", strip=True) for c in row.find_all("th")]
-            if not headers:
-                continue
-            normalized = [_normalize_header(h) for h in headers]
-            if "tarih" in normalized and ("msf" in normalized or "mesafe" in normalized):
-                for idx, name in enumerate(normalized):
-                    header_map[name] = idx
-                break
+        # TJK basliklari <tr> olmadan dogrudan <thead> icinde <th> olarak verir.
+        normalized_headers = [
+            _normalize_header(th.get_text(" ", strip=True)) for th in history_table.find_all("th")
+        ]
+        if "tarih" in normalized_headers and (
+            "msf" in normalized_headers or "mesafe" in normalized_headers
+        ):
+            for idx, name in enumerate(normalized_headers):
+                header_map.setdefault(name, idx)
+
+        history_rows = list(history_table.find_all("tr"))
+        page_text = soup.get_text(" ", strip=True)
+        total_match = re.search(r"Toplam\s+(\d+)\s+sonu", page_text)
+        if total_match:
+            history_rows.extend(
+                self._fetch_extra_history_rows(
+                    entry.source_horse_id,
+                    int(total_match.group(1)),
+                    sum(1 for row in history_rows if row.find("td")),
+                    history_timeout,
+                    history_retries,
+                    force_refresh_history,
+                    date_re,
+                )
+            )
 
         def _cell(cells: list[str], *aliases: str) -> str:
             for alias in aliases:
@@ -1958,7 +2044,7 @@ class TJKHtmlDataSource(RaceDataSource):
             return ""
 
         past_performances: list[PastPerformance] = []
-        for row in history_table.find_all("tr"):
+        for row in history_rows:
             cells = [c.get_text(" ", strip=True) for c in row.find_all(["th", "td"])]
             if not cells:
                 continue
@@ -1972,7 +2058,7 @@ class TJKHtmlDataSource(RaceDataSource):
             except ValueError:
                 continue
 
-            hippodrome = _cell(cells, "sehir") or _cell(cells, "şehir") or (cells[1] if len(cells) > 1 else "")
+            hippodrome = _cell(cells, "sehir") or (cells[1] if len(cells) > 1 else "")
             distance_m = _parse_int(_cell(cells, "msf", "mesafe") or (cells[2] if len(cells) > 2 else ""))
             surface_info = _cell(cells, "pist") or (cells[3] if len(cells) > 3 else "")
             if "Ç:" in surface_info or "Çim" in surface_info:
@@ -1990,9 +2076,9 @@ class TJKHtmlDataSource(RaceDataSource):
             field_size = None
             odds = _parse_float(_cell(cells, "gny") or (cells[10] if len(cells) > 10 else ""))
             group_info = _cell(cells, "grup") or (cells[11] if len(cells) > 11 else None)
-            race_name = _cell(cells, "k.no-k.adi") or _cell(cells, "k.no-k.adi") or (cells[12] if len(cells) > 12 else None)
+            race_name = _cell(cells, "knokadi") or (cells[12] if len(cells) > 12 else None)
             race_class = _cell(cells, "kcins") or (cells[13] if len(cells) > 13 else None)
-            trainer_name = _cell(cells, "ant") or _cell(cells, "ant.") or (cells[14] if len(cells) > 14 else None)
+            trainer_name = _cell(cells, "ant") or (cells[14] if len(cells) > 14 else None)
             owner_name = _cell(cells, "sahip") or (cells[15] if len(cells) > 15 else None)
             handicap_points = _parse_float(_cell(cells, "hp") or (cells[16] if len(cells) > 16 else ""))
             prize_info = _cell(cells, "ikramiye") or (cells[17] if len(cells) > 17 else None)
@@ -2028,16 +2114,14 @@ class TJKHtmlDataSource(RaceDataSource):
 
         combo_starts = 0
         combo_wins = 0
-        jockey_norm = entry.jockey.name.strip().lower()
+        jockey_norm = _horse_identity_key(entry.jockey.name)
         for p in past_performances:
-            if (p.jockey_name or "").strip().lower() == jockey_norm:
+            if _horse_identity_key(p.jockey_name or "") == jockey_norm:
                 combo_starts += 1
                 if p.finish_position == 1:
                     combo_wins += 1
 
         if not past_performances:
-            if local_stats is not None:
-                return local_stats
             raise DataSourceError(
                 "AtKosuBilgileri gecmis kosu tablosu bulundu fakat parse edilebilen satir yok."
             )
@@ -2049,6 +2133,15 @@ class TJKHtmlDataSource(RaceDataSource):
         if not career_places:
             career_places = sum(1 for p in past_performances if p.finish_position and p.finish_position <= 3)
 
+        if not last_year_starts:
+            latest_year = max(p.race_date.year for p in past_performances)
+            latest_year_runs = [p for p in past_performances if p.race_date.year == latest_year]
+            last_year_starts = len(latest_year_runs)
+            last_year_wins = sum(1 for p in latest_year_runs if p.finish_position == 1)
+            last_year_places = sum(
+                1 for p in latest_year_runs if p.finish_position and p.finish_position <= 3
+            )
+
         if not include_workouts:
             return HorseStatistics(
                 horse_id=entry.horse_id,
@@ -2058,7 +2151,7 @@ class TJKHtmlDataSource(RaceDataSource):
                 career_starts=career_starts,
                 career_wins=career_wins,
                 career_places=career_places,
-                last_year_starts=last_year_starts or min(len(past_performances), 10),
+                last_year_starts=last_year_starts,
                 last_year_wins=last_year_wins,
                 last_year_places=last_year_places,
                 jockey_horse_combo_starts=combo_starts,
@@ -2159,7 +2252,7 @@ class TJKHtmlDataSource(RaceDataSource):
             career_starts=career_starts,
             career_wins=career_wins,
             career_places=career_places,
-            last_year_starts=last_year_starts or min(len(past_performances), 10),
+            last_year_starts=last_year_starts,
             last_year_wins=last_year_wins,
             last_year_places=last_year_places,
             jockey_horse_combo_starts=combo_starts,

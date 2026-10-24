@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<p><a href="/?source={{ source }}&date={{ date }}&city={{ city }}">&larr; Bultene don</a></p>
+<p><a href="/?source={{ source|urlencode }}&date={{ date|urlencode }}&city={{ city|urlencode }}">&larr; Bultene don</a></p>
 {% if city and pdf_url %}
   <p><a class="button" href="{{ pdf_url }}">Bu Siralama ile PDF Al</a></p>
 {% endif %}

@@ -23,7 +23,7 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -730,6 +730,25 @@ class MLRaceSummary:
     value_bet_count: int
 
 
+def _close_data_source(data_source: object) -> None:
+    close = getattr(data_source, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - kapatma hatasi yaniti bozmamali
+            logger.debug("Veri kaynagi kapatilamadi", exc_info=True)
+
+
+def _data_source_closer():  # type: ignore[no-untyped-def]
+    """Istek bitince istek boyunca acilan veri kaynaklarinin HTTP istemcilerini kapatir."""
+    opened: list[object] = []
+    try:
+        yield opened
+    finally:
+        for data_source in opened:
+            _close_data_source(data_source)
+
+
 def _bulletin_source_for_ml(settings):  # type: ignore[no-untyped-def]
     """ML web flow uses real daily bulletin for date/city/race selection."""
     return build_prediction_data_source(settings)
@@ -1357,12 +1376,15 @@ def _overlay_bulletin_horse_names(
         return records
 
     if bulletin_races is None:
+        data_source = None
         try:
             data_source = _bulletin_source_for_ml(settings)
             bulletin_races = _fetch_ml_bulletin_races(data_source, target_date, city)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Bulletin name overlay skipped: %s", exc)
             return records
+        finally:
+            _close_data_source(data_source)
 
     requested_no = _parse_race_no(requested_race_id)
     target_race = None
@@ -1881,8 +1903,11 @@ def create_app() -> FastAPI:
         start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
         end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ) -> RedirectResponse:
-        parsed_start = date.fromisoformat(start_date)
-        parsed_end = date.fromisoformat(end_date)
+        try:
+            parsed_start = date.fromisoformat(start_date)
+            parsed_end = date.fromisoformat(end_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Tarih YYYY-AA-GG formatinda olmali.") from exc
         if parsed_start > parsed_end:
             raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
         with _TRAINING_LOCK:
@@ -1954,7 +1979,9 @@ def create_app() -> FastAPI:
                 return JSONResponse({"job_id": job_id, "status": "removed"})
             if action == "pause" and job.get("status") == "running":
                 _COLLECTION_PAUSE_REQUESTS.add(job_id)
-                _COLLECTION_CANCEL_EVENTS[job_id].set()
+                pause_event = _COLLECTION_CANCEL_EVENTS.get(job_id)
+                if pause_event is not None:
+                    pause_event.set()
                 job["message"] = "Veri toplama duraklatiliyor; mevcut TJK istegi tamamlaninca duracak..."
                 job["pause_requested"] = True
             elif action == "cancel":
@@ -2173,6 +2200,7 @@ def create_app() -> FastAPI:
         raw_repair: str = Query(""),
     ) -> HTMLResponse:
         error = None
+        raw_maintenance: list[dict[str, object]] = []
         history = {"latest_training": None, "runs": [], "count": 0}
         try:
             if start_date:
@@ -2183,7 +2211,6 @@ def create_app() -> FastAPI:
                 raise ValueError("Baslangic tarihi bitis tarihinden sonra olamaz.")
             settings = get_settings()
             paths = paths_from_settings(settings)
-            raw_maintenance = []
             for path, collection in (
                 (paths.raw_daily_program_jsonl, "daily_program"),
                 (paths.raw_race_results_jsonl, "race_results"),
@@ -2209,6 +2236,18 @@ def create_app() -> FastAPI:
             logger.exception("Training history page failure")
             error = f"Egitim gecmisi okunamadi: {exc}"
 
+        with _TRAINING_LOCK:
+            training_jobs = [
+                {"job_id": job_id, **job}
+                for job_id, job in reversed(list(_TRAINING_JOBS.items()))
+                if job.get("status") != "cancelled"
+            ]
+            collection_jobs = [
+                {"job_id": job_id, **job}
+                for job_id, job in reversed(list(_COLLECTION_JOBS.items()))
+                if job.get("status") != "cancelled"
+            ]
+
         return templates.TemplateResponse(
             request,
             "training_history.html",
@@ -2219,16 +2258,8 @@ def create_app() -> FastAPI:
                 "end_date": end_date,
                 "limit": limit,
                 "train_job": train_job,
-                "training_jobs": [
-                    {"job_id": job_id, **job}
-                    for job_id, job in reversed(list(_TRAINING_JOBS.items()))
-                    if job.get("status") != "cancelled"
-                ],
-                "collection_jobs": [
-                    {"job_id": job_id, **job}
-                    for job_id, job in reversed(list(_COLLECTION_JOBS.items()))
-                    if job.get("status") != "cancelled"
-                ],
+                "training_jobs": training_jobs,
+                "collection_jobs": collection_jobs,
                 "raw_maintenance": raw_maintenance,
                 "raw_repair": raw_repair,
             },
@@ -2446,6 +2477,7 @@ def create_app() -> FastAPI:
         source: str = Query("sample", pattern="^(sample|tjk|ml)$"),
         date_str: str = Query("", alias="date"),
         city: str = Query(""),
+        opened_sources: list = Depends(_data_source_closer),
     ) -> HTMLResponse:
         settings = get_settings()
         error = None
@@ -2460,6 +2492,7 @@ def create_app() -> FastAPI:
 
             if source == "ml":
                 data_source = _bulletin_source_for_ml(settings)
+                opened_sources.append(data_source)
                 if isinstance(data_source, TJKHtmlDataSource):
                     hippodromes, source_info = _safe_tjk_hippodromes(data_source, parsed_date)
                     if source_info:
@@ -2499,6 +2532,7 @@ def create_app() -> FastAPI:
                 )
 
             data_source = build_data_source(source, settings)
+            opened_sources.append(data_source)
             if isinstance(data_source, TJKHtmlDataSource):
                 hippodromes, source_info = _safe_tjk_hippodromes(data_source, parsed_date)
                 if source_info:
@@ -2558,6 +2592,7 @@ def create_app() -> FastAPI:
             pattern="^(strategy|number|odds|total|form|form_trend_slope|rest_performance_interaction|tempo_fit_score|relative_strength|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly|rank|horse_id|calibrated_probability|place2_probability|place3_probability|top3_probability|placer_probability|edge|kelly_fraction|form_strength)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+        opened_sources: list = Depends(_data_source_closer),
     ) -> HTMLResponse:
         settings = get_settings()
         model_paths = paths_from_settings(settings)
@@ -2615,6 +2650,7 @@ def create_app() -> FastAPI:
                 target_track_key = _normalize_track_key(city) if city else ""
 
                 data_source = _bulletin_source_for_ml(settings)
+                opened_sources.append(data_source)
                 try:
                     bulletin_races = _fetch_ml_bulletin_races(
                         data_source,
@@ -2898,7 +2934,7 @@ def create_app() -> FastAPI:
                                 if matching_entry.source_horse_id is not None:
                                     row["tjk_stats_url"] = (
                                         "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?"
-                                        f"QueryParameter_AtId={matching_entry.source_horse_id}&&Era=past"
+                                        f"QueryParameter_AtId={matching_entry.source_horse_id}&Era=past"
                                     )
                                     row["tjk_workout_url"] = (
                                         "https://www.tjk.org/TR/YarisSever/Query/Page/IdmanIstatistikleri?"
@@ -3277,7 +3313,7 @@ def create_app() -> FastAPI:
                             if hp and hp.entry.source_horse_id is not None:
                                 row["tjk_stats_url"] = (
                                     "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?"
-                                    f"QueryParameter_AtId={hp.entry.source_horse_id}&&Era=past"
+                                    f"QueryParameter_AtId={hp.entry.source_horse_id}&Era=past"
                                 )
                                 row["tjk_workout_url"] = (
                                     "https://www.tjk.org/TR/YarisSever/Query/Page/IdmanIstatistikleri?"
@@ -3397,6 +3433,7 @@ def create_app() -> FastAPI:
                 )
 
             data_source = build_data_source(source, settings)
+            opened_sources.append(data_source)
             if source == "tjk" and not city:
                 error = "TJK kaynaginda tahmin uretmeden once bir hipodrom secin."
                 return templates.TemplateResponse(
@@ -3554,6 +3591,7 @@ def create_app() -> FastAPI:
             pattern="^(strategy|number|odds|total|form|jockey_trainer|distance_surface|weight|rest|win_probability|confidence|ev|kelly)$",
         ),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
+        opened_sources: list = Depends(_data_source_closer),
     ) -> Response:
         settings = get_settings()
         if source == "ml":
@@ -3576,8 +3614,12 @@ def create_app() -> FastAPI:
                 detail="PDF olusturma icin 'reportlab' kurulu olmali. Lutfen bagimliliklari guncelleyin.",
             ) from exc
 
-        parsed_date = parse_date(date_str or None)
+        try:
+            parsed_date = parse_date(date_str or None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Gecersiz tarih: {exc}") from exc
         data_source = build_data_source(source, settings)
+        opened_sources.append(data_source)
         races = fetch_races(data_source, parsed_date, city or None, None)
         if not races:
             raise HTTPException(

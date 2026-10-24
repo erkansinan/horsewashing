@@ -1845,3 +1845,52 @@ def test_predict_ml_fallback_renders_nonzero_place_probabilities(monkeypatch) ->
     assert "P(2.)" in response.text
     assert "P(3.)" in response.text
     assert "0.00%" not in response.text
+
+
+def test_collect_rejects_impossible_calendar_date() -> None:
+    response = _client().get(
+        "/collect", params={"start_date": "2026-13-45", "end_date": "2026-13-46"}
+    )
+
+    assert response.status_code == 400
+
+
+def test_training_page_with_invalid_dates_renders_error_instead_of_500() -> None:
+    response = _client().get(
+        "/training", params={"start_date": "2026-13-45", "end_date": "2026-09-10"}
+    )
+
+    assert response.status_code == 200
+    assert "Gecersiz istek" in response.text
+
+
+def test_predict_all_pdf_rejects_invalid_date_with_400() -> None:
+    response = _client().get(
+        "/predict-all-pdf", params={"source": "sample", "city": "Ankara", "date": "not-a-date"}
+    )
+
+    assert response.status_code == 400
+
+
+def test_request_data_sources_are_closed(monkeypatch) -> None:
+    closed: list[object] = []
+
+    class _ClosableSource(SampleDataSource):
+        def close(self) -> None:
+            closed.append(self)
+
+    monkeypatch.setattr(web_app_module, "build_data_source", lambda source, settings: _ClosableSource())
+
+    response = _client().get("/", params={"source": "sample"})
+
+    assert response.status_code == 200
+    assert len(closed) == 1
+
+
+def test_index_links_url_encode_city() -> None:
+    response = _client().get("/", params={"source": "sample"})
+    soup = BeautifulSoup(response.text, "html.parser")
+    links = [a["href"] for a in soup.find_all("a", href=True) if a["href"].startswith("/predict?")]
+
+    assert links
+    assert all(" " not in link for link in links)

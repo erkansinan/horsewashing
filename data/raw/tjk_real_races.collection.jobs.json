@@ -8,13 +8,13 @@
     "completed_days": 11,
     "remaining_days": 56,
     "skipped_days": 0,
-    "failed_targets": 240,
-    "missing_data_records": 54,
-    "estimated_remaining": "9.0 dk",
+    "failed_targets": 27,
+    "missing_data_records": 6,
+    "estimated_remaining": "431.3 dk",
     "current_date": "Tarihsel i",
-    "current_target": "Tarihsel istatistik hesaplaniyor: 2026-09-16 / \u0130stanbul / 1. kosu / LEONA | gunluk at: 6/102 | gunluk uretilen satir: 5 | tahmini kalan: 149 dk 35 sn",
-    "manual_url": "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?QueryParameter_AtId=112449&&Era=past)",
-    "last_error": "    Uyari: BERFO HAT gecmisi alinamadi; varsayilan istatistik kullaniliyor (TJK sayfasi alinamadi | ReadTimeout: The read operation timed out | Manuel kontrol URL: https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?QueryParameter_AtId=112449&&Era=past)",
+    "current_target": "Tarihsel istatistik hesaplaniyor: 2026-09-13 / \u0130stanbul / 3. kosu / DREAM START | gunluk at: 26/101 | gunluk uretilen satir: 25 | tahmini kalan: 97 dk 42 sn",
+    "manual_url": "https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?QueryParameter_AtId=124407&Era=past)",
+    "last_error": "    Uyari: KING AMORR gecmisi alinamadi; varsayilan istatistik kullaniliyor (TJK sayfasi alinamadi | ReadTimeout: The read operation timed out | Manuel kontrol URL: https://www.tjk.org/TR/YarisSever/Query/ConnectedPage/AtKosuBilgileri?QueryParameter_AtId=124407&Era=past)",
     "pause_requested": false
   }
 ]

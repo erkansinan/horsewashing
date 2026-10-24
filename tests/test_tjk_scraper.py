@@ -867,9 +867,9 @@ def test_horse_history_url_keeps_double_ampersand_before_era() -> None:
     source = TJKHtmlDataSource()
     url = source._horse_history_url(109870)
 
-    assert url.endswith("AtKosuBilgileri?QueryParameter_AtId=109870&&Era=past")
+    assert url.endswith("AtKosuBilgileri?QueryParameter_AtId=109870&Era=past")
     request = httpx.Request("GET", url)
-    assert request.url.query == b"QueryParameter_AtId=109870&&Era=past"
+    assert request.url.query == b"QueryParameter_AtId=109870&Era=past"
 
 
 def test_get_horse_statistics_parses_history_without_summary_table() -> None:
@@ -1031,3 +1031,100 @@ At No;At İsmi;Yaş
     )
 
     assert results == {1: {7: 1, 1: 2, 10: 3}}
+
+
+def test_parse_csv_results_unmatched_row_does_not_shift_positions() -> None:
+    csv_text = """Ankara;(1. Yarış Günü);08/09/2026
+1. Koşu : 14.00;Handikap
+At No;At İsmi;Yaş
+7;BIRINCI;4y
+9;BILINMEYEN AT;4y
+2;UCUNCU;4y
+"""
+
+    results = TJKHtmlDataSource._parse_csv_results(
+        csv_text,
+        horse_numbers_by_race_name={1: {"birinci": 7, "ucuncu": 2}},
+    )
+
+    assert results == {1: {7: 1, 2: 3}}
+
+
+def test_parse_daily_program_csv_tolerates_invalid_race_time() -> None:
+    races = TJKHtmlDataSource._parse_daily_program_csv(
+        "1. Kosu : 99.99;Maiden;Araplar;kg;1200m;Kum;;;;\n"
+        "At No;At İsmi;Yaş;Orijin;Anne;Kilo;Jokey;Sahip;Antrenör;St;AGF;HP;Son 6\n"
+        "1;DENIZ YILDIZI;4y;BABA;ANNE;56;JOKEY;SAHIP;ANTRENOR;1;;41;1",
+        "Ankara",
+        date(2026, 9, 23),
+    )
+
+    assert len(races) == 1
+    assert races[0].start_time == datetime(2026, 9, 23, 0, 0)
+
+
+def test_get_daily_races_without_city_skips_failing_hippodrome() -> None:
+    source = TJKHtmlDataSource()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_daily_races(target_date, city, **kwargs):
+        calls.append((city, kwargs))
+        if city == "İstanbul":
+            raise DataSourceError("boom")
+        return []
+
+    source.get_daily_races = fake_get_daily_races  # type: ignore[method-assign]
+    try:
+        assert TJKHtmlDataSource.get_daily_races(
+            source, date(2026, 9, 23), include_odds=False, race_no=2
+        ) == []
+    finally:
+        source.close()
+
+    assert len(calls) == len(tjk_scraper.KNOWN_HIPPODROMES)
+    assert all(kwargs["include_odds"] is False and kwargs["race_no"] == 2 for _, kwargs in calls)
+
+
+def test_match_hippodrome_rejects_empty_text() -> None:
+    assert tjk_scraper._match_hippodrome("") is None
+    assert tjk_scraper._match_hippodrome("  ") is None
+    assert tjk_scraper._match_hippodrome("istanbul") == "İstanbul"
+
+
+def _history_row(day: str) -> str:
+    cells = [day, "Ankara", "1400", "K:Normal", "3", "1.28.71", "57", "", "M.KAYA", "1", "5,50"]
+    return "<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>"
+
+
+def test_get_horse_statistics_fetches_extra_history_pages() -> None:
+    first_page = (
+        "<table><tr><td>TOPLAM</td><td>3</td><td>0</td><td>0</td><td>0</td></tr></table>"
+        "<table><thead><th>Tarih</th><th>Şehir</th><th>Msf</th><th>Pist</th><th>S</th>"
+        "<th>Derece</th><th>Sıklet</th><th>Takı</th><th>Jokey</th><th>St</th><th>Gny</th></thead>"
+        + _history_row("03.01.2026")
+        + _history_row("02.01.2026")
+        + "</table><div>Toplam 3 sonuçtan 2 tanesi gösteriliyor</div>"
+    )
+    extra_page = "<tbody>" + _history_row("01.01.2026") + "</tbody>"
+    urls: list[str] = []
+
+    def fake_get_html(url, params, **kwargs):
+        urls.append(url)
+        return extra_page if "PageNumber=1" in url else first_page
+
+    source = TJKHtmlDataSource(horse_history_path="missing.jsonl")
+    source._get_html = fake_get_html  # type: ignore[method-assign]
+    entry = RaceEntry(
+        number=1, horse_id="x", source_horse_id=1, horse_name="X", age=4,
+        jockey=Jockey(name="M.KAYA"), trainer=Trainer(name="T"), weight_kg=57.0,
+    )
+    try:
+        stats = source.get_horse_statistics(entry, include_workouts=False)
+    finally:
+        source.close()
+
+    assert [p.race_date.day for p in stats.past_performances] == [3, 2, 1]
+    assert stats.past_performances[0].odds == 5.5
+    assert stats.past_performances[0].finish_position == 3
+    assert urls[1].endswith("PageNumber=1&Sort=Tarih%20Desc")
+    assert len(urls) == 2
