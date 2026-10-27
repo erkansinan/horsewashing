@@ -3,10 +3,7 @@ __pycache__/
 *.pyc
 .cache/
 *.sqlite3
-data/raw/*.tmp
-data/raw/indexes/*.tmp
-data/raw/tjk_horse_history.jsonl
-data/raw/tjk_workouts.jsonl
+data/raw/
 .pytest_cache/
 .env
 *.egg-info/

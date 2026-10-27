@@ -215,6 +215,19 @@ Resmi bir TJK API'si ileride yayinlanirsa, yalnizca `RaceDataSource`
 arayuzunu uygulayan yeni bir adapter yazip CLI'da kaynak olarak eklemeniz
 yeterlidir.
 
+### Raspberry Pi'de Guvenli Guncelleme
+
+`data/raw/` git tarafindan takip edilmez (`.gitignore`); Pi'de toplanan ham
+veriler GitHub'a gonderilmez ve `git pull` ile ezilmez. Ek guvence icin Pi'de
+`git pull` yerine su komutu kullanin: ham veriyi yedekler, `git pull --ff-only`
+calistirir ve ham veriyi geri yukler (hata olursa da geri yukler).
+
+```bash
+python scripts/update_pi.py
+```
+
+Yedekler `~/.local/share/horsewashing/backups/` altinda tutulur.
+
 ## Kurulum
 
 ```powershell
