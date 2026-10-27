@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     tjk_base_url: str = "https://www.tjk.org"
     request_timeout_seconds: float = 30.0
     min_request_interval_seconds: float = 1.0
-    # TJK, 'bot' gorunumlu User-Agent'lari onbellekte olmayan sayfalarda ~50 sn bekletip
+    # Egitim/veri toplamada at gecmisi icin es zamanli istek sayisi; istek hizi yine
+    # min_request_interval_seconds ile sinirli kalir (gecikmeyi ortuk tutar, hizi artirmaz).
+    collection_max_workers: int = Field(default=3, ge=1, le=4)    # TJK, 'bot' gorunumlu User-Agent'lari onbellekte olmayan sayfalarda ~50 sn bekletip
     # 504/403 donduruyor; tarayici uyumlu UA ile ayni istek <1 sn'de 200 donuyor.
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

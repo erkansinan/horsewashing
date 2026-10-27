@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import logging
@@ -335,6 +336,24 @@ def ingest_real_tjk_data(
     total_entries = sum(len(race.entries) for _, _, races, _ in daily_races for race in races)
     completed_entries = 0
     replay_started_at = monotonic()
+    history_workers = max(1, int(getattr(settings, "collection_max_workers", 1)))
+
+    def fetch_horse_stats(entry):  # type: ignore[no-untyped-def]
+        if not prediction_mode:
+            return source.get_horse_statistics(entry, include_workouts=True)
+        refresh_history = (
+            refresh_history_source_ids is not None
+            and entry.source_horse_id is not None
+            and str(entry.source_horse_id) in refresh_history_source_ids
+        )
+        history_options = {
+            "include_workouts": True,
+            "request_timeout": settings.prediction_history_request_timeout_seconds,
+            "max_retries": settings.prediction_history_request_max_retries,
+        }
+        if refresh_history:
+            history_options["force_refresh_history"] = True
+        return source.get_horse_statistics(entry, **history_options)
 
     for current, hippodrome, races, results in daily_races:
             for race in races:
@@ -342,6 +361,19 @@ def ingest_real_tjk_data(
                 field_size = len(race.entries)
                 if field_size <= 0:
                     continue
+
+                prefetched: dict[int, Future] = {}
+                if history_workers > 1:
+                    with ThreadPoolExecutor(max_workers=history_workers) as pool:
+                        for candidate in race.entries:
+                            if candidate.source_horse_id is None:
+                                continue
+                            if require_results and (
+                                candidate.actual_finish_position is None
+                                and race_result.get(candidate.number) is None
+                            ):
+                                continue
+                            prefetched[id(candidate)] = pool.submit(fetch_horse_stats, candidate)
 
                 for entry in race.entries:
                     completed_entries += 1
@@ -410,22 +442,12 @@ def ingest_real_tjk_data(
                         else "fetch_failed"
                     )
                     try:
-                        if prediction_mode:
-                            refresh_history = (
-                                refresh_history_source_ids is not None
-                                and entry.source_horse_id is not None
-                                and str(entry.source_horse_id) in refresh_history_source_ids
-                            )
-                            history_options = {
-                                "include_workouts": True,
-                                "request_timeout": settings.prediction_history_request_timeout_seconds,
-                                "max_retries": settings.prediction_history_request_max_retries,
-                            }
-                            if refresh_history:
-                                history_options["force_refresh_history"] = True
-                            stats = source.get_horse_statistics(entry, **history_options)
-                        else:
-                            stats = source.get_horse_statistics(entry, include_workouts=True)
+                        prefetched_stats = prefetched.get(id(entry))
+                        stats = (
+                            prefetched_stats.result()
+                            if prefetched_stats is not None
+                            else fetch_horse_stats(entry)
+                        )
                     except DataSourceError as exc:
                         # TJK may omit an individual horse history while still
                         # exposing the race and its official result. Keep the

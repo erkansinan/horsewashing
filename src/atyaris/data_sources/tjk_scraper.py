@@ -313,6 +313,7 @@ class TJKHtmlDataSource(RaceDataSource):
         self._local_history_by_name: dict[str, list[dict[str, object]]] = {}
         self._local_history_loaded_names: set[str] = set()
         self._local_stats_cache: dict[tuple[str, int, str, str], HorseStatistics] = {}
+        self._local_lock = threading.RLock()
 
     def close(self) -> None:
         self._client.close()
@@ -1864,11 +1865,10 @@ class TJKHtmlDataSource(RaceDataSource):
         max_retries: int | None = None,
         force_refresh_history: bool = False,
     ) -> HorseStatistics:
-        local_stats = self._local_horse_statistics(entry)
+        with self._local_lock:
+            local_stats = self._local_horse_statistics(entry)
         if local_stats is not None:
             return local_stats
-
-        if entry.source_horse_id is None:
             raise DataSourceError(
                 "At istatistikleri icin gerekli QueryParameter_AtId bulunamadi."
             )

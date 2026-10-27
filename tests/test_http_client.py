@@ -330,3 +330,24 @@ def test_post_retries_server_error_response() -> None:
 
     assert response.text == "ok"
     assert attempts["count"] == 2
+
+
+def test_request_slots_are_spaced_start_to_start_and_back_off_under_pressure() -> None:
+    client = RateLimitedClient("test-agent", min_interval=1.0)
+    try:
+        assert client._reserve_slot(1.0) < 0.01
+        second = client._reserve_slot(1.0)
+        third = client._reserve_slot(1.0)
+        assert 0.9 < second <= 1.0
+        assert 1.9 < third <= 2.0
+
+        client._record_pressure(1.0, severe=True)
+        assert client._penalty == 2.0
+        assert client._cooldown_until > 0
+        for _ in range(10):
+            client._record_pressure(1.0, severe=False)
+        assert client._penalty == 8.0
+        client._record_success()
+        assert client._penalty < 8.0
+    finally:
+        client.close()
