@@ -128,6 +128,7 @@ _TR_ASCII_MAP = str.maketrans(
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 _TRAINING_LOCK = RLock()
+_TRAINING_MANIFEST_LOCK = RLock()
 _TRAINING_JOBS: dict[str, dict[str, object]] = {}
 _TRAINING_CANCEL_EVENTS: dict[str, Event] = {}
 _TRAINING_PAUSE_REQUESTS: set[str] = set()
@@ -137,6 +138,7 @@ _COLLECTION_CANCEL_EVENTS: dict[str, Event] = {}
 _COLLECTION_PAUSE_REQUESTS: set[str] = set()
 _RAW_REPAIR_JOBS: dict[str, dict[str, object]] = {}
 _COLLECTION_MANIFEST_LOCK = RLock()
+MAX_COLLECTION_DAYS = 366
 
 
 class _TrainingCancelled(Exception):
@@ -189,9 +191,23 @@ def _persist_training_jobs() -> None:
             }
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(jobs, ensure_ascii=True, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    payload = json.dumps(jobs, ensure_ascii=True, indent=2)
+    # Birden cok is parcacigi ayni anda yazabildigi icin yazma serilestirilir; Windows'ta
+    # antivirus/okuyucu kaynakli gecici PermissionError'lara karsi kisa tekrar denenir.
+    with _TRAINING_MANIFEST_LOCK:
+        temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    temporary.replace(path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    sleep(0.05 * (attempt + 1))
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _persist_collection_jobs() -> None:
@@ -342,21 +358,42 @@ def _restore_collection_jobs() -> None:
         return
     restored_running = False
     with _TRAINING_LOCK:
+        resumed_any = any(job.get("status") == "running" for job in _COLLECTION_JOBS.values())
         for item in payload:
             if not isinstance(item, dict):
                 continue
             job_id = str(item.get("job_id", "")).strip()
             if not job_id or not item.get("start_date") or not item.get("end_date"):
                 continue
+            try:
+                start = date.fromisoformat(str(item["start_date"]))
+                end = date.fromisoformat(str(item["end_date"]))
+            except ValueError:
+                continue
             restored = dict(item)
             restored.pop("job_id", None)
+            _COLLECTION_CANCEL_EVENTS[job_id] = Event()
             if restored.get("status") == "running":
-                restored["status"] = "paused"
-                restored["message"] = "Sunucu yeniden baslatildi; checkpointten devam edilebilir"
                 restored["pause_requested"] = False
                 restored_running = True
+                if resumed_any:
+                    restored["status"] = "paused"
+                    restored["message"] = "Sunucu yeniden baslatildi; checkpointten devam edilebilir"
+                    _COLLECTION_CANCEL_EVENTS[job_id].set()
+                    _COLLECTION_JOBS[job_id] = restored
+                else:
+                    # Restart sonrasi checkpointten otomatik devam edilir.
+                    resumed_any = True
+                    restored["message"] = "Sunucu yeniden baslatildi; veri toplama checkpointten otomatik devam ediyor"
+                    _COLLECTION_JOBS[job_id] = restored
+                    Thread(
+                        target=_run_collection_job,
+                        args=(job_id, start, end),
+                        name=f"atyaris-collect-{job_id[:8]}",
+                        daemon=True,
+                    ).start()
+                continue
             _COLLECTION_JOBS[job_id] = restored
-            _COLLECTION_CANCEL_EVENTS[job_id] = Event()
             if restored.get("status") == "paused":
                 _COLLECTION_CANCEL_EVENTS[job_id].set()
     if restored_running:
@@ -392,6 +429,9 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     collection_checkpoint = paths.raw_csv.with_suffix(".collection.progress.json")
     completed_units: set[str] = set()
     failed_units: set[str] = set()
+    # Baska bir tarih araligina ait checkpoint kayitlari bu calismada silinmemeli.
+    preserved_completed: set[str] = set()
+    preserved_failed: set[str] = set()
     if collection_checkpoint.exists():
         try:
             payload = json.loads(collection_checkpoint.read_text(encoding="utf-8"))
@@ -403,44 +443,45 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 return start_date <= unit_date <= end_date
 
             if payload.get("collection_version") == 2:
-                completed_units = {
-                    str(value)
-                    for value in payload.get("completed_units", [])
-                    if in_range(value)
-                }
-                failed_units = {
-                    str(value)
-                    for value in payload.get("failed_units", [])
-                    if in_range(value)
-                }
+                for value in payload.get("completed_units", []):
+                    (completed_units if in_range(value) else preserved_completed).add(str(value))
+                for value in payload.get("failed_units", []):
+                    (failed_units if in_range(value) else preserved_failed).add(str(value))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             completed_units = set()
+            failed_units = set()
 
     def write_checkpoint() -> None:
         payload = {
             "collection_version": 2,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "completed_units": sorted(completed_units),
-            "failed_units": sorted(failed_units),
+            "completed_units": sorted(completed_units | preserved_completed),
+            "failed_units": sorted(failed_units | preserved_failed),
         }
         temporary = collection_checkpoint.with_name(f"{collection_checkpoint.name}.{uuid4().hex}.tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        temporary.replace(collection_checkpoint)
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            temporary.replace(collection_checkpoint)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def append_frame(frame: pd.DataFrame) -> None:
         if frame.empty:
             return
-        existing = pd.read_csv(paths.raw_csv) if paths.raw_csv.exists() else pd.DataFrame()
+        existing = pd.read_csv(paths.raw_csv, low_memory=False) if paths.raw_csv.exists() else pd.DataFrame()
         combined = pd.concat([existing, frame], ignore_index=True, sort=False)
         keys = [column for column in ["date", "race_id", "horse_id", "draw"] if column in combined.columns]
         if keys:
             combined = combined.drop_duplicates(subset=keys, keep="last")
         temporary = paths.raw_csv.with_suffix(paths.raw_csv.suffix + ".tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
-        combined.to_csv(temporary, index=False)
-        temporary.replace(paths.raw_csv)
+        try:
+            combined.to_csv(temporary, index=False)
+            temporary.replace(paths.raw_csv)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     source = build_training_data_source(settings)
     mapping_path = getattr(
@@ -455,15 +496,14 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     failed_targets = 0
     skipped_days = 0
     missing_data_records = 0
-    completed_days: set[date] = {
-        date.fromisoformat(unit.split("|", 1)[0])
-        for unit in completed_units
-        if "|" in unit
-    }
+    # Bir gunde yalnizca bazi yarislar tamamlanmis olabilir; gun tamamlanma durumu
+    # dongude, o gunun tum yarislari dogrulandiginda belirlenir.
+    completed_days: set[date] = set()
     started_at = monotonic()
     processed_units = len(completed_units) + len(failed_units)
     observed_units_by_day: dict[date, int] = {}
     active_collection_date = end_date
+    last_persisted_at = 0.0
 
     def check_collection_control() -> None:
         with _TRAINING_LOCK:
@@ -476,7 +516,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             raise _TrainingCancelled()
 
     def progress(message: str) -> None:
-        nonlocal processed_units
+        nonlocal processed_units, last_persisted_at
         check_collection_control()
         with _TRAINING_LOCK:
             job = _COLLECTION_JOBS.get(job_id)
@@ -504,14 +544,18 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     if units_per_second > 0 and remaining_units > 0
                     else f"{max(elapsed / 60.0, 0.1):.1f} dk; ilk tamamlanan yaris bekleniyor"
                 )
-                job["current_date"] = message[:10] if len(message) >= 10 else ""
+                job["current_date"] = active_collection_date.isoformat()
                 job["current_target"] = message
                 manual_url = _manual_url_from_message(message)
                 if manual_url:
                     job["manual_url"] = manual_url
-                if any(marker in message.casefold() for marker in ("hata", "timeout", "basarisiz", "atlandi")):
+                if re.search(r"\b(hata|timeout|basarisiz|atlandi)\b", message, re.IGNORECASE):
                     job["last_error"] = message
-                _persist_collection_jobs()
+        # Her ilerleme mesajinda diske yazmak yerine en fazla saniyede bir yazilir.
+        now = monotonic()
+        if now - last_persisted_at >= 1.0:
+            last_persisted_at = now
+            _persist_collection_jobs()
 
     try:
         _prepare_collection_indexes(paths, progress)
@@ -521,6 +565,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             progress(f"Hipodromlar aliniyor: {current.isoformat()}")
             hippodromes = KNOWN_HIPPODROMES
             day_failures_before = failed_targets
+            day_csv_failed = False
             day_units = 0
             day_unit_keys: set[str] = set()
             for hippodrome in hippodromes:
@@ -530,6 +575,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     races = source.get_daily_races_csv(current, hippodrome)
                 except DataSourceError as exc:
                     failed_targets += 1
+                    day_csv_failed = True
                     progress(f"Hipodrom atlandi: {current.isoformat()} / {hippodrome} | {exc}")
                     continue
                 id_resolution = resolve_race_horse_ids(
@@ -675,7 +721,9 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 processed_units += len(pending_races)
                 write_checkpoint()
 
-            if day_unit_keys and day_unit_keys.issubset(completed_units):
+            if day_csv_failed:
+                skipped_days += 1
+            elif day_unit_keys and day_unit_keys.issubset(completed_units):
                 completed_days.add(current)
             elif not day_unit_keys and failed_targets == day_failures_before:
                 completed_days.add(current)
@@ -703,19 +751,24 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
         with _TRAINING_LOCK:
             _COLLECTION_PAUSE_REQUESTS.discard(job_id)
             _COLLECTION_JOBS[job_id]["status"] = "paused"
+            _COLLECTION_JOBS[job_id]["pause_requested"] = False
             _COLLECTION_JOBS[job_id]["message"] = "Veri toplama duraklatildi; checkpoint korundu"
         _persist_collection_jobs()
     except _TrainingCancelled:
         with _TRAINING_LOCK:
+            _COLLECTION_PAUSE_REQUESTS.discard(job_id)
             _COLLECTION_JOBS[job_id]["status"] = "cancelled"
             _COLLECTION_JOBS[job_id]["message"] = "Veri toplama durduruldu"
         _persist_collection_jobs()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Web collection job failed")
         with _TRAINING_LOCK:
+            _COLLECTION_PAUSE_REQUESTS.discard(job_id)
             _COLLECTION_JOBS[job_id]["status"] = "failed"
             _COLLECTION_JOBS[job_id]["message"] = str(exc)
         _persist_collection_jobs()
+    finally:
+        _close_data_source(source)
 
 
 @dataclass
@@ -1667,7 +1720,7 @@ def _run_training_job(
     settings = get_settings()
     paths = paths_from_settings(settings)
 
-    cancel_event = _TRAINING_CANCEL_EVENTS[job_id]
+    cancel_event = _TRAINING_CANCEL_EVENTS.get(job_id) or Event()
 
     def progress(message: str) -> None:
         if cancel_event.is_set():
@@ -1770,10 +1823,13 @@ def _run_training_job(
             _persist_training_jobs()
     except _TrainingCancelled:
         with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
             _TRAINING_JOBS[job_id] = {
                 "status": "cancelled",
                 "mode": "online",
                 "message": "Egitim kullanici istegiyle durduruldu",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
             }
             _persist_training_jobs()
     except Exception as exc:  # noqa: BLE001
@@ -1785,15 +1841,20 @@ def _run_training_job(
                 "veya canli veri kaynagini kontrol edin."
             )
         with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
             _TRAINING_JOBS[job_id] = {
                 "status": "failed",
                 "mode": "online",
                 "message": message,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
             }
         _persist_training_jobs()
 
 
-def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> None:
+def _run_local_training_job(
+    job_id: str, start_date: date, end_date: date, allow_partial: bool = False
+) -> None:
     settings = get_settings()
     paths = paths_from_settings(settings)
     cancel_event = _TRAINING_CANCEL_EVENTS.get(job_id, Event())
@@ -1811,16 +1872,22 @@ def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> No
     try:
         progress("Lokal JSONL arsivi okunuyor; eksik kayitlar internetten tamamlanmayacak")
         local_frame = build_local_raw_frame(paths)
+        if local_frame.empty:
+            raise ValueError("Lokal JSONL arsivinde egitim icin kullanilabilir kayit bulunamadi.")
         progress("Lokal JSONL verisinden ham egitim tablosu olusturuldu")
-        if not local_frame.empty:
-            local_frame.to_csv(paths.raw_csv, index=False)
+        local_frame.to_csv(paths.raw_csv, index=False)
         progress("Lokal ham arsiv preprocess ediliyor")
         cleaned = preprocess_raw(paths)
         progress("Feature uretimi basliyor")
+        dates = pd.to_datetime(cleaned["date"], errors="coerce").dt.date if not cleaned.empty else []
         if not cleaned.empty:
-            dates = pd.to_datetime(cleaned["date"], errors="coerce").dt.date
             cleaned = cleaned[(dates >= start_date) & (dates <= end_date)].copy()
-            cleaned.to_csv(paths.clean_csv, index=False)
+        if cleaned.empty:
+            raise ValueError(
+                f"{start_date.isoformat()} - {end_date.isoformat()} araliginda lokal egitim verisi yok; "
+                "eski veriyle egitim yapilmadi."
+            )
+        cleaned.to_csv(paths.clean_csv, index=False)
         built = build_features(paths)
         progress("Model egitimi basliyor")
         artifact = train_phase1_model(
@@ -1868,6 +1935,7 @@ def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> No
             )
     except _TrainingCancelled:
         with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
             _TRAINING_JOBS[job_id].update(
                 status="cancelled",
                 message="Lokal egitim kullanici istegiyle durduruldu",
@@ -1875,6 +1943,7 @@ def _run_local_training_job(job_id: str, start_date: date, end_date: date) -> No
     except Exception as exc:  # noqa: BLE001
         logger.exception("Local training job failed")
         with _TRAINING_LOCK:
+            _TRAINING_PAUSE_REQUESTS.discard(job_id)
             _TRAINING_JOBS[job_id].update(status="failed", message=f"Lokal egitim: {exc}")
     _persist_training_jobs()
 
@@ -1910,6 +1979,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Tarih YYYY-AA-GG formatinda olmali.") from exc
         if parsed_start > parsed_end:
             raise HTTPException(status_code=400, detail="Baslangic tarihi bitis tarihinden sonra olamaz.")
+        if (parsed_end - parsed_start).days + 1 > MAX_COLLECTION_DAYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tek seferde en fazla {MAX_COLLECTION_DAYS} gunluk veri toplanabilir.",
+            )
+        busy_notice = ""
         with _TRAINING_LOCK:
             active = next(
                 (job_id for job_id, job in _COLLECTION_JOBS.items() if job.get("status") == "running"),
@@ -1917,6 +1992,9 @@ def create_app() -> FastAPI:
             )
             if active is not None:
                 job_id = active
+                active_job = _COLLECTION_JOBS[active]
+                if active_job.get("start_date") != start_date or active_job.get("end_date") != end_date:
+                    busy_notice = "&collection_notice=busy"
             else:
                 resumable = next(
                     (
@@ -1943,6 +2021,7 @@ def create_app() -> FastAPI:
                         "missing_data_records": 0,
                     }
                 _COLLECTION_JOBS[job_id]["status"] = "running"
+                _COLLECTION_JOBS[job_id]["pause_requested"] = False
                 _COLLECTION_CANCEL_EVENTS[job_id] = Event()
                 Thread(
                     target=_run_collection_job,
@@ -1951,7 +2030,7 @@ def create_app() -> FastAPI:
                     daemon=True,
                 ).start()
                 _persist_collection_jobs()
-        return RedirectResponse(url=f"/training?collection_job={job_id}", status_code=303)
+        return RedirectResponse(url=f"/training?collection_job={job_id}{busy_notice}", status_code=303)
 
     @app.get("/collect/status/{job_id}")
     def collection_status(job_id: str) -> JSONResponse:
@@ -1993,7 +2072,13 @@ def create_app() -> FastAPI:
                     job["status"] = "cancelled"
                     job["message"] = "Veri toplama iptal edildi"
             elif action == "resume" and job.get("status") in {"paused", "completed_with_warnings"}:
+                if any(
+                    other_id != job_id and other.get("status") == "running"
+                    for other_id, other in _COLLECTION_JOBS.items()
+                ):
+                    raise HTTPException(status_code=409, detail="Baska bir veri toplama isi zaten calisiyor.")
                 job["status"] = "running"
+                job["pause_requested"] = False
                 job["message"] = "Veri toplama checkpointten devam ediyor"
                 _COLLECTION_CANCEL_EVENTS[job_id] = Event()
                 Thread(
@@ -2087,6 +2172,7 @@ def create_app() -> FastAPI:
             if job is None:
                 raise HTTPException(status_code=404, detail="Egitim isi bulunamadi.")
             if job.get("status") == "running" and cancel_event is not None:
+                _TRAINING_PAUSE_REQUESTS.discard(job_id)
                 cancel_event.set()
                 job["message"] = "Egitim durduruluyor..."
             elif job.get("status") in {"paused", "awaiting_decision", "retrying", "completed_with_warnings"}:
@@ -2198,6 +2284,7 @@ def create_app() -> FastAPI:
         limit: int = Query(10, ge=1, le=100),
         train_job: str = Query(""),
         raw_repair: str = Query(""),
+        collection_notice: str = Query(""),
     ) -> HTMLResponse:
         error = None
         raw_maintenance: list[dict[str, object]] = []
@@ -2262,6 +2349,8 @@ def create_app() -> FastAPI:
                 "collection_jobs": collection_jobs,
                 "raw_maintenance": raw_maintenance,
                 "raw_repair": raw_repair,
+                "collection_notice": collection_notice,
+                "min_training_dates": MIN_TRAINING_DATES,
             },
         )
 

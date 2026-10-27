@@ -7,7 +7,8 @@
 
 <section class="training-panel" aria-labelledby="collection-start-title">
   <h2 id="collection-start-title">TJK verisi toplama</h2>
-  <form class="filters" method="get" action="/collect">
+  {% if collection_notice == 'busy' %}<p class="error" role="alert">Zaten çalışan bir veri toplama işi var; yeni tarih aralığı başlatılmadı. Önce çalışan işi bitirin veya durdurun.</p>{% endif %}
+    <form class="filters" method="get" action="/collect">
     <label>Başlangıç tarihi
       <input type="date" name="start_date" value="{{ start_date }}" required>
     </label>
@@ -15,10 +16,12 @@
       <input type="date" name="end_date" value="{{ end_date }}" required>
     </label>
     <button type="submit">Veri toplamayı başlat</button>
+    <span class="error" role="alert" hidden></span>
   </form>
+  {% set collection_labels = {'running': 'Çalışıyor', 'paused': 'Duraklatıldı', 'completed': 'Tamamlandı', 'completed_with_warnings': 'Uyarılarla tamamlandı', 'failed': 'Başarısız', 'cancelled': 'Durduruldu'} %}
   {% for job in collection_jobs %}
   <div class="training-status collection-status" data-state="{{ job.status }}" data-job-id="{{ job.job_id }}">
-    <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
+    <strong>{{ collection_labels.get(job.status, job.status) }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
     <span class="collection-message">{{ job.message }}</span><br>
     <span>Gün: <b class="completed-days">{{ job.completed_days or 0 }}</b> tamamlandı / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı</span><br>
     <span>Tahmini kalan süre: <b class="estimated-remaining">{{ job.estimated_remaining or 'hesaplaniyor' }}</b></span><br>
@@ -151,7 +154,7 @@
 
 <section class="training-panel" aria-labelledby="training-start-title">
   <h2 id="training-start-title">Yeni eğitim başlat</h2>
-  <form class="filters" method="get" action="/train">
+  <form id="train-start-form" class="filters" method="get" action="/train" data-min-days="{{ min_training_dates }}">
     <input type="hidden" name="mode" value="local">
     <label>Başlangıç tarihi
       <input type="date" name="start_date" value="{{ start_date }}" required>
@@ -160,10 +163,47 @@
       <input type="date" name="end_date" value="{{ end_date }}" required>
     </label>
     <button type="submit">Lokal veriden eğit</button>
+    <span id="train-start-error" class="error" role="alert" hidden></span>
   </form>
   <p>Lokal eğitim yalnızca mevcut beş JSONL arşivini kullanır. Eksik sonuç veya at geçmişi bulunan kayıtlar internetten tamamlanmaz ve mevcut veriyle devam edilir.</p>
-  <p>Model eğitimi için en az 6 farklı tarih içeren bir aralık seçin.</p>
+  <p>Model eğitimi için en az {{ min_training_dates }} farklı tarih içeren bir aralık seçin.</p>
 </section>
+<script>
+  (function () {
+    const attach = (form, validate) => {
+      if (!form) return;
+      const errorBox = form.querySelector(".error");
+      form.addEventListener("submit", (event) => {
+        const start = form.elements.start_date.value;
+        const end = form.elements.end_date.value;
+        const problem = validate(start, end);
+        if (problem) {
+          event.preventDefault();
+          if (errorBox) { errorBox.textContent = problem; errorBox.hidden = false; }
+          return;
+        }
+        if (errorBox) errorBox.hidden = true;
+        const submit = form.querySelector('button[type="submit"]');
+        if (submit) submit.disabled = true;
+      });
+    };
+    const dayCount = (start, end) => (Date.parse(end) - Date.parse(start)) / 86400000 + 1;
+    const rangeProblem = (start, end) => (start && end && start > end ? "Başlangıç tarihi bitiş tarihinden sonra olamaz." : "");
+    const trainForm = document.getElementById("train-start-form");
+    attach(trainForm, (start, end) => {
+      const problem = rangeProblem(start, end);
+      if (problem) return problem;
+      const minDays = Number(trainForm.dataset.minDays || 0);
+      return start && end && dayCount(start, end) < minDays
+        ? "Eğitim için en az " + minDays + " günlük bir tarih aralığı seçin."
+        : "";
+    });
+    attach(document.querySelector('form[action="/collect"]'), rangeProblem);
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted) document.querySelectorAll('form.filters button[type="submit"]').forEach((b) => { b.disabled = false; });
+    });
+  })();
+</script>
 
 {% if training_jobs %}
 <section class="training-panel" aria-labelledby="active-training-title">
@@ -172,6 +212,7 @@
   <div class="training-status" data-state="{{ job.status }}" data-job-id="{{ job.job_id }}">
     <strong>{{ job.status }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
     <span class="training-message">{{ job.message }}</span>
+    {% if job.model_version %}<br><span>Model: <b>{{ job.model_version }}</b></span>{% endif %}
     {% if job.status == 'running' %}
     <button type="button" class="pause-training" data-training-action="pause" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi duraklat</button>
     <button type="button" class="cancel-training" data-training-action="cancel" data-training-control="true" data-job-id="{{ job.job_id }}">Eğitimi durdur / iptal et</button>
@@ -299,7 +340,8 @@
       }
       const previousState = status.dataset.state;
       status.dataset.state = job.status;
-      status.querySelector("strong").textContent = job.status;
+      const collectionLabels = { running: "Çalışıyor", paused: "Duraklatıldı", completed: "Tamamlandı", completed_with_warnings: "Uyarılarla tamamlandı", failed: "Başarısız", cancelled: "Durduruldu" };
+      status.querySelector("strong").textContent = collectionLabels[job.status] || job.status;
       status.querySelector(".collection-message").textContent = job.message || "";
       status.querySelector(".completed-days").textContent = job.completed_days || 0;
       status.querySelector(".remaining-days").textContent = job.remaining_days || 0;

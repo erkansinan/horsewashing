@@ -1894,3 +1894,148 @@ def test_index_links_url_encode_city() -> None:
 
     assert links
     assert all(" " not in link for link in links)
+
+
+def test_local_training_fails_instead_of_using_stale_data(monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_app_module, "build_local_raw_frame", lambda paths: pd.DataFrame()
+    )
+    monkeypatch.setattr(web_app_module, "_persist_training_jobs", lambda: None)
+    job_id = "local-empty"
+    web_app_module._TRAINING_JOBS[job_id] = {"status": "running", "mode": "local"}
+    web_app_module._TRAINING_CANCEL_EVENTS[job_id] = Event()
+    try:
+        web_app_module._run_local_training_job(
+            job_id, date(2026, 9, 1), date(2026, 9, 10), True
+        )
+        job = web_app_module._TRAINING_JOBS[job_id]
+    finally:
+        web_app_module._TRAINING_JOBS.pop(job_id, None)
+        web_app_module._TRAINING_CANCEL_EVENTS.pop(job_id, None)
+
+    assert job["status"] == "failed"
+    assert "kullanilabilir kayit" in job["message"]
+
+
+def test_training_page_shows_min_days_from_backend() -> None:
+    response = _client().get("/training")
+
+    assert response.status_code == 200
+    assert 'id="train-start-form"' in response.text
+    assert f'data-min-days="{web_app_module.MIN_TRAINING_DATES}"' in response.text
+
+
+def _collection_fixture(monkeypatch, tmp_path, source):
+    paths = SimpleNamespace(
+        raw_csv=tmp_path / "races.csv",
+        raw_daily_program_jsonl=tmp_path / "program.jsonl",
+        raw_horse_id_mapping_jsonl=tmp_path / "ids.jsonl",
+    )
+    monkeypatch.setattr(web_app_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(web_app_module, "paths_from_settings", lambda _settings: paths)
+    monkeypatch.setattr(web_app_module, "build_training_data_source", lambda _settings: source)
+    monkeypatch.setattr(web_app_module, "_persist_collection_jobs", lambda: None)
+    return paths
+
+
+def _run_collection(job_id: str, start: date, end: date) -> dict:
+    web_app_module._COLLECTION_JOBS[job_id] = {
+        "status": "running",
+        "message": "",
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+    }
+    web_app_module._COLLECTION_CANCEL_EVENTS[job_id] = Event()
+    try:
+        web_app_module._run_collection_job(job_id, start, end)
+        return dict(web_app_module._COLLECTION_JOBS[job_id])
+    finally:
+        web_app_module._COLLECTION_JOBS.pop(job_id, None)
+        web_app_module._COLLECTION_CANCEL_EVENTS.pop(job_id, None)
+
+
+def test_collection_day_with_failed_city_csv_is_not_marked_complete(monkeypatch, tmp_path) -> None:
+    closed: list[bool] = []
+
+    class FailingSource:
+        def get_daily_races_csv(self, requested_date, city):
+            raise DataSourceError("503")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    _collection_fixture(monkeypatch, tmp_path, FailingSource())
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+
+    job = _run_collection("csv-fail-day", date(2026, 9, 1), date(2026, 9, 1))
+
+    assert job["status"] == "completed_with_warnings"
+    assert job["completed_days"] == 0
+    assert job["skipped_days"] == 1
+    assert closed == [True]
+
+
+def test_collection_checkpoint_keeps_units_from_other_ranges(monkeypatch, tmp_path) -> None:
+    class EmptySource:
+        def get_daily_races_csv(self, requested_date, city):
+            return []
+
+    paths = _collection_fixture(monkeypatch, tmp_path, EmptySource())
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+    checkpoint = paths.raw_csv.with_suffix(".collection.progress.json")
+    outside = "2026-01-05|Ankara|1"
+    checkpoint.write_text(
+        json.dumps({"collection_version": 2, "completed_units": [outside], "failed_units": []}),
+        encoding="utf-8",
+    )
+    job = _run_collection("other-range", date(2026, 9, 1), date(2026, 9, 1))
+
+    assert job["status"] == "completed"
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert outside in saved["completed_units"]
+
+
+def test_collect_rejects_overlong_range() -> None:
+    response = _client().get(
+        "/collect", params={"start_date": "2020-01-01", "end_date": "2026-01-01"}
+    )
+
+    assert response.status_code == 400
+    assert "en fazla" in response.json()["detail"]
+
+
+def test_collection_resume_conflicts_with_running_job(monkeypatch) -> None:
+    monkeypatch.setattr(web_app_module, "_persist_collection_jobs", lambda: None)
+    web_app_module._COLLECTION_JOBS["job-running"] = {
+        "status": "running", "start_date": "2026-09-01", "end_date": "2026-09-02"
+    }
+    web_app_module._COLLECTION_JOBS["job-paused"] = {
+        "status": "paused", "start_date": "2026-09-03", "end_date": "2026-09-04"
+    }
+    try:
+        response = _client().post("/collect/resume/job-paused")
+    finally:
+        web_app_module._COLLECTION_JOBS.pop("job-running", None)
+        web_app_module._COLLECTION_JOBS.pop("job-paused", None)
+
+    assert response.status_code == 409
+
+
+def test_collect_busy_notice_when_other_range_running(monkeypatch) -> None:
+    monkeypatch.setattr(web_app_module, "_persist_collection_jobs", lambda: None)
+    web_app_module._COLLECTION_JOBS["job-busy"] = {
+        "status": "running", "start_date": "2026-09-01", "end_date": "2026-09-02"
+    }
+    try:
+        response = _client().get(
+            "/collect",
+            params={"start_date": "2026-09-10", "end_date": "2026-09-12"},
+            follow_redirects=False,
+        )
+        page = _client().get("/training", params={"collection_notice": "busy"})
+    finally:
+        web_app_module._COLLECTION_JOBS.pop("job-busy", None)
+
+    assert response.status_code == 303
+    assert "collection_notice=busy" in response.headers["location"]
+    assert "Zaten çalışan bir veri toplama" in page.text
