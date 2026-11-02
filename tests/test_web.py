@@ -1995,6 +1995,113 @@ def test_collection_checkpoint_keeps_units_from_other_ranges(monkeypatch, tmp_pa
     assert outside in saved["completed_units"]
 
 
+def test_collection_skips_known_empty_past_targets_on_resume(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[date, str]] = []
+
+    class EmptySource:
+        def get_daily_races_csv(self, requested_date, city):
+            calls.append((requested_date, city))
+            return []
+
+    paths = _collection_fixture(monkeypatch, tmp_path, EmptySource())
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+    day = date(2026, 9, 1)
+
+    assert _run_collection("empty-first", day, day)["status"] == "completed"
+    assert _run_collection("empty-second", day, day)["status"] == "completed"
+
+    assert calls == [(day, "Ankara")]
+    saved = json.loads(paths.raw_csv.with_suffix(".collection.progress.json").read_text(encoding="utf-8"))
+    assert saved["empty_targets"] == ["2026-09-01|Ankara"]
+
+
+def _two_race_source(race_numbers):
+    def make_race(number: int) -> Race:
+        return Race(
+            id=f"Ankara-2026-09-01-{number}",
+            hippodrome="Ankara",
+            race_no=number,
+            start_time=datetime(2026, 9, 1, 14, number),
+            distance_m=1200,
+            surface=TrackSurface.CIM,
+            entries=[
+                RaceEntry(
+                    number=1,
+                    horse_id=f"H{number}",
+                    horse_name=f"AT{number}",
+                    jockey=Jockey(name="J"),
+                    trainer=Trainer(name="T"),
+                    weight_kg=58.0,
+                    source_horse_id=1000 + number,
+                )
+            ],
+        )
+
+    class Source:
+        def get_daily_races_csv(self, requested_date, city):
+            return [make_race(number) for number in race_numbers] if city == "Ankara" else []
+
+        def get_daily_races_html(self, requested_date, city, race_no=None):
+            return []
+
+        def get_daily_result_horse_ids_html(self, requested_date, city):
+            return []
+
+        def close(self) -> None:
+            pass
+
+    return Source()
+
+
+def test_collection_does_not_fail_races_for_horses_without_history(monkeypatch, tmp_path) -> None:
+    paths = _collection_fixture(monkeypatch, tmp_path, _two_race_source([1, 2]))
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+
+    def fake_ingest(*args, **kwargs):
+        frame = pd.DataFrame()
+        frame.attrs["missing_horse_history_records"] = 0
+        frame.attrs["unavailable_horse_history_records"] = 3
+        return frame
+
+    monkeypatch.setattr(web_app_module, "ingest_real_tjk_data", fake_ingest)
+
+    job = _run_collection("no-history", date(2026, 9, 1), date(2026, 9, 1))
+
+    assert job["status"] == "completed"
+    assert job["completed_days"] == 1
+    assert job["processed_days"] == 1
+    assert job["remaining_days"] == 0
+    assert job["failed_targets"] == 0
+    assert job["no_history_records"] == 3
+    saved = json.loads(paths.raw_csv.with_suffix(".collection.progress.json").read_text(encoding="utf-8"))
+    assert saved["done_targets"] == ["2026-09-01|Ankara"]
+
+
+def test_collection_keeps_races_without_results_retryable(monkeypatch, tmp_path) -> None:
+    paths = _collection_fixture(monkeypatch, tmp_path, _two_race_source([1, 2]))
+    monkeypatch.setattr(web_app_module, "KNOWN_HIPPODROMES", ["Ankara"])
+
+    def fake_ingest(*args, **kwargs):
+        frame = pd.DataFrame()
+        frame.attrs["missing_result_race_nos"] = [2]
+        return frame
+
+    monkeypatch.setattr(web_app_module, "ingest_real_tjk_data", fake_ingest)
+
+    job = _run_collection("no-results", date(2026, 9, 1), date(2026, 9, 1))
+
+    assert job["status"] == "completed_with_warnings"
+    assert job["completed_days"] == 0
+    assert job["warning_days"] == 1
+    assert job["processed_days"] == 1
+    assert job["remaining_days"] == 0
+    assert job["failed_targets"] == 1
+    saved = json.loads(paths.raw_csv.with_suffix(".collection.progress.json").read_text(encoding="utf-8"))
+    assert saved["completed_units"] == ["2026-09-01|Ankara|1"]
+    assert saved["failed_units"] == ["2026-09-01|Ankara|2"]
+    assert saved.get("done_targets", []) == []
+
+
 def test_collect_rejects_overlong_range() -> None:
     response = _client().get(
         "/collect", params={"start_date": "2020-01-01", "end_date": "2026-01-01"}

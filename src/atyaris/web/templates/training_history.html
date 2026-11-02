@@ -23,13 +23,17 @@
   <div class="training-status collection-status" data-state="{{ job.status }}" data-job-id="{{ job.job_id }}">
     <strong>{{ collection_labels.get(job.status, job.status) }}</strong> | {{ job.start_date or '-' }} - {{ job.end_date or '-' }}<br>
     <span class="collection-message">{{ job.message }}</span><br>
-    <span>Gün: <b class="completed-days">{{ job.completed_days or 0 }}</b> tamamlandı / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı</span><br>
-    <span>Tahmini kalan süre: <b class="estimated-remaining">{{ job.estimated_remaining or 'hesaplaniyor' }}</b></span><br>
+    <span>Gün: <b class="processed-days">{{ job.processed_days or 0 }}</b> işlendi / <b class="remaining-days">{{ job.remaining_days or 0 }}</b> kaldı
+      (<b class="completed-days">{{ job.completed_days or 0 }}</b> tam, <b class="warning-days">{{ job.warning_days or 0 }}</b> eksikli)</span><br>
+    <progress class="collection-progress" max="100" value="{{ job.progress_percent or 0 }}"></progress>
+    <span>%<b class="progress-percent">{{ job.progress_percent or 0 }}</b></span><br>
+    <span>Tahmini kalan süre: <b class="estimated-remaining">{{ job.estimated_remaining or 'hesaplaniyor' }}</b>
+      <span class="estimated-finish">{% if job.estimated_finish_at and job.status == 'running' %}(bitiş ≈ {{ job.estimated_finish_at }}){% endif %}</span></span><br>
     <span>Şu an: <b class="current-target">{{ job.current_target or job.current_date or 'Başlatılıyor' }}</b></span><br>
     <span>Son ağ hatası: <b class="last-error">{{ job.last_error or 'yok' }}</b></span><br>
     <span class="manual-check-link">{% if job.manual_url %}<a href="{{ job.manual_url }}" target="_blank" rel="noopener noreferrer">TJK isteğini manuel kontrol et</a>{% endif %}</span>
     {% if job.manual_url %}<br>{% endif %}
-    <span>Eksik veri: <b class="missing-data-records">{{ job.missing_data_records or 0 }}</b> | Atlanan gün: <b class="skipped-days">{{ job.skipped_days or 0 }}</b> | Başarısız hedef: <b class="failed-targets">{{ job.failed_targets or 0 }}</b></span>
+    <span>Eksik veri: <b class="missing-data-records">{{ job.missing_data_records or 0 }}</b> | Geçmişi olmayan at: <b class="no-history-records">{{ job.no_history_records or 0 }}</b> | Atlanan gün: <b class="skipped-days">{{ job.skipped_days or 0 }}</b> | Başarısız hedef: <b class="failed-targets">{{ job.failed_targets or 0 }}</b></span>
     {% if job.status == 'running' %}
     <button type="button" data-collection-action="pause" data-job-id="{{ job.job_id }}">Toplamayı duraklat</button>
     <button type="button" data-collection-action="cancel" data-job-id="{{ job.job_id }}">Toplamayı durdur</button>
@@ -345,6 +349,19 @@
       status.querySelector(".collection-message").textContent = job.message || "";
       status.querySelector(".completed-days").textContent = job.completed_days || 0;
       status.querySelector(".remaining-days").textContent = job.remaining_days || 0;
+      const processedDays = status.querySelector(".processed-days");
+      if (processedDays) processedDays.textContent = job.processed_days || 0;
+      const warningDays = status.querySelector(".warning-days");
+      if (warningDays) warningDays.textContent = job.warning_days || 0;
+      const percent = job.progress_percent || 0;
+      const bar = status.querySelector(".collection-progress");
+      if (bar) bar.value = percent;
+      const percentText = status.querySelector(".progress-percent");
+      if (percentText) percentText.textContent = percent;
+      const finish = status.querySelector(".estimated-finish");
+      if (finish) finish.textContent = job.estimated_finish_at && job.status === "running" ? "(bitiş ≈ " + job.estimated_finish_at + ")" : "";
+      const noHistory = status.querySelector(".no-history-records");
+      if (noHistory) noHistory.textContent = job.no_history_records || 0;
       const estimate = status.querySelector(".estimated-remaining");
       if (estimate) estimate.textContent = job.estimated_remaining || "hesaplaniyor";
       const currentTarget = status.querySelector(".current-target");

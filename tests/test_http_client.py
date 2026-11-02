@@ -338,8 +338,8 @@ def test_request_slots_are_spaced_start_to_start_and_back_off_under_pressure() -
         assert client._reserve_slot(1.0) < 0.01
         second = client._reserve_slot(1.0)
         third = client._reserve_slot(1.0)
-        assert 0.9 < second <= 1.0
-        assert 1.9 < third <= 2.0
+        assert 0.9 < second <= 1.4
+        assert 1.9 < third <= 2.8
 
         client._record_pressure(1.0, severe=True)
         assert client._penalty == 2.0

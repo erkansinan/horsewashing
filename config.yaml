@@ -4,6 +4,8 @@
 tjk_base_url: "https://www.tjk.org"
 request_timeout_seconds: 30
 min_request_interval_seconds: 1.0
+# Raspberry Pi 3 (1 GB RAM) icin dusuk es zamanlilik; istek hizi zaten tek sinirlayicidan gecer.
+collection_max_workers: 2
 cache_ttl_seconds: 600
 cache_path: ".cache/atyaris_cache.sqlite3"
 prediction_data_request_timeout_seconds: 5

@@ -9,12 +9,14 @@ import logging
 from pathlib import Path
 import shutil
 import sqlite3
+from threading import RLock
 import time
 from typing import Any, Iterable
 from uuid import uuid4
 
 
 logger = logging.getLogger(__name__)
+_RAW_LINE_COUNT_LOCK = RLock()
 
 
 RAW_STORE_THRESHOLDS = {
@@ -132,6 +134,35 @@ class JsonlRawStore:
         """Return the active record for each collection key."""
         return [record for record, _digest in self._read_latest().values()]
 
+    @property
+    def has_valid_index(self) -> bool:
+        return self._has_records_table(self.index_path)
+
+    @staticmethod
+    def _has_records_table(path: Path) -> bool:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "SELECT record_key, record_hash, line_number, payload FROM records LIMIT 0"
+            )
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc) or "no such column" in str(exc):
+                return False
+            raise
+        except sqlite3.DatabaseError:
+            return False
+        finally:
+            connection.close()
+        return True
+
+    @staticmethod
+    def _quarantine_index(path: Path) -> None:
+        quarantined = path.with_name(f"{path.name}.invalid-{uuid4().hex}")
+        path.replace(quarantined)
+        logger.warning("Invalid raw-data index moved aside: %s", quarantined)
+
     def repair(self) -> RawRepairStats:
         """Scan and rewrite one collection, dropping only unrecoverable rows."""
         latest: dict[str, tuple[dict[str, Any], str]] = {}
@@ -189,7 +220,10 @@ class JsonlRawStore:
         if not incoming:
             return RawStoreStats(records=self.count_records(), bytes=self.path.stat().st_size if self.path.exists() else 0)
         if self.index_path.exists():
-            return self._upsert_indexed(incoming)
+            if not self.has_valid_index:
+                self._quarantine_index(self.index_path)
+            else:
+                return self._upsert_indexed(incoming)
         latest = self._read_latest()
         added = updated = duplicates = 0
         for key, record in incoming.items():
@@ -224,8 +258,15 @@ class JsonlRawStore:
             return sum(1 for line in handle if line.strip())
 
     def compact_recommendation(self) -> CompactRecommendation:
-        physical_records = self.count_records()
-        active_records = len(self._read_latest())
+        if self.has_valid_index:
+            physical_records = self._indexed_line_count()
+            with sqlite3.connect(self.index_path) as connection:
+                active_records = connection.execute(
+                    "SELECT COUNT(record_key) FROM records"
+                ).fetchone()[0]
+        else:
+            physical_records = self.count_records()
+            active_records = physical_records
         file_bytes = self.path.stat().st_size if self.path.exists() else 0
         superseded = max(physical_records - active_records, 0)
         recommended = (
@@ -234,6 +275,17 @@ class JsonlRawStore:
         )
         reason = "eski surumler aktif kayitlarin %20'sini asti" if superseded > max(active_records, 1) * RAW_STORE_THRESHOLDS["compact_ratio"] else "dosya 512 MB esigini asti" if file_bytes >= RAW_STORE_THRESHOLDS["indexed_bytes"] else "compact gerekmiyor"
         return CompactRecommendation(recommended, reason, active_records, superseded, file_bytes)
+
+    def _indexed_line_count(self) -> int:
+        with _RAW_LINE_COUNT_LOCK:
+            if self.migration_state_path.exists():
+                state = json.loads(self.migration_state_path.read_text(encoding="utf-8"))
+                line_count = state.get("line_count") if isinstance(state, dict) else None
+                if isinstance(line_count, int) and line_count >= 0:
+                    return line_count
+            line_count = self.count_records()
+            self._write_migration_state(line_count, status="completed")
+            return line_count
 
     def compact(self) -> RawStoreStats:
         latest = self._read_latest()
@@ -251,12 +303,21 @@ class JsonlRawStore:
 
     def migrate_to_index(self, batch_size: int = 10_000) -> bool:
         """Build the index in a temp DB; return True only when migration is complete."""
-        if self.index_path.exists():
+        if self.has_valid_index:
             return True
+        if self.index_path.exists():
+            self._quarantine_index(self.index_path)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         state = {"status": "migration_in_progress", "line": 0}
         if self.migration_state_path.exists():
             state = json.loads(self.migration_state_path.read_text(encoding="utf-8"))
+        if self.migration_temp_path.exists() and not self._has_records_table(self.migration_temp_path):
+            self._quarantine_index(self.migration_temp_path)
+            state = {"status": "migration_in_progress", "line": 0}
+            self._write_migration_state(0)
+        elif not self.migration_temp_path.exists() and int(state.get("line", 0)) > 0:
+            state = {"status": "migration_in_progress", "line": 0}
+            self._write_migration_state(0)
         if not self.migration_temp_path.exists():
             with sqlite3.connect(self.migration_temp_path) as connection:
                 connection.execute("CREATE TABLE records (record_key TEXT PRIMARY KEY, record_hash TEXT NOT NULL, line_number INTEGER NOT NULL, payload TEXT NOT NULL)")
@@ -297,14 +358,21 @@ class JsonlRawStore:
 
     def _write_migration_state(self, line: int, status: str = "migration_in_progress") -> None:
         temporary = _temporary_path(self.migration_state_path)
-        temporary.write_text(json.dumps({"status": status, "line": line}, ensure_ascii=True), encoding="utf-8")
+        temporary.write_text(
+            json.dumps({"status": status, "line": line, "line_count": line}, ensure_ascii=True),
+            encoding="utf-8",
+        )
         _atomic_replace(temporary, self.migration_state_path)
 
     def _upsert_indexed(self, incoming: dict[str, dict[str, Any]]) -> RawStoreStats:
+        with _RAW_LINE_COUNT_LOCK:
+            return self._upsert_indexed_locked(incoming)
+
+    def _upsert_indexed_locked(self, incoming: dict[str, dict[str, Any]]) -> RawStoreStats:
         added = updated = duplicates = 0
+        next_line = self._indexed_line_count()
         with sqlite3.connect(self.index_path) as connection:
             pending: list[tuple[str, str, int, str]] = []
-            next_line = self.count_records()
             for key, record in incoming.items():
                 digest = _record_hash(record)
                 previous = connection.execute(
@@ -327,7 +395,9 @@ class JsonlRawStore:
                 pending,
             )
             connection.commit()
-        return RawStoreStats(added, updated, duplicates, self.count_records(), self.path.stat().st_size)
+        if pending:
+            self._write_migration_state(next_line, status="completed")
+        return RawStoreStats(added, updated, duplicates, next_line, self.path.stat().st_size)
 
     def _rewrite_with_stats(self, incoming: dict[str, dict[str, Any]], latest: dict[str, tuple[dict[str, Any], str]]) -> RawStoreStats:
         added = updated = duplicates = 0

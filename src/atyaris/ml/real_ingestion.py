@@ -159,7 +159,11 @@ def ingest_real_tjk_data(
     raw_workout_records: list[dict[str, object]] = []
     raw_trainer_records: list[dict[str, object]] = []
     incomplete_workout_records = 0
+    # Yalnizca tekrar denenebilir cekme hatalari; ilk kez kosan veya ID'si eslesmeyen
+    # atlar "unavailable" sayilir ve kosuyu basarisiz yapmaz.
     missing_horse_history_records = 0
+    unavailable_horse_history_records = 0
+    missing_result_race_nos: set[int] = set()
     raw_history_path = getattr(paths, "raw_history_jsonl", None)
     mapping_path = getattr(
         paths,
@@ -284,6 +288,7 @@ def ingest_real_tjk_data(
                     results = source.get_daily_race_results(current, hippodrome)
                 except DataSourceError as exc:
                     unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: {exc}")
+                    missing_result_race_nos.update(race.race_no for race in races)
                     logger.warning(
                         "TJK egitim hatasi | tarih=%s | hipodrom=%s | sonuclar | hata=%s",
                         current.isoformat(),
@@ -298,6 +303,7 @@ def ingest_real_tjk_data(
                     continue
                 if not results:
                     unavailable_result_sets.append(f"{current.isoformat()} / {hippodrome}: bos sonuc")
+                    missing_result_race_nos.update(race.race_no for race in races)
                     logger.warning(
                         "TJK egitim hatasi | tarih=%s | hipodrom=%s | sonuclar bos",
                         current.isoformat(),
@@ -313,6 +319,7 @@ def ingest_real_tjk_data(
                     {race.race_no for race in races}.difference(results)
                 )
                 if missing_races:
+                    missing_result_race_nos.update(missing_races)
                     unavailable_result_sets.append(
                         f"{current.isoformat()} / {hippodrome}: eksik kosular {missing_races}"
                     )
@@ -476,7 +483,10 @@ def ingest_real_tjk_data(
                                 else "empty"
                             )
                     if not stats.past_performances:
-                        missing_horse_history_records += 1
+                        if history_lookup_status == "fetch_failed":
+                            missing_horse_history_records += 1
+                        else:
+                            unavailable_horse_history_records += 1
                     retrieved_at = datetime.now(timezone.utc).isoformat()
                     for performance in stats.past_performances:
                         raw_history_records.append(
@@ -1010,6 +1020,8 @@ def ingest_real_tjk_data(
             frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
             frame.attrs["incomplete_workout_records"] = incomplete_workout_records
             frame.attrs["missing_horse_history_records"] = missing_horse_history_records
+            frame.attrs["unavailable_horse_history_records"] = unavailable_horse_history_records
+            frame.attrs["missing_result_race_nos"] = sorted(missing_result_race_nos)
             return frame
         raise RuntimeError(
             f"Gercek TJK verisiyle {purpose} icin kullanilabilir satir bulunamadi. "
@@ -1038,4 +1050,6 @@ def ingest_real_tjk_data(
         frame.attrs["retry_targets"] = [*unavailable_days, *unavailable_result_sets]
     frame.attrs["incomplete_workout_records"] = incomplete_workout_records
     frame.attrs["missing_horse_history_records"] = missing_horse_history_records
+    frame.attrs["unavailable_horse_history_records"] = unavailable_horse_history_records
+    frame.attrs["missing_result_race_nos"] = sorted(missing_result_race_nos)
     return frame

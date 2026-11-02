@@ -10,6 +10,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 import json
 from threading import Event, RLock, Thread, Timer
 from pathlib import Path
@@ -47,6 +48,16 @@ from atyaris.ml.real_ingestion import ingest_real_tjk_data
 from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
 from atyaris.ml.raw_store import RAW_STORE_THRESHOLDS, JsonlRawStore
 from atyaris.ml.local_pipeline import build_local_raw_frame, find_missing_local_targets
+from atyaris.web.collection_progress import (
+    COMPLETE as DAY_COMPLETE,
+    LIGHT as LIGHT_COST_DAY,
+    NO_RACE as DAY_NO_RACE,
+    SKIPPED as DAY_SKIPPED,
+    WARNING as DAY_WARNING,
+    WORKED as WORKED_COST_DAY,
+    ZERO as ZERO_COST_DAY,
+    CollectionProgress,
+)
 from atyaris.ml.features import TJK_STAGE1_FEATURE_COLUMNS
 from atyaris.ml.harville import mark_highest_odds_placer_predictions
 from atyaris.ml.explainability import compute_optional_shap_summary, compute_permutation_importance
@@ -412,7 +423,7 @@ def _prepare_collection_indexes(paths, progress_callback) -> None:  # type: igno
         if path is None or not path.exists():
             continue
         store = JsonlRawStore(path, collection)
-        if store.index_path.exists() or store.count_records() < RAW_STORE_THRESHOLDS["warning_records"]:
+        if store.has_valid_index or store.count_records() < RAW_STORE_THRESHOLDS["warning_records"]:
             continue
         try:
             progress_callback(f"Ham arsiv indeksi hazirlaniyor: {collection}")
@@ -429,9 +440,15 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     collection_checkpoint = paths.raw_csv.with_suffix(".collection.progress.json")
     completed_units: set[str] = set()
     failed_units: set[str] = set()
+    # Gecmis tarihte yarisi olmayan / tamamen islenmis "tarih|hipodrom" anahtarlari:
+    # yeniden calistirmada gereksiz TJK istegi atilmaz (ban riski ve sure azalir).
+    empty_targets: set[str] = set()
+    done_targets: set[str] = set()
     # Baska bir tarih araligina ait checkpoint kayitlari bu calismada silinmemeli.
     preserved_completed: set[str] = set()
     preserved_failed: set[str] = set()
+    preserved_empty: set[str] = set()
+    preserved_done: set[str] = set()
     if collection_checkpoint.exists():
         try:
             payload = json.loads(collection_checkpoint.read_text(encoding="utf-8"))
@@ -447,6 +464,10 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     (completed_units if in_range(value) else preserved_completed).add(str(value))
                 for value in payload.get("failed_units", []):
                     (failed_units if in_range(value) else preserved_failed).add(str(value))
+                for value in payload.get("empty_targets", []):
+                    (empty_targets if in_range(value) else preserved_empty).add(str(value))
+                for value in payload.get("done_targets", []):
+                    (done_targets if in_range(value) else preserved_done).add(str(value))
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             completed_units = set()
             failed_units = set()
@@ -458,6 +479,8 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             "end_date": end_date.isoformat(),
             "completed_units": sorted(completed_units | preserved_completed),
             "failed_units": sorted(failed_units | preserved_failed),
+            "empty_targets": sorted(empty_targets | preserved_empty),
+            "done_targets": sorted(done_targets | preserved_done),
         }
         temporary = collection_checkpoint.with_name(f"{collection_checkpoint.name}.{uuid4().hex}.tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)
@@ -467,12 +490,27 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def append_frame(frame: pd.DataFrame) -> None:
-        if frame.empty:
-            return
+    csv_state: dict[str, Any] = {"keys": None, "columns": None}
+    csv_key_columns = ["date", "race_id", "horse_id", "draw"]
+
+    def normalize_key_value(value: object) -> str:
+        if value is None or (isinstance(value, float) and value != value):
+            return ""
+        text = str(value).strip()
+        if text.endswith(".0") and text[:-2].lstrip("-").isdigit():
+            text = text[:-2]
+        return text
+
+    def row_keys(frame: pd.DataFrame, columns: list[str]) -> list[tuple[str, ...]]:
+        return [
+            tuple(normalize_key_value(value) for value in row)
+            for row in frame[columns].itertuples(index=False, name=None)
+        ]
+
+    def rewrite_csv(frame: pd.DataFrame) -> None:
         existing = pd.read_csv(paths.raw_csv, low_memory=False) if paths.raw_csv.exists() else pd.DataFrame()
         combined = pd.concat([existing, frame], ignore_index=True, sort=False)
-        keys = [column for column in ["date", "race_id", "horse_id", "draw"] if column in combined.columns]
+        keys = [column for column in csv_key_columns if column in combined.columns]
         if keys:
             combined = combined.drop_duplicates(subset=keys, keep="last")
         temporary = paths.raw_csv.with_suffix(paths.raw_csv.suffix + ".tmp")
@@ -482,6 +520,42 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             temporary.replace(paths.raw_csv)
         finally:
             temporary.unlink(missing_ok=True)
+        csv_state["keys"] = None
+        csv_state["columns"] = None
+
+    def append_frame(frame: pd.DataFrame) -> None:
+        # Her yaris icin tum CSV'yi yeniden yazmak Raspberry Pi'de O(n^2) maliyetliydi;
+        # yeni satirlar dosyanin sonuna eklenir, yalnizca cakisma varsa dosya yeniden yazilir.
+        if frame.empty:
+            return
+        if not paths.raw_csv.exists() or paths.raw_csv.stat().st_size == 0:
+            rewrite_csv(frame)
+            return
+        key_columns = [column for column in csv_key_columns if column in frame.columns]
+        if csv_state["keys"] is None:
+            header = list(pd.read_csv(paths.raw_csv, nrows=0).columns)
+            if not key_columns or any(column not in header for column in key_columns):
+                rewrite_csv(frame)
+                return
+            key_frame = pd.read_csv(paths.raw_csv, usecols=key_columns, dtype=str)
+            csv_state["keys"] = set(row_keys(key_frame, key_columns))
+            csv_state["columns"] = header
+        header = csv_state["columns"]
+        if not key_columns or set(frame.columns) - set(header):
+            rewrite_csv(frame)
+            return
+        frame = frame.copy()
+        frame["__key"] = row_keys(frame, key_columns)
+        frame = frame.drop_duplicates(subset="__key", keep="last")
+        known = csv_state["keys"]
+        if frame["__key"].isin(known).any():
+            rewrite_csv(frame.drop(columns="__key"))
+            return
+        new_keys = list(frame["__key"])
+        frame.drop(columns="__key").reindex(columns=header).to_csv(
+            paths.raw_csv, mode="a", header=False, index=False
+        )
+        known.update(new_keys)
 
     source = build_training_data_source(settings)
     mapping_path = getattr(
@@ -496,12 +570,26 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
     failed_targets = 0
     skipped_days = 0
     missing_data_records = 0
-    # Bir gunde yalnizca bazi yarislar tamamlanmis olabilir; gun tamamlanma durumu
-    # dongude, o gunun tum yarislari dogrulandiginda belirlenir.
-    completed_days: set[date] = set()
-    started_at = monotonic()
-    processed_units = len(completed_units) + len(failed_units)
-    observed_units_by_day: dict[date, int] = {}
+    # Gecmisi olmayan (ilk kosu) veya ID'si eslesmeyen atlar hata degil bilgi amaclidir.
+    no_history_records = 0
+    collection_days = [end_date - timedelta(days=offset) for offset in range(total_days)]
+    hippodromes = list(KNOWN_HIPPODROMES)
+    closed_targets = done_targets | empty_targets | preserved_done | preserved_empty
+
+    def predict_day_type(day: date) -> str:
+        prefix = f"{day.isoformat()}|"
+        if all(f"{prefix}{name}" in closed_targets for name in hippodromes):
+            return ZERO_COST_DAY
+        has_done = any(unit.startswith(prefix) for unit in completed_units)
+        has_failed = any(unit.startswith(prefix) for unit in failed_units)
+        return LIGHT_COST_DAY if has_done and not has_failed else WORKED_COST_DAY
+
+    tracker = CollectionProgress(
+        collection_days,
+        {day: predict_day_type(day) for day in collection_days},
+        len(hippodromes),
+        light_day_seconds=len(hippodromes) * max(settings.min_request_interval_seconds, 0.5) * 1.5,
+    )
     active_collection_date = end_date
     last_persisted_at = 0.0
 
@@ -516,34 +604,13 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
             raise _TrainingCancelled()
 
     def progress(message: str) -> None:
-        nonlocal processed_units, last_persisted_at
+        nonlocal last_persisted_at
         check_collection_control()
         with _TRAINING_LOCK:
             job = _COLLECTION_JOBS.get(job_id)
             if job is not None:
                 job["message"] = message
-                job["completed_days"] = len(completed_days)
-                job["remaining_days"] = max(total_days - len(completed_days), 0)
-                elapsed = monotonic() - started_at
-                units_per_second = processed_units / elapsed if processed_units and elapsed > 0 else 0.0
-                completed_day_units = [
-                    count for day, count in observed_units_by_day.items()
-                    if day in completed_days and count > 0
-                ]
-                average_units_per_day = (
-                    sum(completed_day_units) / len(completed_day_units)
-                    if completed_day_units
-                    else max(observed_units_by_day.get(active_collection_date, 1), 1)
-                )
-                remaining_units = max(
-                    (total_days * average_units_per_day) - processed_units,
-                    0,
-                )
-                job["estimated_remaining"] = (
-                    f"{max(remaining_units / units_per_second / 60.0, 0.1):.1f} dk"
-                    if units_per_second > 0 and remaining_units > 0
-                    else f"{max(elapsed / 60.0, 0.1):.1f} dk; ilk tamamlanan yaris bekleniyor"
-                )
+                job.update(tracker.snapshot())
                 job["current_date"] = active_collection_date.isoformat()
                 job["current_target"] = message
                 manual_url = _manual_url_from_message(message)
@@ -559,17 +626,25 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
 
     try:
         _prepare_collection_indexes(paths, progress)
-        for current in (end_date - timedelta(days=offset) for offset in range(total_days)):
+        for current in collection_days:
             active_collection_date = current
             check_collection_control()
+            tracker.start_day(current)
             progress(f"Hipodromlar aliniyor: {current.isoformat()}")
-            hippodromes = KNOWN_HIPPODROMES
             day_failures_before = failed_targets
             day_csv_failed = False
-            day_units = 0
             day_unit_keys: set[str] = set()
-            for hippodrome in hippodromes:
+            day_had_closed_target = False
+            for hippodrome_index, hippodrome in enumerate(hippodromes):
                 check_collection_control()
+                tracker.hippodromes_done(hippodrome_index)
+                target_key = f"{current.isoformat()}|{hippodrome}"
+                if target_key in done_targets:
+                    day_had_closed_target = True
+                    continue
+                if target_key in empty_targets:
+                    continue
+                tracker.note_network()
                 progress(f"CSV programi aliniyor: {current.isoformat()} / {hippodrome}")
                 try:
                     races = source.get_daily_races_csv(current, hippodrome)
@@ -577,6 +652,12 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     failed_targets += 1
                     day_csv_failed = True
                     progress(f"Hipodrom atlandi: {current.isoformat()} / {hippodrome} | {exc}")
+                    continue
+                if not races:
+                    # Bugun/gelecek icin program henuz yayinlanmamis olabilir; yalnizca gecmis gun kalici islenir.
+                    if current < date.today():
+                        empty_targets.add(target_key)
+                        write_checkpoint()
                     continue
                 id_resolution = resolve_race_horse_ids(
                     source,
@@ -613,13 +694,13 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     for race in races
                     if f"{current.isoformat()}|{hippodrome}|{race.race_no}" not in completed_units
                 ]
-                day_units += len(races)
                 day_unit_keys.update(
                     f"{current.isoformat()}|{hippodrome}|{race.race_no}"
                     for race in races
                 )
-                observed_units_by_day[current] = day_units
                 if not pending_races:
+                    if current < date.today():
+                        done_targets.add(target_key)
                     continue
 
                 unit_prefix = f"{current.isoformat()}|{hippodrome}|"
@@ -665,6 +746,7 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                 for attempt in range(1, 4):
                     check_collection_control()
                     try:
+                        tracker.mark_worked()
                         race_data = ingest_real_tjk_data(
                             current,
                             current,
@@ -677,6 +759,13 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                         append_frame(race_data)
                         missing_history_records = int(
                             race_data.attrs.get("missing_horse_history_records", 0)
+                        )
+                        missing_result_nos = {
+                            int(number)
+                            for number in race_data.attrs.get("missing_result_race_nos", [])
+                        }
+                        no_history_records += int(
+                            race_data.attrs.get("unavailable_horse_history_records", 0)
                         )
                         missing_data_records += int(
                             race_data.attrs.get("incomplete_workout_records", 0)
@@ -714,26 +803,47 @@ def _run_collection_job(job_id: str, start_date: date, end_date: date) -> None:
                     program_records
                 )
                 successful_units = {
-                    f"{unit_prefix}{race.race_no}" for race in pending_races
+                    f"{unit_prefix}{race.race_no}"
+                    for race in pending_races
+                    if race.race_no not in missing_result_nos
+                }
+                result_missing_units = {
+                    f"{unit_prefix}{race.race_no}"
+                    for race in pending_races
+                    if race.race_no in missing_result_nos
                 }
                 failed_units.difference_update(successful_units)
                 completed_units.update(successful_units)
-                processed_units += len(pending_races)
+                if result_missing_units:
+                    # Sonucu henuz yayinlanmamis/eksik kosular tamamlanmis sayilmaz; sonraki denemede tekrar alinir.
+                    failed_targets += len(result_missing_units)
+                    failed_units.update(result_missing_units)
+                    progress(
+                        f"Sonuc eksik: {current.isoformat()} / {hippodrome} | "
+                        f"{len(result_missing_units)} kosu; tekrar denenecek"
+                    )
+                elif current < date.today():
+                    done_targets.add(target_key)
                 write_checkpoint()
 
             if day_csv_failed:
                 skipped_days += 1
+                day_status = DAY_SKIPPED
             elif day_unit_keys and day_unit_keys.issubset(completed_units):
-                completed_days.add(current)
+                day_status = DAY_COMPLETE
             elif not day_unit_keys and failed_targets == day_failures_before:
-                completed_days.add(current)
+                day_status = DAY_COMPLETE if day_had_closed_target else DAY_NO_RACE
+            else:
+                day_status = DAY_WARNING
+            tracker.hippodromes_done(len(hippodromes))
+            tracker.finish_day(day_status)
             with _TRAINING_LOCK:
                 job = _COLLECTION_JOBS[job_id]
-                job["completed_days"] = len(completed_days)
-                job["remaining_days"] = max(total_days - len(completed_days), 0)
+                job.update(tracker.snapshot())
                 job["skipped_days"] = skipped_days
                 job["failed_targets"] = failed_targets
                 job["missing_data_records"] = missing_data_records
+                job["no_history_records"] = no_history_records
                 job["message"] = f"Gun tamamlandi: {current.isoformat()}"
             _persist_collection_jobs()
         with _TRAINING_LOCK:
@@ -2015,10 +2125,15 @@ def create_app() -> FastAPI:
                         "start_date": start_date,
                         "end_date": end_date,
                         "completed_days": 0,
+                        "processed_days": 0,
+                        "warning_days": 0,
+                        "progress_percent": 0.0,
+                        "estimated_remaining": "olculuyor; ilk veri cekilen gun bitince hesaplanir",
                         "remaining_days": (parsed_end - parsed_start).days + 1,
                         "skipped_days": 0,
                         "failed_targets": 0,
                         "missing_data_records": 0,
+                        "no_history_records": 0,
                     }
                 _COLLECTION_JOBS[job_id]["status"] = "running"
                 _COLLECTION_JOBS[job_id]["pause_requested"] = False

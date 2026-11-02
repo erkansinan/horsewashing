@@ -8,6 +8,7 @@ hiz sinirlayici).
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from urllib.parse import urlencode
@@ -65,7 +66,8 @@ class RateLimitedClient:
             now = time.monotonic()
             start = max(
                 now,
-                self._last_start_at + request_interval * self._penalty,
+                self._last_start_at
+                + request_interval * self._penalty * random.uniform(1.0, 1.35),
                 self._cooldown_until,
             )
             self._last_start_at = start
