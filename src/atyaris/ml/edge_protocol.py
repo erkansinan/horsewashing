@@ -184,7 +184,7 @@ def make_gbm(cols_fn):
 
 
 # ------------------------------------------------------------ walk-forward
-def walk_forward(df: pd.DataFrame, predictor, test_days: list, all_days_before: bool = True) -> pd.DataFrame:
+def walk_forward(df: pd.DataFrame, predictor, test_days: list, strict_only: bool = True) -> pd.DataFrame:
     """Predict strict test races block by block; training uses pool races strictly before each block."""
     out = []
     first = df["date"].min()
@@ -197,7 +197,7 @@ def walk_forward(df: pd.DataFrame, predictor, test_days: list, all_days_before: 
         train = df[df["date"] < start]
         if (start - first).days < WARMUP_DAYS or train["race_id"].nunique() < 150:
             continue
-        test = df[df["date"].isin(block_days) & df["strict"]].copy()
+        test = df[df["date"].isin(block_days) & (df["strict"] if strict_only else True)].copy()
         if test.empty:
             continue
         test["p"] = predictor(train, test)

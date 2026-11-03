@@ -115,6 +115,23 @@ def find_missing_local_targets(
     return missing
 
 
+_EQUIPMENT_TOKENS = {"K", "KG", "DB", "SK", "SKG", "SGKR", "KR", "GKR", "GR", "DS", "SGK", "SKR", "KGR", "B", "YP", "OG"}
+
+
+def _horse_name_key(value: Any) -> str:
+    """Program ve sonuc CSV'sindeki at adlarini ekipman son eklerinden arindirip karsilastirilabilir yapar."""
+    text = unicodedata.normalize("NFKD", str(value or "").translate(str.maketrans("ıİ", "iI")))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    tokens = []
+    for token in text.split():
+        if token != token.upper():
+            break
+        tokens.append(token.upper())
+    while len(tokens) > 1 and tokens[-1] in _EQUIPMENT_TOKENS:
+        tokens.pop()
+    return re.sub(r"[^A-Z0-9]", "", "".join(tokens))
+
+
 def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def]
     """Materialize labelled rows from local raw collections without network access."""
     programs = _load_jsonl(paths.raw_daily_program_jsonl)
@@ -139,6 +156,19 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
         str, dict[tuple[date, str], dict[str, Any]]
     ] = defaultdict(dict)
     closing_odds: dict[tuple[str, str, str], float] = {}
+    result_odds: dict[tuple[str, str, int, str], tuple[float | None, float | None]] = {}
+    result_odds_path = paths.raw_history_jsonl.with_name("tjk_result_odds.jsonl")
+    if result_odds_path.exists():
+        for item in _load_jsonl(result_odds_path):
+            if item.get("kind") == "horse":
+                result_odds[
+                    (
+                        str(item["race_date"])[:10],
+                        _track_key(item.get("hippodrome")),
+                        int(item["race_no"]),
+                        _horse_name_key(item.get("horse_name")),
+                    )
+                ] = (_number(item.get("ganyan")), _number(item.get("agf_pct")))
     past_performances_path = paths.raw_history_jsonl.with_name("tjk_past_performances.jsonl")
     if past_performances_path.exists():
         for item in _load_jsonl(past_performances_path):
@@ -226,7 +256,18 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             if item["finish_position"] is not None and item["finish_position"] > 0
         ]
         odds = _number(program.get("odds"))
-        odds_source = "program" if odds is not None and odds > 1.0 else "missing"
+        odds_program = odds if odds is not None and odds > 1.0 else None
+        odds_source = "program" if odds_program is not None else "missing"
+        result_row = result_odds.get(
+            (
+                target_date.isoformat(),
+                _track_key(program.get("hippodrome")),
+                int(_number(program.get("race_no")) or 0),
+                _horse_name_key(program.get("horse_name")),
+            )
+        )
+        if result_row is not None and (result_row[0] or 0) > 1.0:
+            odds, odds_source = result_row[0], "results"
         if odds_source == "missing":
             recovered = closing_odds.get(
                 (
@@ -398,6 +439,8 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             "handicap_points": handicap_value or 0.0,
             "odds": odds if pd.notna(odds) else 0.0,
             "odds_source": odds_source,
+            "odds_program": odds_program,
+            "agf_pct": result_row[1] if result_row is not None else None,
             "field_size_local": float(declared_field_size.get(race_id, 0)),
             "market_probability": market_probability,
             "finish_position": int(float(finish)),

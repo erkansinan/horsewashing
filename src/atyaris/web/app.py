@@ -48,6 +48,7 @@ from atyaris.ml.real_ingestion import ingest_real_tjk_data
 from atyaris.ml.horse_id_mapping import HorseIdMappingStore, resolve_race_horse_ids
 from atyaris.ml.raw_store import RAW_STORE_THRESHOLDS, JsonlRawStore
 from atyaris.ml.local_pipeline import build_local_raw_frame, find_missing_local_targets
+from atyaris.ml.result_odds import record_odds_snapshot
 from atyaris.web.collection_progress import (
     COMPLETE as DAY_COMPLETE,
     LIGHT as LIGHT_COST_DAY,
@@ -157,6 +158,21 @@ def _edge_protocol_status() -> dict[str, Any]:
         }
     except Exception:
         return {"proven": False, "decision": None}
+
+
+def _data_recovery_status() -> dict[str, Any]:
+    """Kapanis orani/altili ikramiye toplama ilerlemesi ve kupon raporu ozeti (/training)."""
+    root = Path(__file__).resolve().parents[3]
+    out: dict[str, Any] = {"progress": None, "coupon": None}
+    try:
+        out["progress"] = json.loads((root / "data" / "raw" / "tjk_result_odds.progress.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    try:
+        out["coupon"] = json.loads((root / "reports" / "coupon_protocol_latest.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return out
 
 
 _TRAINING_LOCK = RLock()
@@ -2098,6 +2114,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Turkiye At Yarisi Tahmin Araci", docs_url="/api/docs")
     templates.env.globals["active_training_job_id"] = _active_training_job_id
     templates.env.globals["edge_protocol_status"] = _edge_protocol_status
+    templates.env.globals["data_recovery_status"] = _data_recovery_status
 
     @app.get("/collect", response_class=RedirectResponse)
     def start_collection(
@@ -2411,6 +2428,29 @@ def create_app() -> FastAPI:
                 start_date=start_date or None,
                 end_date=end_date or None,
             )
+        )
+
+    @app.get("/coupon", response_class=HTMLResponse)
+    def coupon_page(
+        request: Request,
+        budget: int = Query(144, ge=1, le=5000),
+        day: str = Query(""),
+    ) -> HTMLResponse:
+        from atyaris.ml import coupon as coupon_mod
+
+        root = Path(__file__).resolve().parents[3]
+        result: dict[str, Any] | None = None
+        error = ""
+        try:
+            result = coupon_mod.replay(
+                root / "data" / "cache", root / "data" / "raw" / "tjk_result_odds.jsonl", day or None, budget
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = f"Kupon onerisi uretilemedi (once kupon protokolunu calistirin): {exc}"
+        return templates.TemplateResponse(
+            request,
+            "coupon.html",
+            {"result": result, "error": error, "budget": budget, "report": _data_recovery_status()["coupon"]},
         )
 
     @app.get("/training", response_class=HTMLResponse)
@@ -2790,6 +2830,14 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Index endpoint failure")
             error = f"Beklenmeyen hata: {exc}"
+
+        try:
+            if races:
+                record_odds_snapshot(
+                    races, paths_from_settings(settings).raw_csv.parent.parent / "snapshots" / "odds_prerace.jsonl"
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("Oran snapshot'i yazilamadi", exc_info=True)
 
         return templates.TemplateResponse(
             request,

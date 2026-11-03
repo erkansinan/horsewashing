@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Altılı ganyan kupon optimizasyonu <span style="background:#6c757d;color:#fff;padding:2px 8px;border-radius:4px;font-size:.75rem">DENEYSEL</span></h2>
+<p>Yerel veride, o güne kadarki verilerle eğitilmiş modelin (geriye dönük) önerisi. Gerçek bahis tavsiyesi değildir.</p>
+<form method="get" action="/coupon">
+  <label>Test bütçesi (kombinasyon sayısı)
+    <input type="number" name="budget" min="1" max="5000" value="{{ budget }}"></label>
+  {% if result and result.dates %}
+  <label>Altılı günü
+    <select name="day">{% for d in result.dates %}<option value="{{ d }}" {% if d == result.date %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
+  {% endif %}
+  <button type="submit">Hesapla</button>
+</form>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% if result and result.legs %}
+<p>Gün: {{ result.date }} — ayak başına at sayısı {{ result.ks }} — maliyet {{ result.cost }} kombinasyon —
+  model isabet olasılığı {{ '%.2f'|format(result.model_hit_probability * 100) }}% — gerçekleşen: {{ 'İSABET' if result.hit else 'tutmadı' }}
+  {% if result.payout %}(yayınlanan ikramiye {{ result.payout }}){% endif %}</p>
+<ol>
+  {% for leg in result.legs %}
+  <li>{% for h in leg %}<span {% if h.won %}style="font-weight:bold;text-decoration:underline"{% endif %}>#{{ h.no }} {{ h.name }} (%{{ '%.1f'|format(h.p * 100) }}, {{ h.odds }})</span>{% if not loop.last %}, {% endif %}{% endfor %}</li>
+  {% endfor %}
+</ol>
+{% endif %}
+{% if report %}
+<h3>Doğrulama özeti</h3>
+<p>{{ report.summary }}</p>
+{% endif %}
+{% endblock %}

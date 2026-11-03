@@ -477,3 +477,15 @@ Kod: `src/atyaris/ml/edge_protocol.py`; sonuc: `reports/edge_protocol_dev.json`,
 
 Karar: hicbir aday piyasayi gecmedi; en iyi C2 holdout'ta Δ +0.0126, CI [-0.0024, 0.0291], 7 bahis ROI -100% => **DO_NOT_PROMOTE**. Canonical artifact degismedi; web'de kalici "Kanitlanmis ustunluk yok" bandi gosterilir (health-fail artifact yine servis edilmez).
 Yeniden test tetikleyicisi: strict yaris sayisi >=2500 (ozellikle Eylul/Ekim kapanis oranlari geri kazanilinca) veya yeni anlamli feature eklendiginde.
+
+## Veri geri kazanimi + 6'li ganyan kupon (coupon-v1)
+
+Kaynak: TJK gunluk sonuc CSV'si (kapanis ganyani, AGF, 6'li ganyan ikramiyesi) -> `data/raw/tjk_result_odds.jsonl`, 523 gun-hipodrom birimi, 1 istek/birim, mevcut hiz siniri, devam edilebilir. At eslesmesi ad uzerinden (program `draw` = start kapisi, At No degil).
+Once/sonra: oran dolu satir %3,4 -> %96,8; strict yaris 932 -> 3249 (>=2500 tetikleyicisi KARSILANDI); Eylul strict 59 -> 391, Ekim 6 -> 420. Cozumlenemeyen source_horse_id 7801/47449 satir (%16,4; liste `reports/unresolved_horse_ids.jsonl`), kapanis orani artik ID'den bagimsiz; adas riskinde tahmin yapilmadi.
+Not: edge-protocol-v1 eski (932 yarislik) evren icindi; yeni evrenle yeniden test edilebilir (tetikleyici tetiklendi), at bazinda DO_NOT_PROMOTE gecerli kalir.
+Yaris-oncesi oran snapshot'i: `data/snapshots/odds_prerace.jsonl` (yalniz toplanir, modele girmez).
+
+Kupon: kalibrasyon = online isotonic + yaris-ici normalize; optimizer = butce altinda greedy log-kapsama/maliyet; baseline = ayni butcede piyasa-sirali greedy ve sabit-k. Ikramiye ROI'si yayinlanan ikramiye birimi 1 bahis alinarak hesaplandi.
+Holdout (son %20 altili gunu, tek sefer, C2, 51 altili / 24 gun): B48 0,000 vs 0,000; B144 0,020 vs 0,020; B432 0,118 vs 0,098 (d +0,020, CI [-0,044; +0,087]).
+Karar: optimizer piyasa-sirali baseline'i CI ile gecmedi => **DO_NOT_PROMOTE** (kupon ekrani "deneysel"). Tetikleyici: >=300 altili holdout veya yarisoncesi oran snapshot'inin >=60 gun birikmesi.
+Risk: egitimde kapanis orani kullaniliyor, canli tahminde yarisoncesi oran farkli olabilir; sonuclar canliya birebir tasinamaz.

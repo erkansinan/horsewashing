@@ -2,6 +2,19 @@
 {% block title %}ML Eğitim{% endblock %}
 {% block content %}
 <h2>ML Eğitim</h2>
+{% set rec = data_recovery_status() %}
+{% if rec.progress %}
+<section aria-label="Kapanış oranı geri kazanımı">
+  <h3>Kapanış oranı / altılı ikramiye toplama</h3>
+  <p>{{ rec.progress.status }}: {{ rec.progress.done }} / {{ rec.progress.total }} gün-hipodrom
+    {% if rec.progress.last %}(son: {{ rec.progress.last }}){% endif %}
+    {% if rec.progress.stats %}— çekilen {{ rec.progress.stats.fetched }}, boş {{ rec.progress.stats.empty }}, hatalı {{ rec.progress.stats.failed }}{% endif %}</p>
+  <progress max="{{ rec.progress.total or 1 }}" value="{{ rec.progress.done or 0 }}"></progress>
+</section>
+{% endif %}
+{% if rec.coupon %}
+<p><a href="/coupon">Altılı kupon optimizasyonu (deneysel)</a></p>
+{% endif %}
 <p>TJK arşivini güncelledikten sonra modeli yerel beş JSONL dosyasından eğitin. Toplama ve eğitim ayrı işlerdir.</p>
 {% if raw_repair %}<p class="training-status" data-state="completed">{{ raw_repair }}</p>{% endif %}
 
