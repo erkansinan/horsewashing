@@ -50,7 +50,12 @@ def _labeled_placer_races(frame: pd.DataFrame) -> pd.DataFrame:
     return labeled
 
 
-def fit_highest_odds_placer_model(frame: pd.DataFrame) -> ConditionalLogitModel:
+def fit_highest_odds_placer_model(
+    frame: pd.DataFrame,
+) -> ConditionalLogitModel | None:
+    if TARGET_COLUMN in frame.columns and not frame[TARGET_COLUMN].notna().any():
+        return None
+
     labeled = _labeled_placer_races(frame)
     missing_features = set(TJK_HIGHEST_ODDS_PLACER_FEATURE_COLUMNS).difference(labeled.columns)
     if missing_features:

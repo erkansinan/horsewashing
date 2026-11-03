@@ -394,14 +394,18 @@ def _highest_odds_placer_metrics(
         if target_row.empty:
             continue
 
-        place_model_pick = group[group["place_top3_highest_odds_placer"]].head(1)
+        place_model_pick = group[
+            group["place_top3_highest_odds_placer"].eq(True).fillna(False)
+        ].head(1)
         place_model_exact.append(
             float(
                 not place_model_pick.empty
                 and str(place_model_pick.iloc[0]["horse_id"]) == target
             )
         )
-        model_pick = group[group["predicted_highest_odds_placer"]].head(1)
+        model_pick = group[
+            group["predicted_highest_odds_placer"].eq(True).fillna(False)
+        ].head(1)
         direct_place_agreement.append(
             float(
                 not place_model_pick.empty
@@ -418,13 +422,17 @@ def _highest_odds_placer_metrics(
             placed = pd.to_numeric(model_pick["is_placed"], errors="coerce").iloc[0]
             model_placed.append(float(placed == 1.0))
         exact_matches[str(race_id)] = exact
-        model_top3_ids = set(group.loc[group["predicted_top3"], "horse_id"].astype(str))
+        model_top3_ids = set(
+            group.loc[group["predicted_top3"].eq(True).fillna(False), "horse_id"].astype(str)
+        )
         captured = target in model_top3_ids
         first_stage_capture.append(float(captured))
         if captured:
             conditional_second_stage.append(exact)
 
-        market_pick = group[group["market_predicted_highest_odds_placer"]].head(1)
+        market_pick = group[
+            group["market_predicted_highest_odds_placer"].eq(True).fillna(False)
+        ].head(1)
         if not market_pick.empty:
             market_is_exact = float(str(market_pick.iloc[0]["horse_id"]) == target)
             market_exact.append(market_is_exact)
@@ -1077,7 +1085,12 @@ def walk_forward_backtest(
                 selection_probability_col="placer_probability",
             )
         else:
-            pred = place_candidate_predictions
+            pred["placer_probability"] = 0.0
+            pred["predicted_place_rank"] = place_candidate_predictions["predicted_place_rank"]
+            pred["predicted_top3"] = place_candidate_predictions["predicted_top3"]
+            pred["predicted_highest_odds_placer"] = place_candidate_predictions[
+                "predicted_highest_odds_placer"
+            ]
         market_predictions = mark_highest_odds_placer_predictions(
             pred,
             place_probability_col="market_probability_used",

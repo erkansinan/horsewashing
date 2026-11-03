@@ -7,6 +7,7 @@ import pandas as pd
 from atyaris.ml.backtest import (
     _alpha_comparison,
     _harville_place_calibration_comparison,
+    _highest_odds_placer_metrics,
     _market_ranking_divergence_test,
     _ranking_order_metrics,
     walk_forward_backtest,
@@ -106,6 +107,41 @@ def test_market_only_alpha_is_exactly_the_odds_sort_baseline() -> None:
     assert market_only["ranking_different_top4_set_rate"] == 0.0
     assert market_only["top4_hit_delta_vs_odds_sort"] == 0.0
     assert market_only["top4_vs_odds_sort_evaluation"] == "descriptive_only"
+
+
+def test_highest_odds_placer_metrics_treat_missing_selection_flags_as_false() -> None:
+    frame = pd.DataFrame(
+        {
+            "race_id": ["R1"],
+            "horse_id": ["H1"],
+            "target_highest_odds_placer": ["H1"],
+            "place_top3_highest_odds_placer": pd.Series([pd.NA], dtype="boolean"),
+            "predicted_highest_odds_placer": pd.Series([pd.NA], dtype="boolean"),
+            "predicted_top3": pd.Series([pd.NA], dtype="boolean"),
+            "market_predicted_highest_odds_placer": pd.Series([pd.NA], dtype="boolean"),
+            "is_placed": [1.0],
+            "odds_slice": ["longshot"],
+        }
+    )
+
+    metrics, model_matches, market_matches = _highest_odds_placer_metrics(frame)
+
+    assert metrics["eligible_races"] == 1
+    assert metrics["place_model_top3_odds_baseline_exact_match_rate"] == 0.0
+    assert metrics["model_exact_match_rate"] == 0.0
+    assert model_matches == {"R1": 0.0}
+    assert market_matches == {"R1": 0.0}
+
+
+def test_walk_forward_keeps_placer_columns_without_direct_placer_model(monkeypatch) -> None:
+    monkeypatch.setattr("atyaris.ml.backtest.fit_highest_odds_placer_model", lambda frame: None)
+    data = _FixtureRacingDataProvider().get_dataset(date(2024, 1, 1), date(2024, 4, 15))
+
+    result = walk_forward_backtest(data, min_train_days=60, retrain_interval_days=14)
+
+    assert result.evaluated_days > 0
+    assert result.highest_odds_placer_metrics["eligible_races"] > 0
+    assert "place_model_top3_odds_baseline_exact_match_rate" in result.highest_odds_placer_metrics
 
 
 def test_walk_forward_temporal_integrity_and_metrics() -> None:

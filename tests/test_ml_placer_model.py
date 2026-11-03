@@ -44,6 +44,7 @@ def test_direct_model_learns_one_highest_odds_placer_per_race() -> None:
     frame = _placer_training_frame()
 
     model = fit_highest_odds_placer_model(frame)
+    assert model is not None
     probabilities = predict_highest_odds_placer_probability(model, frame)
     scored = frame.assign(probability=probabilities)
 
@@ -59,3 +60,10 @@ def test_direct_model_learns_one_highest_odds_placer_per_race() -> None:
 
     assert probabilities[0] == 0.0
     assert np.isclose(probabilities.sum(), 1.0)
+
+
+def test_direct_model_is_optional_when_training_races_are_unlabeled() -> None:
+    frame = _placer_training_frame()
+    frame["target_highest_odds_placer"] = None
+
+    assert fit_highest_odds_placer_model(frame) is None
