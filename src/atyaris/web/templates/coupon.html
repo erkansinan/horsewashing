@@ -9,6 +9,8 @@
   <label>Altılı günü
     <select name="day">{% for d in result.dates %}<option value="{{ d }}" {% if d == result.date %}selected{% endif %}>{{ d }}</option>{% endfor %}</select></label>
   {% endif %}
+  <label>Mod
+    <select name="mode"><option value="hit" {% if mode == 'hit' %}selected{% endif %}>İsabet</option><option value="ev" {% if mode == 'ev' %}selected{% endif %}>EV (ikramiye tahminli, deneysel)</option></select></label>
   <button type="submit">Hesapla</button>
 </form>
 {% if error %}<p role="alert">{{ error }}</p>{% endif %}

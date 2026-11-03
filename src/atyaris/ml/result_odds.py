@@ -91,6 +91,63 @@ def record_odds_snapshot(races: list[Any], path: Path, now: Any = None) -> int:
     return len(rows)
 
 
+def collect_backfill(
+    source: Any,
+    newest: date,
+    months: int,
+    out_path: Path,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict[str, int]:
+    """En yeni gunden geriye dogru gun gun hipodrom bulur ve sonuc CSV'sini toplar (checkpoint'li)."""
+    from datetime import timedelta
+
+    marker = out_path.with_suffix(".days.json")
+    done: set[str] = set(json.loads(marker.read_text(encoding="utf-8"))) if marker.exists() else set()
+    total = newest.year * 12 + newest.month - 1 - months
+    oldest = date(total // 12, total % 12 + 1, 1)
+    stats = {"days_total": (newest - oldest).days + 1, "days_done": 0, "units": 0, "empty_days": 0, "failed": 0}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    day = newest
+    while day >= oldest:
+        key = day.isoformat()
+        if key in done:
+            stats["days_done"] += 1
+            day -= timedelta(days=1)
+            continue
+        if should_stop and should_stop():
+            break
+        try:
+            cities = source.get_available_hippodromes(day)
+        except Exception:  # noqa: BLE001
+            stats["failed"] += 1
+            day -= timedelta(days=1)
+            continue
+        if not cities:
+            stats["empty_days"] += 1
+        for city in cities:
+            try:
+                text = source._get_csv(source._daily_results_csv_url(day, _match_hippodrome(city) or city)) or ""
+            except Exception:  # noqa: BLE001
+                stats["failed"] += 1
+                continue
+            recs = parse_result_csv(text, key, city) if text else []
+            if recs:
+                with out_path.open("a", encoding="utf-8") as fh:
+                    for r in recs:
+                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                stats["units"] += 1
+        done.add(key)
+        stats["days_done"] += 1
+        if stats["days_done"] % 5 == 0:
+            marker.write_text(json.dumps(sorted(done)), encoding="utf-8")
+        if progress:
+            progress({**stats, "last": key})
+        day -= timedelta(days=1)
+    marker.write_text(json.dumps(sorted(done)), encoding="utf-8")
+    return stats
+
+
 def collect_result_odds(
     source: Any,
     units: list[tuple[str, str]],

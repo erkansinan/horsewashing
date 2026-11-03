@@ -489,3 +489,10 @@ Kupon: kalibrasyon = online isotonic + yaris-ici normalize; optimizer = butce al
 Holdout (son %20 altili gunu, tek sefer, C2, 51 altili / 24 gun): B48 0,000 vs 0,000; B144 0,020 vs 0,020; B432 0,118 vs 0,098 (d +0,020, CI [-0,044; +0,087]).
 Karar: optimizer piyasa-sirali baseline'i CI ile gecmedi => **DO_NOT_PROMOTE** (kupon ekrani "deneysel"). Tetikleyici: >=300 altili holdout veya yarisoncesi oran snapshot'inin >=60 gun birikmesi.
 Risk: egitimde kapanis orani kullaniliyor, canli tahminde yarisoncesi oran farkli olabilir; sonuclar canliya birebir tasinamaz.
+
+## Geriye toplama + edge v2 + EV kupon (3 Kasim)
+
+Geriye toplama (`scripts/run_result_backfill.py`, checkpoint `tjk_result_odds.days.json`, duraklat = `tjk_result_odds.pause`): hedef 759 gun (2024-03..2026-02), ~55 sn/gun (hiz siniri artirilmadi) => 50 gun (2026-01-10..02-28) tamamlandi, kalan checkpoint'te. Eski gunler "market_only" (ozellik/history yok), 2026-03+ "feature" (`reports/data_coverage_by_month.csv`). Sanity: favori kazanma %33-40, altili/gun 1,5-1,9.
+Edge v2 (`edge_protocol.run_v2`): eski holdout 41 gun "kullanilmis"; naif son %20'nin 13/49 gunu cakisiyordu, temiz holdout = kullanilmamis son %20 (`reports/edge_holdout_registry_v2.json`). Dev: C1 -0,0007, C1+longshot +0,0002, C1+antrenor -0,0054, C2 +0,0014 (hepsinde CI 0'i iceriyor). Holdout C1+antrenor (528 yaris): Δ -0,0074 CI [-0,0196; 0,0045] => **not_established**, DO_NOT_PROMOTE.
+Ikramiye modeli: log(ikramiye)=a+b·log(∏AGF kazanan), b=-0,96, R2 0,97 (OOS 0,98, medyan |hata| %19, n=483).
+EV kupon (temiz holdout, 19 gun; >=300 altili YOK => yetersiz guc): EV optimizer 0 isabet, ROI -%100; piyasa-sirali ve AGF-sirali baseline'lar ustun/esit; dROI CI ust siniri 0 => DO_NOT_PROMOTE. EV optimizer longshot'a (yuksek p/AGF) kayiyor, model olasiliklari buna guvenilir degil.

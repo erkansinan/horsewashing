@@ -12,6 +12,18 @@
   <progress max="{{ rec.progress.total or 1 }}" value="{{ rec.progress.done or 0 }}"></progress>
 </section>
 {% endif %}
+{% if rec.backfill %}
+<section aria-label="Geriye dönük toplama">
+  <h3>Geriye dönük sonuç CSV toplama (24 ay)</h3>
+  <p>{{ rec.backfill.status }}: {{ rec.backfill.days_done }} / {{ rec.backfill.days_total }} gün, {{ rec.backfill.units }} gün-hipodrom
+    (son: {{ rec.backfill.last }}). Duraklatmak için data/raw/tjk_result_odds.pause dosyası; devam için dosyayı silip yeniden başlatın.</p>
+  <progress max="{{ rec.backfill.days_total or 1 }}" value="{{ rec.backfill.days_done or 0 }}"></progress>
+</section>
+{% endif %}
+{% if rec.edge_v2 %}
+<p>At bazlı edge protokolü v2: <strong>{{ rec.edge_v2.status }}</strong> ({{ rec.edge_v2.selected }}, temiz holdout {{ rec.edge_v2.holdout.n_races }} yarış,
+  Δ log-loss {{ '%.4f'|format(rec.edge_v2.holdout.delta_logloss) }}).</p>
+{% endif %}
 {% if rec.coupon %}
 <p><a href="/coupon">Altılı kupon optimizasyonu (deneysel)</a></p>
 {% endif %}

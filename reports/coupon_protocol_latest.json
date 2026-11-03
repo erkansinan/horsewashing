@@ -1,850 +1,335 @@
 {
- "protocol": "coupon-v1",
- "selected": "C2",
+ "protocol": "coupon-ev-v2",
  "decision": "DO_NOT_PROMOTE",
+ "status": "not_established",
  "holdout": {
-  "protocol": "coupon-v1",
-  "stage": "holdout",
-  "models": {
-   "C1": {
-    "n_altili": 51,
-    "n_days": 24,
-    "budgets": {
-     "48": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 47.64705882352941,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "greedy_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 47.64705882352941,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": 0.0
+  "budgets": {
+   "48": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 48.0,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "144": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.0196078431372549,
-        "mean_cost": 141.86274509803923,
-        "hits": 1,
-        "published_unit_roi": -0.6243953006219765
-       },
-       "greedy_market": {
-        "hit_rate": 0.0196078431372549,
-        "mean_cost": 142.62745098039215,
-        "hits": 1,
-        "published_unit_roi": -0.6264091284025295
-       },
-       "fixed_model": {
-        "hit_rate": 0.058823529411764705,
-        "mean_cost": 64.0,
-        "hits": 3,
-        "published_unit_roi": 1.753826593137255
-       },
-       "fixed_market": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": -0.0196078431372549
+     "hit_opt": {
+      "hit_rate": 0.03125,
+      "mean_cost": 47.8125,
+      "roi": 0.40816993464052287,
+      "roi_ci95": [
+       -1.0,
+       3.819910514541387
+      ]
      },
-     "432": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.09803921568627451,
-        "mean_cost": 422.3137254901961,
-        "hits": 5,
-        "published_unit_roi": -0.1075313399572847
-       },
-       "greedy_market": {
-        "hit_rate": 0.09803921568627451,
-        "mean_cost": 418.6666666666667,
-        "hits": 5,
-        "published_unit_roi": -0.09975693143499431
-       },
-       "fixed_model": {
-        "hit_rate": 0.058823529411764705,
-        "mean_cost": 64.0,
-        "hits": 3,
-        "published_unit_roi": 1.753826593137255
-       },
-       "fixed_market": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": 0.058823529411764705
+     "market": {
+      "hit_rate": 0.03125,
+      "mean_cost": 47.625,
+      "roi": 0.4137139107611549,
+      "roi_ci95": [
+       -1.0,
+       3.8415730337078653
+      ]
+     },
+     "agf": {
+      "hit_rate": 0.0,
+      "mean_cost": 47.8125,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      }
     },
-    "coverage_by_k": {
-     "1": {
-      "p_cal": {
-       "predicted": 0.33291789591581944,
-       "actual": 0.31699346405228757,
-       "fav_winner_cov": 0.38645418326693226,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.33010368983364635,
-       "actual": 0.31699346405228757,
-       "fav_winner_cov": 0.38645418326693226,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      }
-     },
-     "2": {
-      "p_cal": {
-       "predicted": 0.529319265062721,
-       "actual": 0.5130718954248366,
-       "fav_winner_cov": 0.6254980079681275,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.522183710381465,
-       "actual": 0.5228758169934641,
-       "fav_winner_cov": 0.6374501992031872,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      }
-     },
-     "3": {
-      "p_cal": {
-       "predicted": 0.6658496035797108,
-       "actual": 0.6601307189542484,
-       "fav_winner_cov": 0.8007968127490039,
-       "longshot_winner_cov": 0.01818181818181818,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.6543258018939556,
-       "actual": 0.673202614379085,
-       "fav_winner_cov": 0.8167330677290837,
-       "longshot_winner_cov": 0.01818181818181818,
-       "n_longshot_winners": 55
-      }
-     },
-     "4": {
-      "p_cal": {
-       "predicted": 0.7604288883288667,
-       "actual": 0.7483660130718954,
-       "fav_winner_cov": 0.9043824701195219,
-       "longshot_winner_cov": 0.03636363636363636,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.7484513384875394,
-       "actual": 0.7581699346405228,
-       "fav_winner_cov": 0.9083665338645418,
-       "longshot_winner_cov": 0.07272727272727272,
-       "n_longshot_winners": 55
-      }
-     },
-     "5": {
-      "p_cal": {
-       "predicted": 0.832651422391306,
-       "actual": 0.8235294117647058,
-       "fav_winner_cov": 0.9601593625498008,
-       "longshot_winner_cov": 0.2,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.8201191550802919,
-       "actual": 0.8300653594771242,
-       "fav_winner_cov": 0.9760956175298805,
-       "longshot_winner_cov": 0.16363636363636364,
-       "n_longshot_winners": 55
-      }
-     },
-     "6": {
-      "p_cal": {
-       "predicted": 0.8873621771725076,
-       "actual": 0.8758169934640523,
-       "fav_winner_cov": 0.9880478087649402,
-       "longshot_winner_cov": 0.36363636363636365,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.8740501899312731,
-       "actual": 0.8823529411764706,
-       "fav_winner_cov": 0.9880478087649402,
-       "longshot_winner_cov": 0.4,
-       "n_longshot_winners": 55
-      }
-     }
-    },
-    "cut_date": "2026-09-27"
+    "delta_roi_ev_vs_market": -1.413713910761155,
+    "delta_roi_ci95": [
+     -4.841573033707865,
+     0.0
+    ]
    },
-   "C2": {
-    "n_altili": 51,
-    "n_days": 24,
-    "budgets": {
-     "48": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 47.64705882352941,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "greedy_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 47.64705882352941,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": 0.0
+   "144": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 144.0,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "144": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.0196078431372549,
-        "mean_cost": 142.76470588235293,
-        "hits": 1,
-        "published_unit_roi": -0.8646820491690702
-       },
-       "greedy_market": {
-        "hit_rate": 0.0196078431372549,
-        "mean_cost": 142.62745098039215,
-        "hits": 1,
-        "published_unit_roi": -0.6264091284025295
-       },
-       "fixed_model": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       },
-       "fixed_market": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": -0.0196078431372549
+     "hit_opt": {
+      "hit_rate": 0.0625,
+      "mean_cost": 141.25,
+      "roi": -0.16547345132743363,
+      "roi_ci95": [
+       -1.0,
+       1.4567966809467765
+      ]
      },
-     "432": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.11764705882352941,
-        "mean_cost": 421.8627450980392,
-        "hits": 6,
-        "published_unit_roi": 0.022201719730420733
-       },
-       "greedy_market": {
-        "hit_rate": 0.09803921568627451,
-        "mean_cost": 418.6666666666667,
-        "hits": 5,
-        "published_unit_roi": -0.09975693143499431
-       },
-       "fixed_model": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       },
-       "fixed_market": {
-        "hit_rate": 0.0392156862745098,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": 0.3233547794117648
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0196078431372549,
-      "delta_ci95": [
-       -0.04449612403100775,
-       0.08695652173913043
-      ],
-      "delta_hit_vs_fixed_market": 0.0784313725490196
+     "market": {
+      "hit_rate": 0.0625,
+      "mean_cost": 142.1875,
+      "roi": -0.1709758241758242,
+      "roi_ci95": [
+       -1.0,
+       1.4518743021314888
+      ]
+     },
+     "agf": {
+      "hit_rate": 0.09375,
+      "mean_cost": 140.375,
+      "roi": 0.4144991095280499,
+      "roi_ci95": [
+       -1.0,
+       2.25960508189252
+      ]
      }
     },
-    "coverage_by_k": {
-     "1": {
-      "p_cal": {
-       "predicted": 0.3304946654521895,
-       "actual": 0.29411764705882354,
-       "fav_winner_cov": 0.35856573705179284,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.33010368983364635,
-       "actual": 0.31699346405228757,
-       "fav_winner_cov": 0.38645418326693226,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      }
+    "delta_roi_ev_vs_market": -0.8290241758241759,
+    "delta_roi_ci95": [
+     -2.45187430213149,
+     0.0
+    ]
+   },
+   "432": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 432.0,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "2": {
-      "p_cal": {
-       "predicted": 0.5254166861308798,
-       "actual": 0.5130718954248366,
-       "fav_winner_cov": 0.6254980079681275,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.522183710381465,
-       "actual": 0.5228758169934641,
-       "fav_winner_cov": 0.6374501992031872,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 55
-      }
+     "hit_opt": {
+      "hit_rate": 0.0625,
+      "mean_cost": 422.53125,
+      "roi": -0.7210221137489831,
+      "roi_ci95": [
+       -1.0,
+       -0.24737983444086392
+      ]
      },
-     "3": {
-      "p_cal": {
-       "predicted": 0.662537312340344,
-       "actual": 0.6568627450980392,
-       "fav_winner_cov": 0.796812749003984,
-       "longshot_winner_cov": 0.01818181818181818,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.6543258018939556,
-       "actual": 0.673202614379085,
-       "fav_winner_cov": 0.8167330677290837,
-       "longshot_winner_cov": 0.01818181818181818,
-       "n_longshot_winners": 55
-      }
+     "market": {
+      "hit_rate": 0.0625,
+      "mean_cost": 415.96875,
+      "roi": -0.716620839906844,
+      "roi_ci95": [
+       -1.0,
+       -0.23139218429701508
+      ]
      },
-     "4": {
-      "p_cal": {
-       "predicted": 0.7575980325908293,
-       "actual": 0.7450980392156863,
-       "fav_winner_cov": 0.896414342629482,
-       "longshot_winner_cov": 0.05454545454545454,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.7484513384875394,
-       "actual": 0.7581699346405228,
-       "fav_winner_cov": 0.9083665338645418,
-       "longshot_winner_cov": 0.07272727272727272,
-       "n_longshot_winners": 55
-      }
-     },
-     "5": {
-      "p_cal": {
-       "predicted": 0.8311740855439291,
-       "actual": 0.8202614379084967,
-       "fav_winner_cov": 0.9601593625498008,
-       "longshot_winner_cov": 0.18181818181818182,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.8201191550802919,
-       "actual": 0.8300653594771242,
-       "fav_winner_cov": 0.9760956175298805,
-       "longshot_winner_cov": 0.16363636363636364,
-       "n_longshot_winners": 55
-      }
-     },
-     "6": {
-      "p_cal": {
-       "predicted": 0.8868705532959639,
-       "actual": 0.8856209150326797,
-       "fav_winner_cov": 0.9840637450199203,
-       "longshot_winner_cov": 0.43636363636363634,
-       "n_longshot_winners": 55
-      },
-      "q": {
-       "predicted": 0.8740501899312731,
-       "actual": 0.8823529411764706,
-       "fav_winner_cov": 0.9880478087649402,
-       "longshot_winner_cov": 0.4,
-       "n_longshot_winners": 55
-      }
+     "agf": {
+      "hit_rate": 0.09375,
+      "mean_cost": 418.875,
+      "roi": -0.5259676216054909,
+      "roi_ci95": [
+       -1.0,
+       0.027842459731700124
+      ]
      }
     },
-    "cut_date": "2026-09-27"
+    "delta_roi_ev_vs_market": -0.283379160093156,
+    "delta_roi_ci95": [
+     -0.7686078157029851,
+     0.0
+    ]
    }
-  }
+  },
+  "n_altili": 32,
+  "n_days": 19,
+  "stage": "holdout",
+  "n_altili_total_with_payout": 487,
+  "payout_model_all": {
+   "a": -0.06434905734943797,
+   "b": -0.964884194516338,
+   "r2": 0.973316608453048,
+   "n": 487
+  },
+  "payout_quality_non_holdout": {
+   "fit_train": {
+    "a": 0.01695785672247764,
+    "b": -0.9592570321327923,
+    "r2": 0.9713987275792274,
+    "n": 235
+   },
+   "n_test": 101,
+   "oos_r2": 0.9784730955294877,
+   "mean_log_error": -0.026577424411701654,
+   "median_abs_pct_error": 0.18405912855418372
+  },
+  "trigger_300_met": false
  },
  "dev": {
-  "protocol": "coupon-v1",
-  "stage": "dev",
-  "models": {
-   "C1": {
-    "n_altili": 171,
-    "n_days": 94,
-    "budgets": {
-     "48": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 47.59649122807018,
-        "hits": 2,
-        "published_unit_roi": -0.6514854404718025
-       },
-       "greedy_market": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 47.666666666666664,
-        "hits": 2,
-        "published_unit_roi": -0.5531615752668384
-       },
-       "fixed_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       -0.017543859649122806,
-       0.013566300675675628
-      ],
-      "delta_hit_vs_fixed_market": 0.011695906432748537
+  "budgets": {
+   "48": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 48.0,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "144": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.03508771929824561,
-        "mean_cost": 141.70760233918128,
-        "hits": 6,
-        "published_unit_roi": -0.5971937933311324
-       },
-       "greedy_market": {
-        "hit_rate": 0.05263157894736842,
-        "mean_cost": 142.00584795321637,
-        "hits": 9,
-        "published_unit_roi": 0.3435745171519169
-       },
-       "fixed_model": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       },
-       "fixed_market": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       }
-      },
-      "delta_hit_vs_greedy_market": -0.017543859649122806,
-      "delta_ci95": [
-       -0.05142857142857143,
-       0.01242825693843855
-      ],
-      "delta_hit_vs_fixed_market": 0.029239766081871343
+     "hit_opt": {
+      "hit_rate": 0.007194244604316547,
+      "mean_cost": 47.52517985611511,
+      "roi": -0.7747986678776869,
+      "roi_ci95": [
+       -1.0,
+       -0.17588898343963955
+      ]
      },
-     "432": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.07017543859649122,
-        "mean_cost": 420.19883040935673,
-        "hits": 12,
-        "published_unit_roi": -0.7126226793219584
-       },
-       "greedy_market": {
-        "hit_rate": 0.07017543859649122,
-        "mean_cost": 419.02923976608184,
-        "hits": 12,
-        "published_unit_roi": -0.43796647779607567
-       },
-       "fixed_model": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       },
-       "fixed_market": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       -0.022860426929392448,
-       0.022991827785529197
-      ],
-      "delta_hit_vs_fixed_market": 0.06432748538011696
+     "market": {
+      "hit_rate": 0.007194244604316547,
+      "mean_cost": 47.67625899280576,
+      "roi": -0.775512298174136,
+      "roi_ci95": [
+       -1.0,
+       -0.18061225089966867
+      ]
+     },
+     "agf": {
+      "hit_rate": 0.007194244604316547,
+      "mean_cost": 47.67625899280576,
+      "roi": -0.8168477440772597,
+      "roi_ci95": [
+       -1.0,
+       -0.4221810919601397
+      ]
      }
     },
-    "coverage_by_k": {
-     "1": {
-      "p_cal": {
-       "predicted": 0.3315945265045032,
-       "actual": 0.2982456140350877,
-       "fav_winner_cov": 0.3570595099183197,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.33143137833521785,
-       "actual": 0.297270955165692,
-       "fav_winner_cov": 0.3558926487747958,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
-     },
-     "2": {
-      "p_cal": {
-       "predicted": 0.5358841267774187,
-       "actual": 0.49415204678362573,
-       "fav_winner_cov": 0.5915985997666278,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.5210647728150561,
-       "actual": 0.49415204678362573,
-       "fav_winner_cov": 0.5915985997666278,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
-     },
-     "3": {
-      "p_cal": {
-       "predicted": 0.6775144213304721,
-       "actual": 0.6461988304093568,
-       "fav_winner_cov": 0.7736289381563594,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.6517233548637229,
-       "actual": 0.6403508771929824,
-       "fav_winner_cov": 0.7666277712952159,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
-     },
-     "4": {
-      "p_cal": {
-       "predicted": 0.7716615546612903,
-       "actual": 0.7485380116959064,
-       "fav_winner_cov": 0.8879813302217037,
-       "longshot_winner_cov": 0.04142011834319527,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.7473138267930156,
-       "actual": 0.753411306042885,
-       "fav_winner_cov": 0.8891481913652275,
-       "longshot_winner_cov": 0.0650887573964497,
-       "n_longshot_winners": 169
-      }
-     },
-     "5": {
-      "p_cal": {
-       "predicted": 0.8396943425534573,
-       "actual": 0.8187134502923976,
-       "fav_winner_cov": 0.9509918319719953,
-       "longshot_winner_cov": 0.14792899408284024,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.819227181759585,
-       "actual": 0.817738791423002,
-       "fav_winner_cov": 0.9474912485414235,
-       "longshot_winner_cov": 0.15976331360946747,
-       "n_longshot_winners": 169
-      }
-     },
-     "6": {
-      "p_cal": {
-       "predicted": 0.8901136890574052,
-       "actual": 0.8674463937621832,
-       "fav_winner_cov": 0.9801633605600933,
-       "longshot_winner_cov": 0.2958579881656805,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.8732541787274377,
-       "actual": 0.8713450292397661,
-       "fav_winner_cov": 0.9848308051341891,
-       "longshot_winner_cov": 0.2958579881656805,
-       "n_longshot_winners": 169
-      }
-     }
-    },
-    "cut_date": "2026-09-27",
-    "logloss_calibrated": 1.9235273850306496,
-    "logloss_raw": 1.9161471153491432
+    "delta_roi_ev_vs_market": -0.22448770182586397,
+    "delta_roi_ci95": [
+     -0.8193877491003314,
+     0.0
+    ]
    },
-   "C2": {
-    "n_altili": 171,
-    "n_days": 94,
-    "budgets": {
-     "48": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 47.578947368421055,
-        "hits": 2,
-        "published_unit_roi": -0.5523377581120943
-       },
-       "greedy_market": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 47.666666666666664,
-        "hits": 2,
-        "published_unit_roi": -0.5531615752668384
-       },
-       "fixed_model": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       },
-       "fixed_market": {
-        "hit_rate": 0.0,
-        "mean_cost": 1.0,
-        "hits": 0,
-        "published_unit_roi": -1.0
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.0,
-      "delta_ci95": [
-       0.0,
-       0.0
-      ],
-      "delta_hit_vs_fixed_market": 0.011695906432748537
+   "144": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 143.6546762589928,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "144": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.05847953216374269,
-        "mean_cost": 141.41520467836258,
-        "hits": 10,
-        "published_unit_roi": -0.30661401042097414
-       },
-       "greedy_market": {
-        "hit_rate": 0.05263157894736842,
-        "mean_cost": 142.00584795321637,
-        "hits": 9,
-        "published_unit_roi": 0.3435745171519169
-       },
-       "fixed_model": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": -0.7350264985380117
-       },
-       "fixed_market": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.005847953216374269,
-      "delta_ci95": [
-       -0.01910828025477707,
-       0.029940119760479042
-      ],
-      "delta_hit_vs_fixed_market": 0.05263157894736842
+     "hit_opt": {
+      "hit_rate": 0.05755395683453238,
+      "mean_cost": 141.45323741007195,
+      "roi": -0.3390601159597193,
+      "roi_ci95": [
+       -0.8121693173456235,
+       0.22648356101343609
+      ]
      },
-     "432": {
-      "strategies": {
-       "optimizer_model": {
-        "hit_rate": 0.07602339181286549,
-        "mean_cost": 419.42105263157896,
-        "hits": 13,
-        "published_unit_roi": -0.46875029628700104
-       },
-       "greedy_market": {
-        "hit_rate": 0.07017543859649122,
-        "mean_cost": 419.02923976608184,
-        "hits": 12,
-        "published_unit_roi": -0.43796647779607567
-       },
-       "fixed_model": {
-        "hit_rate": 0.011695906432748537,
-        "mean_cost": 64.0,
-        "hits": 2,
-        "published_unit_roi": -0.7350264985380117
-       },
-       "fixed_market": {
-        "hit_rate": 0.005847953216374269,
-        "mean_cost": 64.0,
-        "hits": 1,
-        "published_unit_roi": -0.9318923611111111
-       }
-      },
-      "delta_hit_vs_greedy_market": 0.005847953216374269,
-      "delta_ci95": [
-       -0.023809523809523808,
-       0.036150054764512586
-      ],
-      "delta_hit_vs_fixed_market": 0.07017543859649122
+     "market": {
+      "hit_rate": 0.050359712230215826,
+      "mean_cost": 141.9640287769784,
+      "roi": 0.4622186185577459,
+      "roi_ci95": [
+       -0.8348006726321614,
+       2.4937568815528706
+      ]
+     },
+     "agf": {
+      "hit_rate": 0.04316546762589928,
+      "mean_cost": 141.27338129496403,
+      "roi": -0.4155721342363905,
+      "roi_ci95": [
+       -0.9188239693777273,
+       0.3451324722937556
+      ]
      }
     },
-    "coverage_by_k": {
-     "1": {
-      "p_cal": {
-       "predicted": 0.32398837264477703,
-       "actual": 0.297270955165692,
-       "fav_winner_cov": 0.3558926487747958,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.33143137833521785,
-       "actual": 0.297270955165692,
-       "fav_winner_cov": 0.3558926487747958,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
+    "delta_roi_ev_vs_market": -1.462218618557746,
+    "delta_roi_ci95": [
+     -3.4937568815528706,
+     -0.1651993273678387
+    ]
+   },
+   "432": {
+    "strategies": {
+     "ev": {
+      "hit_rate": 0.0,
+      "mean_cost": 422.3093525179856,
+      "roi": -1.0,
+      "roi_ci95": [
+       -1.0,
+       -1.0
+      ]
      },
-     "2": {
-      "p_cal": {
-       "predicted": 0.5271568950862905,
-       "actual": 0.4951267056530214,
-       "fav_winner_cov": 0.5927654609101517,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.5210647728150561,
-       "actual": 0.49415204678362573,
-       "fav_winner_cov": 0.5915985997666278,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
+     "hit_opt": {
+      "hit_rate": 0.07913669064748201,
+      "mean_cost": 418.705035971223,
+      "roi": -0.41014261168384875,
+      "roi_ci95": [
+       -0.8515371435335299,
+       0.21245819639640376
+      ]
      },
-     "3": {
-      "p_cal": {
-       "predicted": 0.6695276767795911,
-       "actual": 0.6471734892787524,
-       "fav_winner_cov": 0.7747957992998833,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.6517233548637229,
-       "actual": 0.6403508771929824,
-       "fav_winner_cov": 0.7666277712952159,
-       "longshot_winner_cov": 0.0,
-       "n_longshot_winners": 169
-      }
+     "market": {
+      "hit_rate": 0.07194244604316546,
+      "mean_cost": 419.7338129496403,
+      "roi": -0.3743912723034469,
+      "roi_ci95": [
+       -0.8589388245160341,
+       0.32055807410908566
+      ]
      },
-     "4": {
-      "p_cal": {
-       "predicted": 0.7650677180717672,
-       "actual": 0.7456140350877193,
-       "fav_winner_cov": 0.882147024504084,
-       "longshot_winner_cov": 0.05325443786982249,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.7473138267930156,
-       "actual": 0.753411306042885,
-       "fav_winner_cov": 0.8891481913652275,
-       "longshot_winner_cov": 0.0650887573964497,
-       "n_longshot_winners": 169
-      }
-     },
-     "5": {
-      "p_cal": {
-       "predicted": 0.8347611148787262,
-       "actual": 0.8255360623781677,
-       "fav_winner_cov": 0.9533255542590432,
-       "longshot_winner_cov": 0.17751479289940827,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.819227181759585,
-       "actual": 0.817738791423002,
-       "fav_winner_cov": 0.9474912485414235,
-       "longshot_winner_cov": 0.15976331360946747,
-       "n_longshot_winners": 169
-      }
-     },
-     "6": {
-      "p_cal": {
-       "predicted": 0.8867172791999071,
-       "actual": 0.8723196881091618,
-       "fav_winner_cov": 0.9848308051341891,
-       "longshot_winner_cov": 0.30177514792899407,
-       "n_longshot_winners": 169
-      },
-      "q": {
-       "predicted": 0.8732541787274377,
-       "actual": 0.8713450292397661,
-       "fav_winner_cov": 0.9848308051341891,
-       "longshot_winner_cov": 0.2958579881656805,
-       "n_longshot_winners": 169
-      }
+     "agf": {
+      "hit_rate": 0.07194244604316546,
+      "mean_cost": 418.23741007194246,
+      "roi": -0.015503569278403765,
+      "roi_ci95": [
+       -0.8229672838810346,
+       1.1820893883582173
+      ]
      }
     },
-    "cut_date": "2026-09-27",
-    "logloss_calibrated": 1.9219463913461974,
-    "logloss_raw": 1.9180879004401459
+    "delta_roi_ev_vs_market": -0.6256087276965532,
+    "delta_roi_ci95": [
+     -1.3205580741090857,
+     -0.141061175483966
+    ]
    }
-  }
+  },
+  "n_altili": 139,
+  "n_days": 75,
+  "stage": "dev",
+  "n_altili_total_with_payout": 483,
+  "payout_model_all": {
+   "a": -0.06560947498047832,
+   "b": -0.9649905345767121,
+   "r2": 0.9735751575333862,
+   "n": 483
+  },
+  "payout_quality_non_holdout": {
+   "fit_train": {
+    "a": 0.014847997602179827,
+    "b": -0.9594404547617305,
+    "r2": 0.9718362747523386,
+    "n": 232
+   },
+   "n_test": 100,
+   "oos_r2": 0.9783454374596967,
+   "mean_log_error": -0.026640029403254484,
+   "median_abs_pct_error": 0.18834831604509594
+  },
+  "trigger_300_met": false
  },
- "summary": "Holdout (51 altili, 24 gun): B48: model 0.000 vs market-greedy 0.000 d=+0.000 CI[+0.000,+0.000] ROI m/mk -1.00/-1.00 | B144: model 0.020 vs market-greedy 0.020 d=+0.000 CI[+0.000,+0.000] ROI m/mk -0.86/-0.63 | B432: model 0.118 vs market-greedy 0.098 d=+0.020 CI[-0.044,+0.087] ROI m/mk +0.02/-0.10. Optimizer ayni butcede piyasa-sirali baseline'i CI ile gecmedi => DO_NOT_PROMOTE."
+ "registry_counts": {
+  "used_old_holdout_dates": 24,
+  "dev_dates": 75,
+  "clean_holdout_dates": 19
+ },
+ "summary": "Temiz holdout (32 altili, 19 gun; >=300 tetikleyicisi KARSILANMADI => yetersiz guc): B48: EV roi -1.00 hit 0.000 | hit-opt +0.41 | piyasa +0.41 | AGF -1.00; dROI(EV-piyasa) -1.41 CI[-4.84,+0.00] || B144: EV roi -1.00 hit 0.000 | hit-opt -0.17 | piyasa -0.17 | AGF +0.41; dROI(EV-piyasa) -0.83 CI[-2.45,+0.00] || B432: EV roi -1.00 hit 0.000 | hit-opt -0.72 | piyasa -0.72 | AGF -0.53; dROI(EV-piyasa) -0.28 CI[-0.77,+0.00]. Ikramiye modeli log-log R2 0.97, b=-0.96."
 }

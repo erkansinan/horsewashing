@@ -172,6 +172,14 @@ def _data_recovery_status() -> dict[str, Any]:
         out["coupon"] = json.loads((root / "reports" / "coupon_protocol_latest.json").read_text(encoding="utf-8"))
     except Exception:
         pass
+    try:
+        out["backfill"] = json.loads((root / "data" / "raw" / "tjk_result_odds.backfill.progress.json").read_text(encoding="utf-8"))
+    except Exception:
+        out["backfill"] = None
+    try:
+        out["edge_v2"] = json.loads((root / "reports" / "edge_protocol_v2.json").read_text(encoding="utf-8"))
+    except Exception:
+        out["edge_v2"] = None
     return out
 
 
@@ -2435,6 +2443,7 @@ def create_app() -> FastAPI:
         request: Request,
         budget: int = Query(144, ge=1, le=5000),
         day: str = Query(""),
+        mode: str = Query("hit", pattern="^(hit|ev)$"),
     ) -> HTMLResponse:
         from atyaris.ml import coupon as coupon_mod
 
@@ -2443,14 +2452,15 @@ def create_app() -> FastAPI:
         error = ""
         try:
             result = coupon_mod.replay(
-                root / "data" / "cache", root / "data" / "raw" / "tjk_result_odds.jsonl", day or None, budget
+                root / "data" / "cache", root / "data" / "raw" / "tjk_result_odds.jsonl", day or None, budget,
+                model="C2", mode=mode,
             )
         except Exception as exc:  # noqa: BLE001
             error = f"Kupon onerisi uretilemedi (once kupon protokolunu calistirin): {exc}"
         return templates.TemplateResponse(
             request,
             "coupon.html",
-            {"result": result, "error": error, "budget": budget, "report": _data_recovery_status()["coupon"]},
+            {"result": result, "error": error, "budget": budget, "mode": mode, "report": _data_recovery_status()["coupon"]},
         )
 
     @app.get("/training", response_class=HTMLResponse)

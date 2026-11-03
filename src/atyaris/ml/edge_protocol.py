@@ -346,3 +346,62 @@ def run_protocol(features_csv: Path, cache_dir: Path, final: bool = False, names
 def save(results: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(results, indent=1, default=float), encoding="utf-8")
+
+
+# ------------------------------------------------------------- v2 (yeni veri)
+V2_CANDIDATES = ("C1_offset_cl", "C1_longshot5", "C1_trainer", "C2_gbm")
+
+
+def holdout_registry(df: pd.DataFrame, used_days: list[str], path: Path) -> dict:
+    """Eski kilitli holdout gunleri 'kullanilmis' sayilir; temiz holdout = kalan strict gunlerin son %20'si."""
+    used = {pd.Timestamp(d) for d in used_days}
+    days = sorted(df.loc[df["strict"], "date"].unique())
+    fresh = [d for d in days if d not in used]
+    cut = int(round(len(fresh) * (1 - HOLDOUT_FRACTION)))
+    reg = {
+        "used_old_holdout_days": sorted(str(d.date()) for d in used),
+        "overlap_with_new_holdout": sorted(str(d.date()) for d in fresh[cut:] if d in used),
+        "naive_last20_overlap_with_used": sum(1 for d in days[int(round(len(days) * 0.8)):] if d in used),
+        "naive_last20_days": len(days) - int(round(len(days) * 0.8)),
+        "dev_days": [str(d.date()) for d in fresh[:cut]],
+        "clean_holdout_days": [str(d.date()) for d in fresh[cut:]],
+    }
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(reg, indent=1), encoding="utf-8")
+    return reg
+
+
+def run_v2(features_csv: Path, cache_dir: Path, registry_path: Path, used_days: list[str]) -> dict:
+    df = prepare_frame(features_csv, cache_dir / "edge_frame.pkl")
+    reg = holdout_registry(df, used_days, registry_path)
+    dev = [pd.Timestamp(d) for d in reg["dev_days"]]
+    hold = [pd.Timestamp(d) for d in reg["clean_holdout_days"]]
+    cands = candidates(df)
+    frame_m = (cache_dir / "edge_frame.pkl").stat().st_mtime
+
+    def predict(name: str, days: list, tag: str) -> pd.DataFrame:
+        cp = cache_dir / f"edge_pred_{tag}_{name}.pkl"
+        if cp.exists() and cp.stat().st_mtime > frame_m:
+            return pickle.loads(cp.read_bytes())
+        pred = walk_forward(df, cands[name], days)
+        cp.write_bytes(pickle.dumps(pred))
+        return pred
+
+    out: dict = {"protocol": "edge-protocol-v2", "strict_races": int(df.loc[df["strict"], "race_id"].nunique()),
+                 "dev_days": len(dev), "holdout_days": len(hold),
+                 "overlap_with_old_holdout": len(reg["overlap_with_new_holdout"]), "dev": {}}
+    for name in V2_CANDIDATES:
+        pred = predict(name, dev, "dev2")
+        half = len(pred) // 2
+        out["dev"][name] = evaluate(pred, choose_tau(pred.iloc[:half]) if len(pred) else 0.1, n_comparisons=4)
+    best = min(out["dev"], key=lambda n: out["dev"][n].get("delta_logloss", 9))
+    pred = predict(best, hold, "hold2")
+    tau = choose_tau(predict(best, dev, "dev2"))
+    h = evaluate(pred, tau, n_comparisons=1)
+    out["selected"], out["holdout"] = best, h
+    ci = h.get("delta_ci95", [0, 0])
+    out["decision"] = "PROMOTE" if (ci[1] < 0 and h.get("flat_all", {}).get("roi", -1) > 0) else "DO_NOT_PROMOTE"
+    out["status"] = "established" if out["decision"] == "PROMOTE" else "not_established"
+    return out
