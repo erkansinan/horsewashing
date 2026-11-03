@@ -5,6 +5,8 @@ from collections import defaultdict
 from datetime import date
 import json
 import math
+import re
+import unicodedata
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -35,6 +37,28 @@ def _date(value: Any) -> date | None:
 def _number(value: Any) -> float | None:
     numeric = pd.to_numeric(value, errors="coerce")
     return float(numeric) if pd.notna(numeric) else None
+
+
+def _track_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Z]", "", text.upper())
+
+
+def _source_id_key(value: Any) -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    return str(int(numeric)) if pd.notna(numeric) else ""
+
+
+def _remember_closing_odds(
+    store: dict[tuple[str, str, str], float], item: dict[str, Any]
+) -> None:
+    """Final ganyan of a past race recorded in a horse's history (race date, track, horse)."""
+    race_date = _date(item.get("race_date"))
+    odds = _number(item.get("odds"))
+    source_id = _source_id_key(item.get("source_horse_id"))
+    if race_date is None or odds is None or odds <= 1.0 or not source_id:
+        return
+    store.setdefault((race_date.isoformat(), _track_key(item.get("hippodrome")), source_id), odds)
 
 
 def find_missing_local_targets(
@@ -114,12 +138,18 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
     legacy_history_by_horse: dict[
         str, dict[tuple[date, str], dict[str, Any]]
     ] = defaultdict(dict)
+    closing_odds: dict[tuple[str, str, str], float] = {}
+    past_performances_path = paths.raw_history_jsonl.with_name("tjk_past_performances.jsonl")
+    if past_performances_path.exists():
+        for item in _load_jsonl(past_performances_path):
+            _remember_closing_odds(closing_odds, item)
     if paths.raw_history_jsonl.exists():
         with paths.raw_history_jsonl.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
                     continue
                 item = json.loads(line)
+                _remember_closing_odds(closing_odds, item)
                 race_date = _date(item.get("race_date"))
                 if race_date is None:
                     continue
@@ -166,6 +196,10 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
         if trainer_id and _date(item.get("as_of_date")) is not None:
             trainers_by_id[trainer_id].append(item)
 
+    declared_field_size: dict[str, int] = defaultdict(int)
+    for program in programs:
+        declared_field_size[str(program.get("race_id"))] += 1
+
     rows: list[dict[str, Any]] = []
     for program in programs:
         target_date = _date(program.get("race_date") or program.get("date"))
@@ -192,6 +226,17 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             if item["finish_position"] is not None and item["finish_position"] > 0
         ]
         odds = _number(program.get("odds"))
+        odds_source = "program" if odds is not None and odds > 1.0 else "missing"
+        if odds_source == "missing":
+            recovered = closing_odds.get(
+                (
+                    target_date.isoformat(),
+                    _track_key(program.get("hippodrome")),
+                    _source_id_key(program.get("source_horse_id")),
+                )
+            )
+            if recovered is not None:
+                odds, odds_source = recovered, "history"
         market_probability = 1.0 / odds if odds is not None and odds > 1.0 else 0.1
         weight = _number(program.get("weight_kg")) or 0.0
         distance = _number(program.get("distance_m")) or 0.0
@@ -352,6 +397,8 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
             "age": age_value or 0.0,
             "handicap_points": handicap_value or 0.0,
             "odds": odds if pd.notna(odds) else 0.0,
+            "odds_source": odds_source,
+            "field_size_local": float(declared_field_size.get(race_id, 0)),
             "market_probability": market_probability,
             "finish_position": int(float(finish)),
             "is_winner": int(float(finish) == 1),
@@ -442,4 +489,9 @@ def build_local_raw_frame(paths) -> pd.DataFrame:  # type: ignore[no-untyped-def
         for column in TJK_STAGE1_FEATURE_COLUMNS:
             row.setdefault(column, 0.0)
         rows.append(row)
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame["market_complete"] = (
+            frame["odds_source"].ne("missing").groupby(frame["race_id"]).transform("all").astype(float)
+        )
+    return frame
