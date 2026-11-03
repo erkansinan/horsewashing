@@ -1,0 +1,154 @@
+{
+ "protocol": "edge-protocol-v1",
+ "stage": "holdout",
+ "dev_days": 165,
+ "holdout_days": 41,
+ "pool_races": 2495,
+ "strict_races": 932,
+ "models": {
+  "C2_gbm": {
+   "n_races": 128,
+   "n_days": 41,
+   "logloss_model": 1.9000229986298036,
+   "logloss_market": 1.8874235402919,
+   "delta_logloss": 0.012599458337903477,
+   "delta_ci95": [
+    -0.002411014461368488,
+    0.029107293843483904
+   ],
+   "delta_ci_bonferroni": [
+    -0.008642859326321048,
+    0.03314663596960709
+   ],
+   "longshot": {
+    "n_runners": 711,
+    "n_winners": 19,
+    "market_mean_p": 0.03204881351981482,
+    "model_mean_p": 0.0314119696153352,
+    "actual_rate": 0.026722925457102673
+   },
+   "calibration": {
+    "<4": {
+     "n": 236,
+     "actual": 0.2584745762711864,
+     "model": 0.26415728238185604,
+     "market": 0.26512296283566256
+    },
+    "4-10": {
+     "n": 413,
+     "actual": 0.1162227602905569,
+     "model": 0.10490307738832604,
+     "market": 0.1032549015936932
+    },
+    "10-25": {
+     "n": 398,
+     "actual": 0.04020100502512563,
+     "model": 0.04372360223218527,
+     "market": 0.044031856270197914
+    },
+    "25+": {
+     "n": 313,
+     "actual": 0.009584664536741214,
+     "model": 0.015756922390075357,
+     "market": 0.016811589830829303
+    }
+   },
+   "tau": 0.1,
+   "flat_all": {
+    "n_bets": 7,
+    "roi": -1.0,
+    "roi_ci95": [
+     -1.0,
+     -1.0
+    ],
+    "roi_ci_bonferroni": [
+     -1.0,
+     -1.0
+    ],
+    "kelly_roi": -1.0
+   },
+   "flat_longshot": {
+    "n_bets": 7,
+    "roi": -1.0,
+    "roi_ci95": [
+     -1.0,
+     -1.0
+    ],
+    "roi_ci_bonferroni": [
+     -1.0,
+     -1.0
+    ],
+    "kelly_roi": -1.0
+   },
+   "market_roi_same_selections": -0.34036522110128786,
+   "top4_precision": {
+    "all": 0.61328125,
+    "favorite(<10)": 0.6202020202020202,
+    "longshot(>=10)": 0.4117647058823529
+   }
+  },
+  "M0_market": {
+   "n_races": 128,
+   "n_days": 41,
+   "logloss_model": 1.8874235402919,
+   "logloss_market": 1.8874235402919,
+   "delta_logloss": 0.0,
+   "delta_ci95": [
+    0.0,
+    0.0
+   ],
+   "delta_ci_bonferroni": [
+    0.0,
+    0.0
+   ],
+   "longshot": {
+    "n_runners": 711,
+    "n_winners": 19,
+    "market_mean_p": 0.03204881351981482,
+    "model_mean_p": 0.03204881351981482,
+    "actual_rate": 0.026722925457102673
+   },
+   "calibration": {
+    "<4": {
+     "n": 236,
+     "actual": 0.2584745762711864,
+     "model": 0.26512296283566256,
+     "market": 0.26512296283566256
+    },
+    "4-10": {
+     "n": 413,
+     "actual": 0.1162227602905569,
+     "model": 0.1032549015936932,
+     "market": 0.1032549015936932
+    },
+    "10-25": {
+     "n": 398,
+     "actual": 0.04020100502512563,
+     "model": 0.044031856270197914,
+     "market": 0.044031856270197914
+    },
+    "25+": {
+     "n": 313,
+     "actual": 0.009584664536741214,
+     "model": 0.016811589830829303,
+     "market": 0.016811589830829303
+    }
+   },
+   "tau": 0.1,
+   "flat_all": {
+    "n_bets": 0
+   },
+   "flat_longshot": {
+    "n_bets": 0
+   },
+   "market_roi_same_selections": null,
+   "top4_precision": {
+    "all": 0.62109375,
+    "favorite(<10)": 0.625,
+    "longshot(>=10)": 0.5
+   }
+  }
+ },
+ "decision": "DO_NOT_PROMOTE",
+ "selected": "C2_gbm"
+}

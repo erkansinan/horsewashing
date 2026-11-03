@@ -138,6 +138,27 @@ _TR_ASCII_MAP = str.maketrans(
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+_EDGE_REPORT_PATH = Path(__file__).resolve().parents[3] / "reports" / "edge_protocol_latest.json"
+
+
+def _edge_protocol_status() -> dict[str, Any]:
+    """Kilitli holdout kanit sonucunu okur; sonuc yoksa/PROMOTE degilse 'kanitlanmis ustunluk yok' gosterilir."""
+    try:
+        data = json.loads(_EDGE_REPORT_PATH.read_text(encoding="utf-8"))
+        model = data["models"][data["selected"]]
+        return {
+            "proven": data.get("decision") == "PROMOTE",
+            "decision": data.get("decision"),
+            "selected": data.get("selected"),
+            "races": model.get("n_races"),
+            "delta_logloss": model.get("delta_logloss"),
+            "ci_low": model["delta_ci95"][0],
+            "ci_high": model["delta_ci95"][1],
+        }
+    except Exception:
+        return {"proven": False, "decision": None}
+
+
 _TRAINING_LOCK = RLock()
 _TRAINING_MANIFEST_LOCK = RLock()
 _TRAINING_JOBS: dict[str, dict[str, object]] = {}
@@ -2076,6 +2097,7 @@ def create_app() -> FastAPI:
     _restore_collection_jobs()
     app = FastAPI(title="Turkiye At Yarisi Tahmin Araci", docs_url="/api/docs")
     templates.env.globals["active_training_job_id"] = _active_training_job_id
+    templates.env.globals["edge_protocol_status"] = _edge_protocol_status
 
     @app.get("/collect", response_class=RedirectResponse)
     def start_collection(

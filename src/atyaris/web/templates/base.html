@@ -51,6 +51,14 @@
     <h1><a href="/" style="color:inherit; text-decoration:none;">Ana sayfa</a></h1>
     <a class="button" href="/training">ML Eğitim</a>
   </nav>
+  {% set edge = edge_protocol_status() %}
+  {% if not edge.proven %}
+  <div role="status" style="background:#fff3cd;color:#664d03;padding:8px 16px;border-bottom:1px solid #ffe69c;font-size:.9rem">
+    <strong>Kanıtlanmış üstünlük yok:</strong> model piyasa oranlarını istatistiksel olarak geçemedi
+    {% if edge.decision %}(kilitli holdout: {{ edge.decision }}, {{ edge.races }} yarış, Δ log-loss {{ '%.4f'|format(edge.delta_logloss) }}, %95 GA [{{ '%.4f'|format(edge.ci_low) }}, {{ '%.4f'|format(edge.ci_high) }}]){% else %}(protokol sonucu yok){% endif %}.
+    Tahminler bilgilendirme amaçlıdır.
+  </div>
+  {% endif %}
   <main id="main-content">
   {% block content %}{% endblock %}
   </main>

@@ -456,3 +456,24 @@ artifact degildir. Kullanici onayiyla aday daha sonra aktif
 SHA-256 degeri artik `99c5c5adac8cdf390ec849313a49d5ed615394ea2468b2b3e727604e2ed8c6fc`;
 health `passed: true` ve 10/10 kontrol gecti. Onceki aktif model ile health
 dosyasinin geri donus kopyalari session dosyalarinda saklandi.
+
+## Edge protokolu (edge-protocol-v1) - eski tum sonuclar gecersiz
+
+Evren: tum kosucularda kapanis ganyani olan "strict" yarislar (932 yaris, cogu Mar-Agu).
+Egitim havuzu: >=%80 oran kapsami (2495 yaris; eksik oranlar takeout ile normalize edilip doldurulur).
+Kilitli holdout: strict gunlerin son %20'si (41 gun, 1 kez kullanildi). Gelistirme: expanding walk-forward, 14 gunde bir yeniden egitim, 45 gun isinma.
+Metrikler: yaris log-loss farki (negatif = model iyi), gun-cluster bootstrap 1000 it. (%95 + Bonferroni m=6), flat/ceyrek-Kelly ROI, odds-bucket kalibrasyon, top-4 precision.
+Kod: `src/atyaris/ml/edge_protocol.py`; sonuc: `reports/edge_protocol_dev.json`, `reports/edge_protocol_latest.json`.
+
+| Aday (dev, 572 yaris) | Δ log-loss | %95 CI | bahis / ROI |
+|---|---|---|---|
+| M0 piyasa | 0 | - | - |
+| C0 serbest logq CL | +0.0101 | [0.0004, 0.0209] | 9 / -100% |
+| C1 piyasa-offset CL | +0.0055 | [-0.0011, 0.0119] | 0 |
+| C1 weight'siz | +0.0060 | [0.0000, 0.0121] | 0 |
+| C1 +5 longshot | +0.0043 | [-0.0013, 0.0100] | 0 |
+| C1 +antrenor | +0.0085 | [-0.0023, 0.0209] | 23 / -32% |
+| C2 GBM (piyasa logit) | +0.0002 | [-0.0053, 0.0064] | 25 / -100% |
+
+Karar: hicbir aday piyasayi gecmedi; en iyi C2 holdout'ta Δ +0.0126, CI [-0.0024, 0.0291], 7 bahis ROI -100% => **DO_NOT_PROMOTE**. Canonical artifact degismedi; web'de kalici "Kanitlanmis ustunluk yok" bandi gosterilir (health-fail artifact yine servis edilmez).
+Yeniden test tetikleyicisi: strict yaris sayisi >=2500 (ozellikle Eylul/Ekim kapanis oranlari geri kazanilinca) veya yeni anlamli feature eklendiginde.
